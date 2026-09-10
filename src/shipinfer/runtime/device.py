@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
+import os
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 
 from shipinfer.core.errors import ConfigurationError, DeviceError
@@ -21,9 +24,21 @@ from shipinfer.runtime.platform import (
     require_torch,
 )
 
-__all__ = ["DeviceManager", "bind_thread", "current_device"]
+__all__ = [
+    "BLOCKING_SYNC_ENV",
+    "DeviceManager",
+    "bind_thread",
+    "blocking_sync_requested",
+    "current_device",
+    "prefer_blocking_sync",
+]
 
 _LOG = get_logger("runtime.device")
+
+#: `cudaDeviceScheduleBlockingSync` from `cuda_runtime_api.h`. A literal because this reaches
+#: libcudart through `ctypes`, which has no header to read it from; the C++ plane uses the
+#: symbol (`core/platform.h`) and a test ties the two so they cannot drift.
+_CUDA_DEVICE_SCHEDULE_BLOCKING_SYNC = 0x04
 
 #: Which device each worker thread is bound to. Used to *assert* the invariant "one thread,
 #: one context, one GPU" rather than trusting it (ADR-002).
@@ -41,6 +56,17 @@ class DeviceManager:
     def __init__(self, settings: DeviceSettings | None = None) -> None:
         self._settings = settings or DeviceSettings()
         self._visible: tuple[int, ...] = self._resolve_visible()
+        # doc: long why the knob is applied HERE and nowhere later
+        # HERE, and this is the last point at which it can work: `_resolve_visible` calls
+        # `device_count()`, which takes no context, and `_validate` below calls
+        # `memory_info(index)` for every visible device -- `cudaMemGetInfo` under a device
+        # guard, which INITIALISES that device's primary context. The driver refuses
+        # `cudaSetDeviceFlags` once a context exists, so a call from anywhere further out
+        # (`InferenceServer.start`, an instance's `start`) is a no-op that warns 216 per
+        # device and leaves the threads spinning -- measured, and the reason this moved.
+        if blocking_sync_requested():
+            applied = prefer_blocking_sync(self._visible)
+            _LOG.info("blocking synchronise on device(s) %s", list(applied) or "none")
         if self._settings.validate_on_start:
             self._validate()
 
@@ -215,3 +241,108 @@ def bind_thread(device: Device) -> None:
     if device.is_cuda:
         require_torch().cuda.set_device(device.index)
     _THREAD_DEVICE.device = device
+
+
+#: The knob both planes read. `csrc/shipinfer/core/env.h` has the same three rules, and the
+#: reason for the third is `docker run -e VAR`: an unset host variable is forwarded as EMPTY,
+#: so empty has to mean "not asked for" or every container run flips a scheduling flag.
+BLOCKING_SYNC_ENV = "SHIPINFER_CUDA_BLOCKING_SYNC"
+
+
+def blocking_sync_requested(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether the operator asked for a blocking synchronise: set, non-empty, and not ``0``."""
+    value = (os.environ if environ is None else environ).get(BLOCKING_SYNC_ENV)
+    return value is not None and value != "" and value != "0"
+
+
+# doc: long the flag, the ctypes route, and what the C++ plane measured
+def prefer_blocking_sync(devices: Iterable[int]) -> tuple[int, ...]:
+    """Ask each device's synchronise to BLOCK rather than spin. Before its first CUDA call.
+
+    CUDA's default is `cudaDeviceScheduleAuto`, which spins when the active contexts do not
+    outnumber the logical processors. The C++ plane measured what that costs at the design
+    load (`THE-INSTANCE-THREADS-SPIN-ON-cudaStreamSynchronize`): the model-instance threads'
+    host CPU HALVED, total host CPU fell 24%, the pipeline workers got 32% more because the
+    spin had been starving them, and events rose ~15%. This plane's instance threads wait in
+    the same place, so they owe the same knob.
+
+    `ctypes` into libcudart because torch exposes no wrapper -- with the prototypes DECLARED,
+    since an undeclared call truncates a pointer-sized handle and segfaults, which no
+    `try/except` can catch. Best effort otherwise: a diagnostic knob must not be able to stop
+    a server, so a device that refuses (it already has a context: `cudaErrorSetOnActiveProcess`
+    = 216) is skipped and reported rather than raised.
+
+    Returns:
+        The devices the flag was actually applied to, in order.
+    """
+    wanted = list(devices)
+    if not wanted:
+        return ()  # a CPU-only host must not dlopen the driver's runtime to learn that
+    # doc: long the three names, and which images each one is there for
+    # `find_library` first, then the SONAME, then the dev symlink -- the same shape
+    # `core/thread_name.py` uses for libc, for the same reason: the name on the developer's
+    # box is not the name where the measurement is taken. MEASURED in the three images this
+    # repository runs: `shipinfer-gst:jammy` and `:jammy-nvdec` (where every benchmark runs)
+    # resolve `cudart` to `libcudart.so.12` and load all three names, while
+    # `pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime` (the offline TEST image) has none of
+    # them on the loader path -- torch keeps its own under `torch/lib/`. That image runs no
+    # GPU benchmark, so the warning below is the right outcome there rather than a failure.
+    candidates = [ctypes.util.find_library("cudart"), "libcudart.so.12", "libcudart.so"]
+    libcudart = None
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            libcudart = ctypes.CDLL(candidate)
+            break
+        except OSError:
+            continue
+    if libcudart is None:
+        _LOG.warning(
+            "%s asked for, but libcudart is not loadable here (tried %s)",
+            BLOCKING_SYNC_ENV,
+            [name for name in candidates if name],
+        )
+        return ()
+    try:
+        libcudart.cudaSetDevice.restype = ctypes.c_int
+        libcudart.cudaSetDevice.argtypes = [ctypes.c_int]
+        libcudart.cudaSetDeviceFlags.restype = ctypes.c_int
+        libcudart.cudaSetDeviceFlags.argtypes = [ctypes.c_uint]
+        libcudart.cudaGetDevice.restype = ctypes.c_int
+        libcudart.cudaGetDevice.argtypes = [ctypes.POINTER(ctypes.c_int)]
+    except AttributeError:  # pragma: no cover - a libcudart without the symbols
+        _LOG.warning("%s asked for, but libcudart has no cudaSetDeviceFlags", BLOCKING_SYNC_ENV)
+        return ()
+
+    # doc: long why the current device is put back, and what it costs not to
+    # THE CURRENT DEVICE IS RESTORED, because this walks every visible one and nothing else
+    # here leaves the caller's device changed: `bind_current_thread` is a deliberate
+    # once-per-worker act, `activate()` restores in a `finally`, and the custom allocator
+    # re-sets per allocation. Leaving it on the LAST device would give the flag-on arm of a
+    # pairwise run a second difference nobody asked for -- `torch.cuda.synchronize()` with no
+    # argument waits on the current device, which `benchmarks/harness/shipinfer.py` and
+    # `benchmarks/kernels.py` both call, the latter with a comment asserting it means cuda:0.
+    # An A/B whose arms differ in two ways measures neither.
+    previous = ctypes.c_int(-1)
+    libcudart.cudaGetDevice(ctypes.byref(previous))
+    applied: list[int] = []
+    try:
+        for index in wanted:
+            if libcudart.cudaSetDevice(index) != 0:
+                continue
+            status = libcudart.cudaSetDeviceFlags(_CUDA_DEVICE_SCHEDULE_BLOCKING_SYNC)
+            if status == 0:
+                applied.append(index)
+            else:
+                _LOG.warning(
+                    "device %d already has a context, so its synchronise keeps spinning "
+                    "(cudaSetDeviceFlags returned %d); ask for %s before the first CUDA call",
+                    index,
+                    status,
+                    BLOCKING_SYNC_ENV,
+                )
+    finally:
+        if previous.value >= 0:
+            libcudart.cudaSetDevice(previous.value)
+    return tuple(applied)
