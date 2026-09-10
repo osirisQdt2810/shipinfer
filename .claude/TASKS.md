@@ -3476,7 +3476,34 @@ hook down, for when the operator asked to see something before it is executed.
           accesses holding the mutex, and a 40-line control program in the same
           `condition_variable::wait_for` shape reproduces them, so they are the toolchain's
           modelling rather than this code.
-        * **3b -- OPEN AS #219 (`feat/cross-camera-global-ids`, 1 commit, 9 files,
+        * **3c-i -- OPEN AS #220 (`feat/the-cross-camera-seam`, 1 commit, 15 files):** the
+          `ClusterTracker` seam and the `ObservationGate` in front of it, both lane-free, plus
+          `--kind gate` (four lines, because #219 collapsed the emitter's five-way duplication
+          into one `_emit`). Four red probes: the gate's height-then-age order and its
+          replaced-not-pruned hit map each fail both gates, the seam's (impl, slot) cache key
+          fails its unit gate, and the identity pre-pass below fails three checks when moved
+          back after the writes. ALSO CARRIES #219's FOUR APPROVAL FOLLOW-UPS, because it is
+          the next PR in the same package: `assign` is exception-safe for one instant now
+          (`check_embeddings` refuses empty, all-zero and mixed-width embeddings BEFORE
+          `++step_`, and remembers the width across instants, so a second embedder is caught
+          there rather than inside a `similarity` that has already assigned two groups); the
+          header carries the caveat that the one-track-per-camera half of its invariant is
+          reachable and silent; the raw-pointer stability argument is written at the line it
+          protects; and the feature-log count is right.
+        * **3b -- MERGED as #219 (10 Sep), APPROVE on round 3 after two BLOCKING rounds.**
+          Round 1: the reviewer found a contested-cluster defect and called it the port's --
+          it is the REFERENCE's, measured on both planes, and is now
+          `MTMC-ONE-CAMERA-TWICE-IN-A-CONTESTED-CLUSTER` with the pin that keeps it loud.
+          Round 2 was the sharper one: FOUR rules the port claimed had no discriminating
+          test, found by mutating one decision at a time -- `select_by_oldest` was
+          indistinguishable from `return candidates.front()` because every scenario let
+          "oldest confirmed" and "lowest id" coincide, and the same for the `matched`
+          exclusion, the identity bound's eviction ORDER and the `max_age` boundary. Five
+          scenarios later each mutation fails the parity gate, and chasing the last
+          non-blocker found a real divergence: the reference REFUSES an all-zero embedding
+          and this port scored it 0 -- a divergence in a refusal, which no golden can catch
+          because the emitter cannot render a scenario the reference raises on.
+          ORIGINAL (3b, as opened as #219 (`feat/cross-camera-global-ids`, 1 commit, 9 files,
           +1583/-54), automerge on.** Built from paths onto the current main rather than by
           replaying wtbar's commits, so #217's reviewed barrier is untouched. AND IT FOUND A
           HOLE IN ITS OWN COVERAGE: the tie-break (largest cluster first, ties by FIRST
