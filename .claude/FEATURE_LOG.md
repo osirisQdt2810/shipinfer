@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-10 — the blocking-sync knob becomes the default, on two loads
+
+Its own comment said "off by default ... at a fifth of the load the trade goes the other way" --
+reasoning, never measured, and the only argument left. AT THE DESIGN LOAD: host CPU -40%, rows
++25%, rows per host CPU-second 3.41x -> 7.17x over nine runs, latency down 10-25% at
+p50/p95/p99. AT A FIFTH (50 cameras x 4 fps, off/on twice, ZERO drops in every arm): host CPU
+-44%/-55%, p50 and p95 flat within noise, p99 **-72%/-70%**, max -57%/-56%. The spin's cost at
+light load is not a per-synchronise wake-up but occasional long stalls, so the caveat is
+falsified rather than confirmed. `env_flag_unless_refused` is a SECOND reading of the variable
+and not `!env_flag`: empty means "not asked" and so the default, because `docker run -e VAR`
+forwards an unset host variable as empty and the negation would disable a default-on knob on
+every containerised run. UNMEASURED: a fiftieth of the load, one camera on one GPU.
+
+---
+
 ## 2026-09-10 — the C++ bench reports a latency, for the first time
 
 `cli/bench` printed 18 counters and no latency, while the sizing section says the bottleneck is

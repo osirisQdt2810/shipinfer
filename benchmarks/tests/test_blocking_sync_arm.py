@@ -46,16 +46,24 @@ class TestTheArmSaysWhatItIs:
         with pytest.raises(RuntimeError, match="flag-off arm under another name"):
             _announce_blocking_sync(_Server())
 
-    def test_it_is_silent_and_permissive_when_the_knob_is_unset(
-        self, monkeypatch, capsys
-    ) -> None:
-        """The default arm must not print a line the baseline has no counterpart for, and must
-        not care that no device took a flag nobody asked for."""
-        monkeypatch.delenv(BLOCKING_SYNC_ENV, raising=False)
+    def test_it_is_silent_and_permissive_only_when_refused(self, monkeypatch, capsys) -> None:
+        """A REFUSED arm prints nothing and does not care that no device took the flag. The
+        default arm is no longer that arm: since the two-load measurement the knob is on unless
+        refused, so an unset variable announces and is held to the same proof."""
+        monkeypatch.setenv(BLOCKING_SYNC_ENV, "0")
 
         _announce_blocking_sync(_Server())
 
         assert capsys.readouterr().out == ""
+
+    def test_an_unset_variable_is_the_default_arm_and_still_announces(
+        self, monkeypatch, capsys
+    ) -> None:
+        monkeypatch.delenv(BLOCKING_SYNC_ENV, raising=False)
+
+        _announce_blocking_sync(_Server(_Devices((0,))))
+
+        assert "blocking synchronise on device(s) [0]" in capsys.readouterr().out
 
 
 class TestItIsWiredIntoTheRunAndNotOnlyDefined:

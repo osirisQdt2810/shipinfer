@@ -21,4 +21,15 @@ namespace shipinfer {
         const char* value = std::getenv(std::string(name).c_str());
         return value != nullptr && *value != '\0' && std::string_view(value) != "0";
     }
+
+    /// The same reading for a knob that is ON unless refused: only ``0`` turns it off.
+    ///
+    /// Empty still means "not asked", so it takes the default rather than the refusal --
+    /// which for a default-on knob is ON. That is the whole reason this is a second function
+    /// and not `!env_flag`: `!env_flag` would read a container's empty pass-through as OFF and
+    /// silently disable the knob on every containerised run.
+    inline bool env_flag_unless_refused(std::string_view name) {
+        const char* value = std::getenv(std::string(name).c_str());
+        return value == nullptr || *value == '\0' || std::string_view(value) != "0";
+    }
 }  // namespace shipinfer

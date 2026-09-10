@@ -56,7 +56,7 @@ one row — so the counter is counting rows and not re-reporting requests.
 | frames end to end | **0.60×** | The softest. A CPU-bound stage moves it, and both runs were on a box at 25/48 cores. |
 | pixels into a model | **1.87×** | An **area** proxy, not work: it treats a 640×640 detector row and a 256×128 crop as 12.5:1 and ignores that their FLOPs per pixel differ too. |
 | rows into a model | **7.22×** | Counts a crop and a frame alike, and 12.7 of our rows per request are crops. |
-| rows per host CPU-second | **~3.4× default, 7.2× with the knob** | The only one with a **like-for-like denominator** — the same kernel counter on both arms. A **floor** (see below). The two figures are one env var apart, from a later sitting whose control reproduces the 3.94× the section below derives — see *The one knob that moves it*. |
+| rows per host CPU-second | **7.2× as shipped** (3.4× with `SHIPINFER_CUDA_BLOCKING_SYNC=0`) | The only one with a **like-for-like denominator** — the same kernel counter on both arms. A **floor** (see below). The knob became the default on 10 Sep on evidence at two loads; the two figures are one env var apart, and the control of that sitting reproduces the 3.94× the section below derives — see *The one knob that moves it*. |
 
 Corroborated on a second five-GPU set: 7.7× rows and 2.03× pixels on GPUs 2/3/6. Same
 ordering, same conclusion, so the spread between the weightings is a property of the workload
@@ -88,11 +88,13 @@ GPUs, which is where the 313.6-against-82.5 rows-per-CPU-second figure comes fro
 
 ## The one knob that moves it, and it roughly doubles the ratio
 
-`SHIPINFER_CUDA_BLOCKING_SYNC=1` asks the driver for `cudaDeviceScheduleBlockingSync` instead
-of the `cudaDeviceScheduleAuto` default, which **spins** while a synchronise waits when the
-number of contexts is at or below the core count. It is **off by default**. Nine runs, three
-passes, arm order rotated between passes so a drift inside a pass cannot look like the knob —
-50 cameras × 20 fps × 40 s, `--source nvdec`, GPUs 1/3/4/5/6, all nine `exit=0`:
+`cudaDeviceScheduleBlockingSync` instead of CUDA's `cudaDeviceScheduleAuto`, which **spins**
+while a synchronise waits when the number of contexts is at or below the core count. It is
+**on by default** since 10 Sep; `SHIPINFER_CUDA_BLOCKING_SYNC=0` refuses it, and an empty value
+is not a refusal because that is what `docker run -e VAR` passes when the host has it unset.
+Nine runs, three passes, arm order rotated between passes so a drift inside a pass cannot look
+like the knob — 50 cameras × 20 fps × 40 s, `--source nvdec`, GPUs 1/3/4/5/6, all nine
+`exit=0`:
 
 | pass | baseline | ours, knob off | ours, knob on | off ratio | on ratio | the knob |
 |---|---|---|---|---|---|---|
@@ -115,12 +117,26 @@ its accepted frames 4% (22 753–23 745) against 51% (13 691–23 264). A spinni
 whatever contention there is to lose, so the default arm is partly a measurement of the box's
 other tenants while the knob-on arm is a measurement of the work.
 
-**The latency half of the trade does not appear — and one pass inverts, which is how it has to
-be said.** `cli/bench` prints no percentiles, but it counts `collector_timeouts`, a stage that
-did not answer in time: 67/148/26 with the knob off against 10/76/72 with it on. Lower on
-average, and pass c goes the other way, so at n=3 this supports "no evidence of a penalty",
-not "the latency improves". What is unambiguous is shedding: **every** knob-on arm drops fewer
-frames than its own pass's knob-off arm.
+**The latency half of the trade does not appear at either load, and it is measured now rather
+than proxied.** `cli/bench` reports `frame_us_*` and `reassembly_us_*` since #210–#213. Two
+interleaved pairs at the design load put p50 −10.2%/−12.2%, p95 −14.9%/−13.5% and p99
+−12.6%/−25.4% **with the knob on**. And at **a fifth of the design load** — the regime the
+code's own comment used to say would reverse the trade — 50 cameras × 4 fps, off/on twice,
+zero drops in every arm:
+
+| | pair 1 | pair 2 |
+|---|---|---|
+| host CPU | −44.4% | −55.4% |
+| frame p50 | −3.5% | +1.9% |
+| frame p95 | +4.0% | −9.6% |
+| frame p99 | **−72.2%** | **−70.2%** |
+| frame max | −57.5% | −55.5% |
+
+p50 and p95 flat within noise while the p99 falls ~70%: the spin's cost at light load is not a
+per-synchronise wake-up but **occasional long stalls** — p99 420–500 ms and max 840–910 ms with
+it, 125–139 ms and 374–387 ms without. That is what flipped the default. **Still unmeasured:** a
+fiftieth of the load, one camera on one GPU, where a nearly idle device could make the wake-up
+dominate.
 
 ## Method, because one run decides nothing here
 
@@ -177,13 +193,12 @@ ratio measured the same way on both arms, because a resource ratio is what "5×"
 and because it is a floor that errs in the baseline's favour. It is deliberately not the 7.22×
 rows figure, which clears the target by counting a 256×128 crop as one 640×640 frame.
 
-On that ratio the answer now depends on one env var: **~3.4× as shipped, so NOT MET at the
-default; 7.17× with `SHIPINFER_CUDA_BLOCKING_SYNC=1`, which clears it.** Both are measured, in
-one sitting, with the control reproducing the previous one. Whether the knob should be the
-default is a separate decision and not this page's to make: what argues for it is −40% host
-CPU, +25% rows, fewer drops in every pass and no visible latency cost; what argues against is
-that `cli/bench` reports no latency percentiles, so the cost the knob is documented to trade
-for has never been measured directly — only its proxy.
+On that ratio the answer is now **7.17× as shipped, which clears the target** — and 3.4× with
+`SHIPINFER_CUDA_BLOCKING_SYNC=0`, which is what every measurement before 10 Sep was taken
+under. Both are measured in one sitting, with the control reproducing the previous one. The
+argument that used to hold the default back — that `cli/bench` reported no latency, so the cost
+the knob trades for was only ever proxied — is gone: it reports two windows now, and they fall
+at every rank at the design load and at the tail at a fifth of it.
 
 The headroom is our own host cost: 3.19 ms of CPU per row while our arm was host-bound and the
 baseline was saturated. `.claude/TASKS.md` holds the accounting under

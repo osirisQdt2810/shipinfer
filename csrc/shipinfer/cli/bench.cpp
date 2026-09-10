@@ -354,18 +354,26 @@ int main(int argc, char** argv) {
                 "Rewrite it with `python -m shipinfer plan`");
         }
         const std::vector<BenchModel> specs = bench_models(plan, engines_of(options));
-        // doc: long the flag, why it is off by default, and what the measurement was
+        // doc: long the flag, why it is ON by default, and the two loads that decided it
         // BEFORE any engine, because the driver refuses this once a device has a context.
         //
         // CUDA's default is `cudaDeviceScheduleAuto`, which spins when the active contexts do
         // not outnumber the logical processors -- this box, at five devices and 48 cores. With
-        // it blocking instead, MEASURED over two interleaved pairs at the design load: the
-        // model-instance threads' host CPU HALVES (632 -> 279 CPU-s), the pipeline workers get
-        // 32% more because the spin was starving them, and events rise ~15%.
+        // it blocking instead, MEASURED over interleaved pairs at the design load:
+        // model-instance host CPU HALVES (632 -> 279 CPU-s), the pipeline workers get 32% more
+        // because the spin was starving them, events rise ~15%, and rows per host CPU-second
+        // goes 3.41x -> 7.17x against the baseline over nine runs.
         //
-        // OFF BY DEFAULT because it trades wake-up latency for host CPU, and the host is only
-        // the wall at this load -- at a fifth of it the trade goes the other way.
-        if (env_flag("SHIPINFER_CUDA_BLOCKING_SYNC")) {
+        // ON BY DEFAULT, and this comment used to say the opposite: it claimed the knob traded
+        // wake-up latency for host CPU and that "at a fifth of the load the trade goes the
+        // other way". MEASURED at a fifth (50 cameras x 4 fps, off/on twice, zero drops in
+        // every arm): host CPU -44%/-55%, p50 and p95 FLAT within noise, and p99 -72%/-70%
+        // with the max -57%/-56%. The spin's cost at light load is not a per-synchronise
+        // wake-up, it is occasional long stalls. `=0` refuses it; empty is not a refusal,
+        // because that is what `docker run -e VAR` passes when VAR is unset on the host.
+        // UNMEASURED: a fiftieth of the load, one camera on one GPU, where a nearly idle
+        // device could make the wake-up dominate.
+        if (env_flag_unless_refused("SHIPINFER_CUDA_BLOCKING_SYNC")) {
             // The device goes back where it was: harmless HERE, since nothing below has
             // chosen one yet, and not harmless the day this moves. That is #203 round 3 on
             // the Python plane -- an unrestored device made an argument-less
@@ -931,10 +939,10 @@ int main(int argc, char** argv) {
         // at capture, so it is the one a deployment is judged on.
         report_window("reassembly_us", latency_lock, latency_us);
         report_window("frame_us", latency_lock, frame_us);
-        // IN THE OUTPUT, not only in a comment: `captured_ns` is stamped on every source path
-        // there is, so a frame window with fewer samples than the reassembly one means some
-        // source stopped stamping -- and a reader comparing the two figures has to know that
-        // the second describes a subset.
+        // IN THE OUTPUT, not only in a comment: a frame window with fewer samples than the
+        // reassembly one means the second describes a SUBSET, and a reader comparing the two
+        // has to know. Two causes, not one: a source that stopped stamping `captured_ns`, or
+        // an event whose build threw -- `events_unwritable` below separates them.
         {
             const std::lock_guard<std::mutex> held(latency_lock);
             if (frame_us.size() < latency_us.size()) {
