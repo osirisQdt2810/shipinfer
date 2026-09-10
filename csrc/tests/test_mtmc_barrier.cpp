@@ -552,6 +552,90 @@ namespace {
     // ------------------------------------------------------------------ retirement and
     // shutdown
 
+    void dropping_a_camera_with_nobody_waiting_leaves_the_bucket_alone() {
+        // doc: long what actually distinguishes the two behaviours, and what does not
+        // The Python test this port had missed (`test_barrier.py`'s own name). Its two
+        // assertions -- one open instant, no `complete` counted -- hold under EITHER
+        // behaviour, because sealing neither removes the bucket from the map nor counts an
+        // event; I wrote them first and a mutation walked straight through them. What
+        // separates the two is what `retire` does with the bucket LATER: a sealed one keeps
+        // its sealing reason, so an instant whose association never ran is counted
+        // `complete`, which `barrier.h` documents as "the association ran over the whole
+        // group". Guarded, it is counted `expired`, which is what happened to it.
+        Clock clock;
+        InstantBarrier barrier(options(0.06, /*workers=*/1, /*max_instants=*/4), nullptr,
+                               clock.fn());
+        barrier.camera_added("cam-a");
+        barrier.camera_added("cam-b");
+        const InstantOutcome starved = barrier.submit("cam-a", 10.0, payload_of("p"), kJoin);
+        check(starved.reason == mtmc::kMissedWouldStarve, "nobody is waiting on that instant");
+
+        // Dropping cam-b leaves the bucket COMPLETE on the live set, which is exactly when
+        // the unguarded version seals it.
+        barrier.drop_camera("cam-b");
+        check(barrier.open_instants() == 1, "still open either way -- sealing does not remove");
+
+        clock.advance(1.0);
+        // From a camera the live set does NOT hold, so this submit retires the old bucket
+        // without completing an instant of its own -- otherwise it counts the `complete` the
+        // assertion below is looking for and the test measures itself.
+        barrier.submit("cam-x", 500.0, payload_of("q"), kJoin);
+
+        const auto stats = barrier.instant_stats();
+        check(stats.count(mtmc::kClosedComplete) == 0,
+              "nothing counted `complete` for an association that never ran");
+        const auto expired = stats.find(mtmc::kDroppedExpired);
+        check(expired != stats.end() && expired->second == 1,
+              "the abandoned instant is counted as what it was: expired");
+    }
+
+    void a_sealed_bucket_would_stop_accepting_frames_that_could_still_join() {
+        // The half that is not a metric. `match` skips a sealed bucket, so a frame that could
+        // still have joined opens a fresh instant instead -- and on a shard where the
+        // never-starve guard is active that frame comes back unanswered. Reachable because
+        // `live_` is the ANNOUNCED set once anything announces, while `match` consults no such
+        // thing: a camera whose traffic beats its announcement can still join.
+        Clock clock;
+        InstantBarrier barrier(options(0.06, /*workers=*/1, /*max_instants=*/4), nullptr,
+                               clock.fn());
+        barrier.camera_added("cam-a");
+        barrier.camera_added("cam-b");
+        const InstantOutcome first = barrier.submit("cam-a", 10.00, payload_of("a"), kJoin);
+        check(first.reason == mtmc::kMissedWouldStarve, "nobody waiting");
+
+        barrier.drop_camera("cam-b");
+        // An unannounced camera's frame, inside the same window.
+        const InstantOutcome joiner = barrier.submit("cam-late", 10.01, payload_of("l"), kJoin);
+
+        check(joiner.instant == first.instant,
+              "it joined the instant the drop left open rather than opening a second one");
+        // AND THE ASSOCIATION RAN OVER BOTH, which is what joining is for: sealed, this frame
+        // would have opened instant 2, found cam-a unreported there, and starved with no
+        // association at all.
+        check(joiner.reason == mtmc::kClosedComplete, "and completed it");
+        check(answer_of(joiner) == "cam-a:a,cam-late:l", "over both cameras' entries");
+    }
+
+    void an_over_released_budget_is_counted_rather_than_fatal() {
+        // The one caller on the destructor path cannot receive an exception: a `noexcept`
+        // destructor that threw would `std::terminate` the shard with nothing in the logs.
+        WaiterBudget budget(1);
+        check(budget.acquire(), "a permit is available");
+        budget.release();
+
+        check(!budget.release_held(), "an over-release answers false rather than throwing");
+        check(budget.over_released() == 1, "and is counted, so the guard can be distrusted");
+        check(budget.held() == 0, "with the count saturated rather than negative");
+
+        bool typed = false;
+        try {
+            budget.release();
+        } catch (const ServerStateError&) {
+            typed = true;
+        }
+        check(typed, "while the public release keeps its typed refusal");
+    }
+
     void a_bucket_past_its_deadline_with_no_waiters_is_discarded() {
         Clock clock;
         InstantBarrier barrier(options(0.06, 1), nullptr, clock.fn());
@@ -583,6 +667,29 @@ namespace {
 
         check(barrier.instant_stats()[mtmc::kClosedAdvanced] >= 1,
               "the sealed instant is counted under `advanced`, not `expired`");
+    }
+
+    void a_stray_release_under_a_parked_waiter_does_not_kill_the_shard() {
+        // The scenario the budget's public-ness makes reachable: it is process-wide BY DESIGN
+        // -- that is its reason to exist -- so one stray `release()` from anywhere drives
+        // `held_` to zero while a worker is parked in `submit`. That worker's scope guard then
+        // releases an empty budget, and a `noexcept` destructor that threw would take down the
+        // shard with no `ServerStateError` anywhere in the logs to say why.
+        InstantBarrier barrier(options(0.5, 8));
+        barrier.camera_added("cam0");
+        barrier.camera_added("cam-absent");
+        InstantOutcome parked;
+        std::thread waiter(
+            [&] { parked = barrier.submit("cam0", 100.0, payload_of("a"), kJoin); });
+        while (barrier.waiters() == 0) std::this_thread::yield();
+
+        barrier.budget().release();  // the stray one: held_ was 1, now 0
+        waiter.join();               // the guard's destructor runs on an empty budget
+
+        check(parked.reason == mtmc::kClosedWindow,
+              "the parked worker returned on its own window rather than aborting");
+        check(barrier.budget().over_released() == 1,
+              "and the inconsistency is counted, so the guard can be distrusted");
     }
 
     void a_shutdown_releases_the_parked_workers_at_once() {
@@ -740,8 +847,12 @@ int main() {
     the_first_announcement_latches_the_hooks_on_for_good();
     a_removed_camera_no_longer_holds_an_instant_open();
     dropping_a_camera_runs_no_association_on_the_lifecycle_thread();
+    dropping_a_camera_with_nobody_waiting_leaves_the_bucket_alone();
+    a_sealed_bucket_would_stop_accepting_frames_that_could_still_join();
+    an_over_released_budget_is_counted_rather_than_fatal();
     a_bucket_past_its_deadline_with_no_waiters_is_discarded();
     a_sealed_bucket_nobody_waited_on_keeps_the_reason_it_was_sealed_with();
+    a_stray_release_under_a_parked_waiter_does_not_kill_the_shard();
     a_shutdown_releases_the_parked_workers_at_once();
     a_submit_after_close_all_is_refused_rather_than_parked();
     a_failed_association_releases_the_waiters_and_the_closer_gets_the_exception();

@@ -150,15 +150,26 @@ namespace shipinfer::mtmc {
         // barriers. Returns whether the caller may wait.
         bool acquire();
 
-        // Give one back. Throws `ServerStateError` on more releases than acquires: the pair is
-        // one scope guard in `submit`, so it cannot happen from a correct caller, and a silent
+        // Give one back. Throws `ServerStateError` on more releases than acquires: a silent
         // decrement past zero would hand out permits that do not exist.
         void release();
+
+        // The same, for a caller that CANNOT receive an exception -- `submit`'s scope guard is
+        // a destructor, and a `noexcept` one that threw would `std::terminate` the shard with
+        // nothing in the logs. Returns whether a permit was actually held; an over-release is
+        // saturated at zero and counted (`over_released`) rather than thrown or ignored.
+        bool release_held() noexcept;
+
+        //: How many releases arrived with no permit held. Nonzero means the never-starve
+        //: guard's count is no longer trustworthy, which is worth reporting rather than
+        //: aborting for.
+        uint64_t over_released() const;
 
       private:
         int permits_;
         mutable std::mutex lock_;
         int held_ = 0;
+        uint64_t over_released_ = 0;
     };
 
     // NAMESPACE SCOPE and not nested, because a nested struct's default member initialisers

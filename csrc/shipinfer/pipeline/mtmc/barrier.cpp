@@ -37,6 +37,11 @@ namespace shipinfer::mtmc {
         return held_;
     }
 
+    uint64_t WaiterBudget::over_released() const {
+        std::lock_guard<std::mutex> guard(lock_);
+        return over_released_;
+    }
+
     bool WaiterBudget::acquire() {
         std::lock_guard<std::mutex> guard(lock_);
         if (held_ >= permits_) return false;
@@ -45,13 +50,27 @@ namespace shipinfer::mtmc {
     }
 
     void WaiterBudget::release() {
-        std::lock_guard<std::mutex> guard(lock_);
-        if (held_ <= 0) {
+        if (!release_held()) {
             throw ServerStateError(
                 "a waiter budget was released more times than it was acquired; the permit "
                 "count is now meaningless and the never-starve guard with it");
         }
+    }
+
+    bool WaiterBudget::release_held() noexcept {
+        std::lock_guard<std::mutex> guard(lock_);
+        if (held_ <= 0) {
+            // SATURATED, and counted, because the ONE caller on this path is a destructor.
+            // A `noexcept` destructor that threw would `std::terminate` the shard with no
+            // `ServerStateError` anywhere in the logs to say why -- and this budget is
+            // process-wide by design, so one stray `release()` from anywhere else is enough
+            // to drive `held_` to zero while a worker is parked. The public `release()` keeps
+            // the typed refusal for callers that can receive it.
+            ++over_released_;
+            return false;
+        }
         --held_;
+        return true;
     }
 
     InstantBarrier::InstantBarrier(Options options, std::shared_ptr<WaiterBudget> budget,
@@ -125,11 +144,23 @@ namespace shipinfer::mtmc {
         announced_.erase(camera_id);
         seen_.erase(camera_id);
         refresh_live();
+        // doc: long why a bucket with NO waiters is left alone here
         // SEALED, NOT CLOSED, and by the lifecycle thread: dropping the last missing camera
         // completes every open instant, and this thread has no association function -- so it
         // marks them and a waiter does the work. `seal` explains why that split matters.
+        //
+        // AND ONLY A BUCKET SOMEBODY IS WAITING ON, which `topology/barrier.py` guards the
+        // same way ("A bucket with no waiters is left alone: every frame in it was already
+        // emitted by the never-starve guard, so nobody is owed an answer"). Two things go
+        // wrong without it, and the first is not a metric: a sealed bucket is skipped by
+        // `match`, so it stops accepting entries -- and on a shard where the never-starve
+        // guard is active, the frames that would have COMPLETED it open a fresh instant and
+        // come back unanswered instead. A camera outage would then cost every open instant
+        // its association. The second is that such a bucket is never associated, so `retire`
+        // counts it under `complete` -- a health report claiming a good instant for work that
+        // did not happen.
         for (auto& [instant, bucket] : buckets_) {
-            if (bucket->ready || bucket->done) continue;
+            if (bucket->waiters == 0 || bucket->ready || bucket->done) continue;
             if (every_live_reported(live_, bucket->reported)) {
                 seal(*bucket, kClosedComplete);
             }
@@ -354,7 +385,9 @@ namespace shipinfer::mtmc {
             ~Waiting() {
                 --barrier.waiters_;
                 --bucket.waiters;
-                barrier.budget_->release();
+                // `release_held`, not `release`: this destructor is noexcept, and the typed
+                // refusal would be a `std::terminate` rather than an error.
+                barrier.budget_->release_held();
             }
         };
         {
