@@ -526,13 +526,11 @@ class PipelineRunner:
         contains its own failures, and this wrapper is what protects the sweeper — the thread
         whose survival is the guarantee that every frame is eventually reported.
         """
-        # EVERY finished frame, timeouts and evictions included, and here rather than in
-        # `_emit_resolved` because that one returns early for an eviction: a run whose tail is
-        # shedding is exactly the run whose reassembly window a reader needs.
-        self._metrics.reassembly_us.observe(
-            result.waited_us, camera=result.state.camera_id if result.state else "unknown"
-        )
         future = self._awaiting.pop(result.key, None)
+        # EVERY finished frame: `_emit_resolved` returns early for an eviction, and a run
+        # whose tail is shedding is the run whose window a reader needs. Below the `pop`
+        # because this method's contract is "never raises" and the sweeper rests on it.
+        self._metrics.reassembly_us.observe(result.waited_us, camera=result.camera_id)
         # Every exit resolves it. The build-failure path popped the future and returned, so
         # a caller awaiting that frame blocked forever and `stop()` could no longer find it
         # to cancel. Harmless only while the shipped sink discards the future; the first

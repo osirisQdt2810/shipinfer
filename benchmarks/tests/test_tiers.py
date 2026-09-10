@@ -261,6 +261,10 @@ class TestTheProfileReadsOneWindow:
             read_cell(histogram, camera=c).count for c in ("cam0", "cam1")
         )
         assert whole.mean == pytest.approx((1000.0 + 1000.0 + 500_000.0) / 3)
+        # The BUCKETS have to add up too, not only `_count`: summing cells means adding each
+        # edge's counter, and a last-write-wins bug leaves the two totals disagreeing while
+        # `count` and `mean` still look right.
+        assert sum(whole.counts) == whole.count, whole.counts
         # And the tail is the slow camera's, which is the point of summing rather than picking.
         assert whole.quantile(0.99) >= 500_000.0
         assert read_cell(histogram, camera="cam0").quantile(0.99) < 500_000.0

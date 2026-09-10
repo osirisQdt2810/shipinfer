@@ -93,36 +93,24 @@ def read_cell(histogram: Any, **labels: str) -> HistogramCell:
     A label set the histogram has never observed reads as an empty cell over the histogram's
     buckets, so a stage that never ran is a zero, not an exception.
     """
-    key = tuple(labels_key(labels))
-    edges = tuple(float(edge) for edge in histogram.buckets)
-    cumulative: dict[str, int] = {}
-    count = 0
-    total = 0.0
-    for name, row_labels, value in histogram.samples():
-        row = tuple(row_labels)
-        if name.endswith("_bucket"):
-            if row[:-1] == key and row[-1][0] == "le":
-                cumulative[row[-1][1]] = int(value)
-        elif row == key:
-            if name.endswith("_sum"):
-                total = float(value)
-            elif name.endswith("_count"):
-                count = int(value)
-    if not cumulative:
-        return HistogramCell(edges, (0,) * (len(edges) + 1), 0, 0.0)
-    running = [cumulative.get(str(edge), 0) for edge in histogram.buckets]
-    running.append(cumulative.get("+Inf", count))
-    counts = tuple(now - then for then, now in zip([0, *running[:-1]], running, strict=True))
-    return HistogramCell(edges, counts, count, total)
+    return _read(histogram, tuple(labels_key(labels)))
 
 
 def read_total(histogram: Any) -> HistogramCell:
     """Every cell summed, for a distribution whose label is not the question.
 
     `read_cell` answers "this stage" or "this camera"; this answers "the fleet". The reassembly
-    window is observed per camera, because that is what every metric on this plane does, and
+    window is observed per camera, because that is what every metric on that plane does, and
     compared against the C++ plane's `reassembly_us_*`, which is one distribution -- so the
     comparison needs the labels added up rather than one camera picked.
+    """
+    return _read(histogram, None)
+
+
+def _read(histogram: Any, key: tuple[Any, ...] | None) -> HistogramCell:
+    """One reader for both, because a fix to one copy is a bug left in the other.
+
+    ``key`` is the label tuple to match, or ``None`` for every cell summed.
     """
     edges = tuple(float(edge) for edge in histogram.buckets)
     cumulative: dict[str, int] = {}
@@ -131,12 +119,14 @@ def read_total(histogram: Any) -> HistogramCell:
     for name, row_labels, value in histogram.samples():
         row = tuple(row_labels)
         if name.endswith("_bucket"):
-            if row and row[-1][0] == "le":
-                cumulative[row[-1][1]] = cumulative.get(row[-1][1], 0) + int(value)
-        elif name.endswith("_sum"):
-            total += float(value)
-        elif name.endswith("_count"):
-            count += int(value)
+            if row and row[-1][0] == "le" and (key is None or row[:-1] == key):
+                edge = row[-1][1]
+                cumulative[edge] = cumulative.get(edge, 0) + int(value)
+        elif key is None or row == key:
+            if name.endswith("_sum"):
+                total += float(value)
+            elif name.endswith("_count"):
+                count += int(value)
     if not cumulative:
         return HistogramCell(edges, (0,) * (len(edges) + 1), 0, 0.0)
     running = [cumulative.get(str(edge), 0) for edge in histogram.buckets]

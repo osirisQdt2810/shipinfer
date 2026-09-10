@@ -152,7 +152,6 @@ class TestTheUndecidedRowsAreSomebodysWork:
         assert deferred == set(OWED_BY), sorted(deferred ^ set(OWED_BY))
 
 
-# doc: long why this builds a throwaway repository instead of touching the real tree
 class TestBothPlanesNameTheSameLatencyWindow:
     """The sync rule for the one latency figure both planes can measure.
 
@@ -184,6 +183,7 @@ class TestBothPlanesNameTheSameLatencyWindow:
         assert "result.waited_us = (at - frame.opened_ns) / 1000" in cpp
 
 
+# doc: long why this builds a throwaway repository instead of touching the real tree
 class TestTheInventoryComesFromGit:
     """Not from the filesystem, which still carries a package the #57 rename deleted.
 
