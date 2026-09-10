@@ -1920,6 +1920,12 @@ hook down, for when the operator asked to see something before it is executed.
       neighbouring `waited_us` push has the same shape), and a `frame_us_samples` below
       `reassembly_us_samples` would be surprising enough to say in the run's own output
       rather than only in a comment, since `captured_ns` is stamped on every source path.
+      BOTH NOTES AND THE GAP ARE IN #213, and its Python demo makes the quantile nit
+      concrete: at 6x5 the printed p50s are 160 000 / 200 000 us against exact means of
+      112 605 / 118 905 -- the bucket upper edge sits 42-68% above the mean at that load,
+      so without the qualifier a reader would have called this plane slower on a rounding
+      artefact. The two windows' means differ by 6.3 ms, which is this plane's
+      ingest-to-collector gap.
       WHAT #212 DID: `frame_us_{samples,p50,p95,p99,max}` beside the
       reassembly ones, `report_window(prefix, ...)` so the two cannot drift in format, the
       sample taken BEFORE `to_json`, and the parity test now asserting BOTH windows on both
