@@ -1749,7 +1749,7 @@ hook down, for when the operator asked to see something before it is executed.
       contend with them and measure noise.
       Suite 4098 passed, C++ offline tier all green (18 binaries).
 
-- [~] **THE-PYTHON-PLANE-SPINS-TOO · PR #203 (10 Sep) closes the seam.** Same knob name, same
+- [x] **THE-PYTHON-PLANE-SPINS-TOO · MEASURED 10 Sep; #203 + #204 closed the seam and the instrument.** Same knob name, same
       three parse rules, same default (off); `ctypes` into libcudart because torch wraps no
       `cudaSetDeviceFlags`, WITH the prototypes declared and a test asserting the declaration
       rather than trusting it -- #200's undeclared draft segfaulted 282 tests, which no
@@ -1856,9 +1856,6 @@ hook down, for when the operator asked to see something before it is executed.
       52.9 s = 7.7 cores, `/proc/loadavg` 46.67 of 48. So the A/B runs there, and the number
       will be reported as what it is: 20 img/s per GPU against the design's 62.5, on a box
       whose other tenant holds ~30 cores.
-      ALSO OWED, from round 3's non-blocking note: `bench.cpp:329-334` has the same
-      unrestored-device wart, benign there (five lines into `main()`, before any device is
-      chosen) but it should ride with the next change to that file.
       NOT LOWERED TO GET A NUMBER: the harness's own message says "Do not raise the tolerance",
       and measuring this flag where the host is idle would produce a null result that says
       nothing about the load it is for -- the host being the wall IS the precondition for the
@@ -1879,6 +1876,27 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE HERE because the C++ plane is the one the measurement was taken on, and a
       Python A/B needs its own before/after at the design load to claim anything.
 
+- [ ] **BENCH-CPP-LEAVES-THE-CURRENT-DEVICE · from #203 round 3's non-blocking note.**
+      `csrc/shipinfer/cli/bench.cpp:329-334` walks the devices to set the blocking-sync flag
+      and does not put the caller's device back -- the same wart #203 fixed in
+      `prefer_blocking_sync`. Benign THERE (five lines into `main()`, before any device is
+      chosen) which is why it was not a blocker, but it should ride with the next change to
+      that file rather than being rediscovered.
+- [ ] **HOST-CPU-ACCOUNTING-FOLDS-IN-ITS-GENERATOR · #204's non-blocking notes (10 Sep).**
+      (1) THE ONE THAT MATTERS: the Python RTSP arm starts its two `rtsp_serve.py` servers as
+      CHILDREN of the bench (`benchmarks/harness/rtsp.py:111`), so #204's tree walk now
+      samples them while the wrapper passes no `--pid` -- `--source rtsp` reports a `threads`
+      table and an `accounted_pct` that fold in generator CPU no deployment pays (the ~17%
+      penalty `NOT-GPU-BOUND-AT-FIVE-GPUS` measured). The C++ plane discounts it explicitly
+      (`scripts/cpp_bench_over_rtsp.sh:106`). The arithmetic differs from `--pid`'s: an
+      external generator is absent from `wait4`'s rusage, a spawned one is IN it, so it has to
+      be subtracted from the denominator as well as named.
+      (2) `process_tree`'s docstring says breadth-first; `pending.pop()` is depth-first. Same
+      set, wrong word.
+      (3) `--threads` is hardcoded in `deploy/rootless/bench.sh` with no opt-out, and the
+      sampler's /proc cost lands on the host this A/B argues is tight.
+      (4) `ThreadSampler._seen` is keyed by tid alone, so a recycled tid keeps the stale
+      larger value -- pre-existing, and the tree walk widens the window.
 - [x] **THE-INSTANCE-THREADS-SPIN-ON-cudaStreamSynchronize · MERGED as #202 (4675250, 10 Sep),
       APPROVE on round 1, and the hypothesis predicted the mechanism.** Two interleaved pairs,
       50x20x70 s, GPUs 1/3/4/5/6, one binary and one env var so nothing else differs:
