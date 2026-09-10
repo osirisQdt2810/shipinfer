@@ -2850,6 +2850,17 @@ hook down, for when the operator asked to see something before it is executed.
       CAVEAT ON EVERY NUMBER HERE: the box had another tenant throughout (load 32-56 over 48
       cores, GPUs 1 and 7 held by someone else's training job), and the harness printed its own
       "BUSY ... treat the ratio as indicative only" warning.
+      **OPEN AS #216** (`--precision {fp32,fp16,int8}` + `--int8` on the engine builder +
+      `topology/detect_only.yaml`), which is the instrument all of the above was measured
+      with. What is still OWED on this item, in order:
+        1. `RESULTS.md` says the baseline "is a CAPACITY, not a floor". That is false and the
+           page is what a reader trusts -- its own PR, after #216.
+        2. The operator's question is no longer "which chain shape" but "what is the
+           comparand", because a multiple of an offer-bound counter is a statement about the
+           harness. Asked in the report, not decided here.
+        3. The instance count: the repository ships 2/device and 4 is worth 1.25x on one
+           model, while the four-model chain is already PAST its peak at 2/2/2/1 (7 per
+           device). That is a `config.yaml` change with a measurement behind it, per model.
       **THE QUESTION THIS PUTS TO THE OPERATOR, and it is theirs rather than mine:** 5x on the
       FOUR-MODEL chain, or 5x on work comparable to the baseline's one model? The metric is
       settled (V164, images/s) -- what is not settled is what the chain must compute while
