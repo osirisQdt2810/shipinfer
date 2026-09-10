@@ -1905,9 +1905,17 @@ hook down, for when the operator asked to see something before it is executed.
       TWO PLANES: this is a per-frame seam, so the Python plane owes the same figure and the
       parity harness the same assertion -- open its ledger item with the PR rather than after.
       THEN the default question is answerable with evidence instead of a proxy.
-- [~] **THE-GENERATOR-TREE-IS-REMEMBERED-NOT-PROVEN · #207 round 2's five notes (10 Sep).**
-      UNBLOCKED: the nine runs are done, so the instrument can be edited again. The PR waits
-      on #208 merging, because a PR is opened one at a time.
+- [~] **THE-GENERATOR-TREE-IS-REMEMBERED-NOT-PROVEN · PR #209 IN REVIEW (10 Sep), and it
+      carries #208's notes 1 and 3 too -- the same failure shape twice.**
+      A GUARD THAT PASSES ON THE DRIFT IT GUARDS, in two places: reinstating the growth
+      guard on top of `_generator_tree` passed all 43 tests, and #208's `off by default`
+      guard split on the env-gate marker so a second call ADDED BEFORE it stayed green.
+      Both now have the test that isolates them: the subtree one fails exactly one of 44,
+      the count one fails on an unconditional call inserted before the gate. Plus the
+      three precision notes -- `thread_cpu`'s mechanism (the thread GROUP's `cutime`, on
+      the leader's row), why the tree is never pruned (pid reuse is unreachable in a run),
+      what it cannot reach (only descendants seen ALIVE), and the page's summary row now
+      names its sitting. Suite 4162.
       WAS WAITING for `DOES-THE-KNOB-MOVE-C1?` to finish: `scripts/host_cpu.py` is the instrument
       those nine runs are being measured with, and editing it mid-measurement changes the
       instrument between arms.
