@@ -1749,6 +1749,22 @@ hook down, for when the operator asked to see something before it is executed.
       contend with them and measure noise.
       Suite 4098 passed, C++ offline tier all green (18 binaries).
 
+- [ ] **THE-PYTHON-PLANE-SPINS-TOO · the other half of the blocking-sync knob, opened by the
+      C++ PR under the sync rule (9/10 Sep).** `src/shipinfer/runtime/device.py` sets no device
+      flag either -- `grep -rn "cudaSetDeviceFlags|set_device_flags" src/` is empty -- so the
+      Python plane's `ModelInstance` threads wait in the same place for the same reason, and
+      `torch.cuda.synchronize`/an event wait inherits the same `cudaDeviceScheduleAuto`.
+      WHAT THE C++ SIDE MEASURED, as the reason to expect it: model-instance host CPU HALVED
+      (632 -> 279 CPU-s over two interleaved pairs), total host CPU -24%, and events +15%.
+      THE ROUTE: torch has no wrapper for `cudaSetDeviceFlags`, so it is `ctypes` into
+      `libcudart` -- the same shape `core/thread_name.py` now uses for `pthread_setname_np`,
+      and the same trap applies (declare `restype`/`argtypes` or it segfaults). It must run
+      before the first CUDA call on that device, which in this plane means `DeviceManager`'s
+      bind rather than an instance's `start()`.
+      SAME DEFAULT: off, and read from the same env var, so one knob covers both planes.
+      NOT DONE HERE because the C++ plane is the one the measurement was taken on, and a
+      Python A/B needs its own before/after at the design load to claim anything.
+
 - [~] **THE-INSTANCE-THREADS-SPIN-ON-cudaStreamSynchronize · CONFIRMED AND FIXED, and the
       hypothesis predicted the mechanism (9 Sep). PR pending.** Two interleaved pairs,
       50x20x70 s, GPUs 1/3/4/5/6, one binary and one env var so nothing else differs:
