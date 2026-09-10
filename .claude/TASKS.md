@@ -1765,8 +1765,8 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE HERE because the C++ plane is the one the measurement was taken on, and a
       Python A/B needs its own before/after at the design load to claim anything.
 
-- [~] **THE-INSTANCE-THREADS-SPIN-ON-cudaStreamSynchronize · CONFIRMED AND FIXED, and the
-      hypothesis predicted the mechanism (9 Sep). PR pending.** Two interleaved pairs,
+- [~] **THE-INSTANCE-THREADS-SPIN-ON-cudaStreamSynchronize · CONFIRMED AND FIXED, PR #202,
+      and the hypothesis predicted the mechanism (9 Sep).** Two interleaved pairs,
       50x20x70 s, GPUs 1/3/4/5/6, one binary and one env var so nothing else differs:
         run          flag     events   host cpu-s   cores   mdl threads   pipe threads
         spinA        off      38 129       1139.7   14.68        630.8          208.8
