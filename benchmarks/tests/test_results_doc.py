@@ -1,4 +1,4 @@
-"""The results page cites four things in the tree; a test says so when one of them moves.
+"""The results page cites five things in the tree; a test says so when one of them moves.
 
 `RESULTS.md` records what the harness measured, and its most load-bearing claim is a
 NEGATIVE one -- that tracking and the fused kernels are in none of the numbers. A number
@@ -50,4 +50,34 @@ def test_the_one_at_a_time_quote_is_the_harness_own_words() -> None:
     assert "run one at a time to keep the GPUs uncontended" in runner
     assert "run one at a time to keep the GPUs uncontended" in RESULTS.read_text(
         encoding="utf-8"
+    )
+
+
+def test_the_knob_the_page_credits_is_the_one_the_binary_reads() -> None:
+    """The page's second-largest claim is now an env var away, so the spelling has to match.
+
+    A page crediting `SHIPINFER_CUDA_BLOCKING_SYNC` while the binary gated on some other name
+    would report 7.17x for a run that never had the flag -- which is the failure the harness's
+    own refusal exists to prevent, one level up.
+    """
+    page = RESULTS.read_text(encoding="utf-8")
+    bench = (REPO_ROOT / "csrc" / "shipinfer" / "cli" / "bench.cpp").read_text(encoding="utf-8")
+
+    assert "SHIPINFER_CUDA_BLOCKING_SYNC=1" in page
+    assert 'env_flag("SHIPINFER_CUDA_BLOCKING_SYNC")' in bench
+
+
+def test_the_page_says_off_by_default_only_while_it_is() -> None:
+    """Both figures on the page are labelled by which side of the default they are on, so a
+    default that flips silently makes the verdict say the opposite of what it means."""
+    page = RESULTS.read_text(encoding="utf-8")
+    bench = (REPO_ROOT / "csrc" / "shipinfer" / "cli" / "bench.cpp").read_text(encoding="utf-8")
+
+    assert "**off by default**" in page
+    guarded = bench.split('env_flag("SHIPINFER_CUDA_BLOCKING_SYNC")')[1]
+    assert (
+        "gpuSetDeviceFlags(gpuDeviceScheduleBlockingSync)" in guarded.split("std::printf")[0]
+    ), (
+        "the flag is set outside the env gate, so it is no longer off by default and the "
+        "page's `~3.4x default` figure describes a configuration that no longer ships"
     )
