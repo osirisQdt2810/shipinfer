@@ -309,23 +309,40 @@ def prefer_blocking_sync(devices: Iterable[int]) -> tuple[int, ...]:
         libcudart.cudaSetDevice.argtypes = [ctypes.c_int]
         libcudart.cudaSetDeviceFlags.restype = ctypes.c_int
         libcudart.cudaSetDeviceFlags.argtypes = [ctypes.c_uint]
+        libcudart.cudaGetDevice.restype = ctypes.c_int
+        libcudart.cudaGetDevice.argtypes = [ctypes.POINTER(ctypes.c_int)]
     except AttributeError:  # pragma: no cover - a libcudart without the symbols
         _LOG.warning("%s asked for, but libcudart has no cudaSetDeviceFlags", BLOCKING_SYNC_ENV)
         return ()
 
+    # doc: long why the current device is put back, and what it costs not to
+    # THE CURRENT DEVICE IS RESTORED, because this walks every visible one and nothing else
+    # here leaves the caller's device changed: `bind_current_thread` is a deliberate
+    # once-per-worker act, `activate()` restores in a `finally`, and the custom allocator
+    # re-sets per allocation. Leaving it on the LAST device would give the flag-on arm of a
+    # pairwise run a second difference nobody asked for -- `torch.cuda.synchronize()` with no
+    # argument waits on the current device, which `benchmarks/harness/shipinfer.py` and
+    # `benchmarks/kernels.py` both call, the latter with a comment asserting it means cuda:0.
+    # An A/B whose arms differ in two ways measures neither.
+    previous = ctypes.c_int(-1)
+    libcudart.cudaGetDevice(ctypes.byref(previous))
     applied: list[int] = []
-    for index in wanted:
-        if libcudart.cudaSetDevice(index) != 0:
-            continue
-        status = libcudart.cudaSetDeviceFlags(_CUDA_DEVICE_SCHEDULE_BLOCKING_SYNC)
-        if status == 0:
-            applied.append(index)
-        else:
-            _LOG.warning(
-                "device %d already has a context, so its synchronise keeps spinning "
-                "(cudaSetDeviceFlags returned %d); ask for %s before the first CUDA call",
-                index,
-                status,
-                BLOCKING_SYNC_ENV,
-            )
+    try:
+        for index in wanted:
+            if libcudart.cudaSetDevice(index) != 0:
+                continue
+            status = libcudart.cudaSetDeviceFlags(_CUDA_DEVICE_SCHEDULE_BLOCKING_SYNC)
+            if status == 0:
+                applied.append(index)
+            else:
+                _LOG.warning(
+                    "device %d already has a context, so its synchronise keeps spinning "
+                    "(cudaSetDeviceFlags returned %d); ask for %s before the first CUDA call",
+                    index,
+                    status,
+                    BLOCKING_SYNC_ENV,
+                )
+    finally:
+        if previous.value >= 0:
+            libcudart.cudaSetDevice(previous.value)
     return tuple(applied)

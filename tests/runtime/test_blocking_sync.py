@@ -67,14 +67,24 @@ class TestItIsInertUnlessAskedFor:
 
     def test_an_empty_device_list_calls_nothing(self, monkeypatch) -> None:
         """A CPU-only host asks for no devices, and the helper must not reach for libcudart to
-        find that out -- `prefer_blocking_sync` is called from a start-up path that runs on a
-        machine with no driver."""
-        called: list[str] = []
-        monkeypatch.setattr(
-            device_module.ctypes, "CDLL", lambda name: called.append(name) or object()
-        )
+        find that out -- `prefer_blocking_sync` runs from a start-up path that has to work on a
+        machine with no driver.
+
+        The assertion is on `loaded`, not on the return value: the first draft checked only
+        that the result was empty, which it is whether or not libcudart was opened -- a test
+        that could not fail.
+        """
+        loaded: list[str] = []
+
+        def record(name: str) -> object:
+            loaded.append(name)
+            raise AssertionError(f"libcudart opened for an empty device list: {name}")
+
+        monkeypatch.setattr(device_module.ctypes, "CDLL", record)
+        monkeypatch.setattr(device_module.ctypes.util, "find_library", lambda _n: "libcudart")
 
         assert prefer_blocking_sync([]) == ()
+        assert loaded == []
 
     def test_a_device_that_already_has_a_context_is_reported_not_raised(
         self, monkeypatch, caplog
@@ -87,6 +97,7 @@ class TestItIsInertUnlessAskedFor:
             def __init__(self) -> None:
                 self.cudaSetDevice = _Fn(0)
                 self.cudaSetDeviceFlags = _Fn(216)
+                self.cudaGetDevice = _Out(0)
 
         monkeypatch.setattr(device_module.ctypes, "CDLL", lambda _name: Refusing())
 
@@ -169,6 +180,23 @@ class TestItIsAppliedBeforeAnyDeviceHasAContext:
         assert "prefer_blocking_sync" not in pool
 
 
+class _Out:
+    """`cudaGetDevice`'s shape: it answers through an out-parameter, which is the third place
+    the #200 prototype trap applies -- an undeclared `POINTER(c_int)` argument is where a
+    truncated pointer would go."""
+
+    def __init__(self, current: int) -> None:
+        self.current = current
+        self.restype: object = None
+        self.argtypes: object = None
+        self.calls: list[tuple] = []
+
+    def __call__(self, out: object) -> int:
+        self.calls.append((out,))
+        out._obj.value = self.current  # what `ctypes.byref(x)` hands a real library
+        return 0
+
+
 class _Fn:
     """A libcudart entry point double: records the prototype the caller declares."""
 
@@ -193,14 +221,21 @@ class TestThePrototypesAreDeclared:
             def __init__(self) -> None:
                 self.cudaSetDevice = _Fn(0)
                 self.cudaSetDeviceFlags = _Fn(0)
+                self.cudaGetDevice = _Out(2)
 
         library = Recording()
         monkeypatch.setattr(device_module.ctypes, "CDLL", lambda _name: library)
 
         assert prefer_blocking_sync([5]) == (5,)
 
-        for entry in (library.cudaSetDevice, library.cudaSetDeviceFlags):
+        for entry in (
+            library.cudaSetDevice,
+            library.cudaSetDeviceFlags,
+            library.cudaGetDevice,
+        ):
             assert entry.restype is not None, entry
             assert entry.argtypes is not None, entry
-        assert library.cudaSetDevice.calls == [(5,)]
         assert library.cudaSetDeviceFlags.calls == [(0x04,)]
+        # The device it was on comes back: the walk touches every visible GPU, and an A/B whose
+        # flag-on arm ends up current on a different device measures two things at once.
+        assert library.cudaSetDevice.calls == [(5,), (2,)], library.cudaSetDevice.calls
