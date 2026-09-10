@@ -3425,7 +3425,44 @@ hook down, for when the operator asked to see something before it is executed.
           belongs in `benchmarks/parity/` as a `--kind identity` golden the way the plan
           golden is, and that is the next increment
           (`MTMC-IDENTITY-PARITY-IS-NOT-COMMITTED`).
-        * **3c -- the seam is BUILT; the stage and the lane unit remain.** Built:
+        * **3c -- BUILT, AND `decode -> ... -> mtmc track` RAN END TO END FOR THE FIRST TIME
+          (10 Sep).** `chain 'ship_person_cpu': 7 stage(s), not run here: decode output` --
+          detect, crop, segment, embed_person, embed_ship, track, mtmc. Over gstreamer RTSP
+          with NVDEC, 3 free GPUs (2/5/6; another tenant holds 3 and 4), 12 cameras x 20 fps
+          x 30 s: **237.5 img/s accepted of 237.1 delivered, ZERO dropped, 7 126 complete
+          events, 0 incomplete.** That is the chain the operator's target is defined over,
+          measured on the route V167 mandates.
+          **AND THE FIRST THING IT MEASURED IS A CONFIGURATION RULE: THE BARRIER NEEDS MORE
+          WORKERS THAN ITS GROUP HAS CAMERAS.** Same load, only `setting workers` changing:
+          | workers | cameras | accepted | dropped |
+          |---|---|---|---|
+          | 8 | 12 | 105.4/s of 237 | **3 728** |
+          | 32 | 12 | **237.5/s of 237** | 0 |
+          | 92 | 12 | 237.4/s of 237 | 0 |
+          The budget hands out `workers - 1` permits, so an instant of 12 cameras can never
+          complete on evidence with 7 -- every instant closes on the window or starves, and
+          the queue behind it overflows. `topology/barrier.py` measured the same shape on the
+          other plane ("two 8-camera groups: 100% coverage each at 16 workers, 73%/52% at 9").
+          AT LOAD, same route and 3 GPUs, workers 92, 2 400 offered:
+          | split | RTSP delivered | accepted |
+          |---|---|---|
+          | 12 x 200 | 1 369 | **486.4** |
+          | 24 x 100 | 1 897 | 380.1 |
+          So the 7-stage chain retires ~490 img/s on three GPUs with every frame complete and
+          zero untracked. Not comparable to the 335-425 figures above: those were 4 GPUs and
+          6 stages, and these are 3 and 7. The comparable four-GPU number waits for the box.
+          WHAT IS BUILT: `graph/stages.{h,cpp}`'s `MtmcStage` (22 checks in
+          `test_mtmc_stage.cpp` against a scripted tracker -- the join is what it owns: read
+          each row's track id and embedding, hand this camera's rows to the barrier, scatter
+          the group's answer back BY KEY), `MtmcStageSpec` on the plan, `mtmc_runtime()` which
+          builds one barrier per slot and ONE budget for the process before any worker starts
+          (`build_dag` refuses rather than building its own, because a barrier per Dag is a
+          barrier per worker and that is within-camera deduplication), and `bench.cpp` calling
+          it once. Two refusals with their reasons: a second runnable `mtmc` slot (two slots
+          are two camera GROUPS and no chain states which cameras belong to which, so both
+          would be the whole fleet and issue contradictory ids), and an `mtmc` slot with no
+          runnable tracker (identity is keyed by (camera, track)).
+          ORIGINAL: the seam was built; the stage and the lane unit remained. Built:
           `csrc/shipinfer/pipeline/mtmc/cluster.{h,cpp}` -- `ClusterTracker` takes a whole
           INSTANT and answers a global id per (camera, track), with a registry keyed per
           (impl, slot) because a cross-camera tracker IS a group's identity space and a second
