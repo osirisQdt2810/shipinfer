@@ -2718,6 +2718,17 @@ hook down, for when the operator asked to see something before it is executed.
       which is what stops the port drifting the first time either side is edited. A verified
       port whose verification is not in the tree is a verified port for exactly one afternoon.
 
+- [ ] MTMC-WINDOW-IS-NOT-CONFIGURABLE · `mtmc_runtime` builds every barrier with
+      `BarrierOptions`'s default 60 ms window and the plan cannot say otherwise, while the
+      window is the knob the whole chain's throughput turns on: a worker parked in the barrier
+      is a worker not draining its lane, and free-running cameras make most instants close on
+      the window rather than on evidence. `topology/barrier.py` calls 60 ms "a PROPOSAL, not a
+      measurement (the phase-C plan's open question 3): nothing in docs/arch.md states one".
+      THE FIX: `sync_window_ms` on the plan's `mtmc` node (the Python element already reads
+      `params: sync_window_ms`), through `MtmcStageSpec` into `mtmc_runtime`. Then the sweep
+      that is currently impossible -- window against coverage against throughput -- can be run
+      and the default chosen rather than proposed.
+
 - [ ] BENCH-PRECISION-SELECTS-NO-PLAN · `--precision` names the BASELINE's flat engines and
       nothing else. Our side loads `model_repository/<name>/1/model.plan` whatever precision it
       holds, so on a `--systems shipinfer` run the flag changes nothing except which file the
@@ -3449,8 +3460,35 @@ hook down, for when the operator asked to see something before it is executed.
           | 12 x 200 | 1 369 | **486.4** |
           | 24 x 100 | 1 897 | 380.1 |
           So the 7-stage chain retires ~490 img/s on three GPUs with every frame complete and
-          zero untracked. Not comparable to the 335-425 figures above: those were 4 GPUs and
-          6 stages, and these are 3 and 7. The comparable four-GPU number waits for the box.
+          zero untracked.
+          **AND THE FOUR-GPU NUMBER, taken once GPUs 0/2/5/6 were free (another tenant still
+          holds 3 and 4):** 12x200 -> **484.8 img/s**, every frame complete; 24x200 -> 415.1,
+          23 incomplete. So FOUR GPUs buy nothing over three (484.8 against 486.4), which is
+          the finding rather than the number.
+          **NEITHER THE HOST NOR THE ENGINES ARE THE WALL AT THAT POINT.** Same run: host
+          11.85 of 48 cores (25%), and summed engine-time per device 458% of the 800% eight
+          instances could use (57%) -- detector ~145%, segmenter ~105%, person embedder ~143%,
+          ship embedder ~60%. What moves the number is the WORKER COUNT:
+          | workers | accepted (4 GPUs, 12x200) | img/s per worker |
+          |---|---|---|
+          | 46 | 372.7 | 8.1 |
+          | 92 | 484.8 | 5.3 |
+          | 184 | **578.4** | 3.1 |
+          Monotone and sharply diminishing. The reason is the barrier's own trade, which
+          `topology/barrier.py` states rather than hides: a worker waiting inside the stage is
+          a worker not draining its lane, so throughput is bounded by how many frames can be
+          parked at once divided by how long each waits -- and free-running RTSP cameras spread
+          their captures, so most instants close on the WINDOW (60 ms) rather than on evidence.
+          On top of that the association runs UNDER the barrier's lock, so instants are
+          serialised: 578 img/s over 12 cameras is 48 instants/s, which bounds one association
+          at ~21 ms.
+          **SO THE KNOBS FOR THE WHOLE CHAIN'S THROUGHPUT ARE NOW NAMED, and none of them is
+          more GPUs:** (a) smaller GROUPS -- the instant's cost is quadratic in observations and
+          a group is what bounds it; (b) a shorter WINDOW, which `barrier.py` calls "a PROPOSAL,
+          not a measurement" and which `mtmc_runtime` does not yet read from the plan
+          (`MTMC-WINDOW-IS-NOT-CONFIGURABLE`); (c) not holding the barrier's lock across the
+          association, which that file argues FOR on purpose -- so changing it is a decision
+          with a measurement behind it, not a fix.
           WHAT IS BUILT: `graph/stages.{h,cpp}`'s `MtmcStage` (22 checks in
           `test_mtmc_stage.cpp` against a scripted tracker -- the join is what it owns: read
           each row's track id and embedding, hand this camera's rows to the barrier, scatter
