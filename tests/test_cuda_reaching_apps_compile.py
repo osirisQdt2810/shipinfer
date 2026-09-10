@@ -258,7 +258,11 @@ def _missing_headers_reason() -> str:
 #: anyone looked. Adding the lane to `cpp-gst-lane` (which already has the GStreamer packages,
 #: and needs only nv-codec-headers on top) is the fix that keeps the guard's meaning: a dropped
 #: unit is still the hole this job exists to close.
-_COVERED_ELSEWHERE = frozenset({"gstreamer", "nvdec"})
+#: `shipvision` is `cpp-shipvision-lane`'s, and it is the one lane no `-dev` package could
+#: satisfy: it is an in-tree submodule this job checks out with `submodules: false`, on
+#: purpose (the offline tier must pass without the kernels). So its unit is dropped here and
+#: compiled there, by name, with the submodule fetched over anonymous https.
+_COVERED_ELSEWHERE = frozenset({"gstreamer", "nvdec", "shipvision"})
 
 # doc: long the guard the module-level pytestmark used to carry, and what needs it
 #: `TestAFailureArrivesWithItsReason` is deliberately NOT `needs_headers`-gated -- it needs
@@ -488,17 +492,28 @@ class TestTheUnitsNothingCompiles:
             "opencv is not covered by another job, so the cpp-syntax job installs it; putting "
             "it here would drop replay.cpp from every CI job at once"
         )
-        assert {"gstreamer", "nvdec"} == _COVERED_ELSEWHERE, (
-            "and those two ARE cpp-gst-lane's -- it builds both lanes, so a third entry here "
-            "without a job building it is a unit going quietly uncovered"
+        # DERIVED, not pinned: the old `== {"gstreamer", "nvdec"}` said its own reason was
+        # "a third entry without a job building it is a unit going quietly uncovered", and
+        # that PROPERTY is what is worth asserting. A literal set needs editing for every
+        # legitimate lane and says nothing about the job, which is the half that can be gone.
+        workflow = (ROOT / ".github" / "workflows" / "cpp.yml").read_text(encoding="utf-8")
+        unbuilt = [
+            lane
+            for lane in sorted(_COVERED_ELSEWHERE)
+            if f"--with-external {lane}" not in workflow
+        ]
+        assert not unbuilt, (
+            f"{unbuilt} are excused from this job as 'covered elsewhere', but no job in "
+            f"cpp.yml builds them (`--with-external <lane>`), so their units are compiled by "
+            f"nothing anywhere -- which is the hole this whole file exists to close"
         )
 
     def test_no_unit_is_dropped_for_a_missing_lane_where_this_is_required(self) -> None:
-        """The loud skip belongs on THIS leg, because this is the one it can fire on.
+        """The loud skip belongs on THIS leg, and BOTH legs can now fire.
 
-        `EXTERNAL` declares lanes only for the two `ingest/sources` units, so `lanes_of(app)`
-        is empty for every app and the apps leg's version is unreachable by construction
-        (#133 round 4). Here it is reachable and it matters: without `libopencv-dev`,
+        It used to say the apps leg was "unreachable by construction" -- true until the
+        `shipvision` lane declared a test app, and a comment asserting a dead invariant is
+        what cost #169 a round. Here it is reachable and it matters: without `libopencv-dev`,
         `ingest/sources/replay.cpp` falls out and NOTHING in CI compiles it -- `cpp-gst-lane`
         covers `gstreamer.cpp`, not that one -- which is this file's own thesis.
         """
@@ -683,17 +698,21 @@ class TestTheAppsOfflineCannotBuild:
         skipped: list[str] = []
         for app in _cuda_reaching_apps():
             if not _lanes_available(build, app):
-                skipped.append(app.relative_to(ROOT).as_posix())
+                # Covered elsewhere is not a hole: `_COVERED_ELSEWHERE` names the lanes
+                # another cpp.yml job builds, and the same reading applies to an APP as to a
+                # unit. `test_tracking_shard.cpp` is the first app to declare a lane at all.
+                if not _lanes_needed(build, app) <= _COVERED_ELSEWHERE:
+                    skipped.append(app.relative_to(ROOT).as_posix())
                 continue
             ok, errors = _compiles(app, _lane_flags(build, app))
             if not ok:
                 failures.append(f"{app.relative_to(ROOT)}:\n  {errors}")
 
         assert not failures, "these do not compile:\n" + "\n".join(failures)
-        # ARMOUR, not live coverage: `EXTERNAL` declares lanes only for the two
-        # `ingest/sources` units, so `lanes_of(app)` is empty for every app today and
-        # `skipped` is always empty. The leg that can fire is
-        # `test_no_unit_is_dropped_for_a_missing_lane_where_this_is_required`.
+        # ARMOUR THAT HAS NOW FIRED, on #169: it used to say `skipped` was always empty
+        # because no app declared a lane, and the `shipvision` lane declares a test app. The
+        # exclusion above is what keeps this meaning something -- a skip is a hole UNLESS a
+        # named job compiles it, the same judgement the unit leg makes.
         if os.environ.get(_REQUIRE):
             assert not skipped, (
                 f"these apps were skipped for a missing external lane: {skipped}. Where this "

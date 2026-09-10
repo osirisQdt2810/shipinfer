@@ -90,6 +90,12 @@ class ExternalLane(NamedTuple):
     units: tuple[str, ...]
     packages: tuple[str, ...]
     hint: str
+    #: An IN-TREE library instead of a ``pkg-config`` package: the include root and the
+    #: sources to build beside this lane's units, repo-relative. These OR ``packages``, never
+    #: both -- a submodule has no ``.pc``, and the sources ride the link line (see
+    #: :func:`link_flags`), so only the binaries whose closure reaches the lane compile them.
+    include_root: str = ""
+    sources: tuple[str, ...] = ()
 
 
 #: The external lanes, keyed by the name ``--with-external`` takes. OpenCV is in here with
@@ -132,6 +138,37 @@ EXTERNAL: dict[str, ExternalLane] = {
             "is NVDEC's."
         ),
     ),
+    # doc: long the only in-tree lane, and why four .cpp files buy the offline tier a tracker
+    # Tracking, out of the kernels submodule. THE ONLY IN-TREE LANE and the reason the second
+    # axis exists: `3rdparty/shipvision` is a pinned submodule (ADR-010), not a package, so
+    # there is nothing for `pkg-config` to resolve.
+    #
+    # FOUR SOURCES AND NO CUDA is what makes it worth having: the C++ ByteTrack, its
+    # association, its Kalman filter and its track pool compile with `g++` alone. So the
+    # correctness-critical half of tracking -- one tracker per camera and the ordering guard,
+    # where a failure is an invented identity rather than an error -- is testable in the
+    # OFFLINE tier on a machine with no driver. ADR-001's promise, somewhere it was not
+    # obvious it reached.
+    "shipvision": ExternalLane(
+        units=(
+            "shipinfer/pipeline/tracking/shard.cpp",
+            "tests/test_tracking_shard.cpp",
+        ),
+        packages=(),
+        include_root="3rdparty/shipvision/csrc",
+        sources=(
+            "3rdparty/shipvision/csrc/shipvision/mot/trackers/bytetrack/tracker.cpp",
+            "3rdparty/shipvision/csrc/shipvision/mot/association.cpp",
+            "3rdparty/shipvision/csrc/shipvision/mot/kalman.cpp",
+            "3rdparty/shipvision/csrc/shipvision/mot/pool.cpp",
+        ),
+        hint=(
+            "run `git submodule update --init 3rdparty/shipvision`. CI checks it out by name "
+            "over anonymous https rather than with `submodules: recursive`, because "
+            "`benchmarks/baseline` is a third-org SSH remote a runner cannot read and one "
+            "failing submodule aborts the whole checkout -- see ci.yml's kernels job."
+        ),
+    ),
 }
 
 _PKG_CONFIG_CACHE: dict[str, list[str]] = {}
@@ -145,6 +182,19 @@ def pkg_config_flags(lane: str) -> list[str]:
     """
     if lane not in _PKG_CONFIG_CACHE:
         spec = EXTERNAL[lane]
+        if spec.include_root:
+            # AN IN-TREE LANE, answered by the filesystem rather than by `pkg-config`. The
+            # SystemExit is the same shape on purpose: every caller already treats it as "this
+            # lane is not available", and a submodule nobody checked out is exactly that.
+            root = ROOT / spec.include_root
+            missing = [s for s in spec.sources if not (ROOT / s).exists()]
+            if not root.is_dir() or missing:
+                raise SystemExit(
+                    f"{spec.include_root} is not present (needed by "
+                    f"{', '.join(spec.units)}, the '{lane}' external lane): {spec.hint}"
+                )
+            _PKG_CONFIG_CACHE[lane] = [f"-I{root}", *(str(ROOT / s) for s in spec.sources)]
+            return _PKG_CONFIG_CACHE[lane]
         probe = subprocess.run(
             ["pkg-config", "--cflags", "--libs", *spec.packages],
             capture_output=True,
@@ -215,10 +265,23 @@ def compile_flags(lanes: set[str]) -> list[str]:
 
 
 def link_flags(lanes: set[str]) -> list[str]:
-    """The library half — everything that is not an include path."""
-    return [
-        f for lane in sorted(lanes) for f in pkg_config_flags(lane) if not f.startswith("-I")
-    ]
+    """The library half — everything that is not an include path.
+
+    WITH ONE EXCEPTION, and it is not a special case so much as the consequence of one: an
+    in-tree lane contributes SOURCES to the link, and ``g++`` compiling a source on a link
+    line needs that source's own ``-I`` there too. Dropping it gave four
+    ``fatal error: shipvision/mot/pool.h: No such file or directory`` on a link whose compile
+    step had been perfectly happy, which is a confusing enough failure to be worth the comment.
+    """
+    out: list[str] = []
+    for lane in sorted(lanes):
+        keep_includes = bool(EXTERNAL[lane].include_root)
+        out.extend(
+            flag
+            for flag in pkg_config_flags(lane)
+            if keep_includes or not flag.startswith("-I")
+        )
+    return out
 
 
 _INCLUDE = re.compile(r'^\s*#include\s+"(shipinfer/[^"]+)"', re.MULTILINE)
