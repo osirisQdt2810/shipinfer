@@ -10,6 +10,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -273,6 +274,16 @@ namespace {
         return out.str();
     }
 
+    /// A microsecond span as `uint32_t`, saturating rather than wrapping.
+    ///
+    /// `int64_t` in, and 2^32 us is ~71 minutes: unreachable at any run length this binary
+    /// takes, and a wrap would report the longest frame in the run as the shortest. Saturating
+    /// costs one comparison and removes the question.
+    uint32_t microseconds_clamped(int64_t value) {
+        constexpr int64_t kMax = std::numeric_limits<uint32_t>::max();
+        return static_cast<uint32_t>(std::clamp<int64_t>(value, 0, kMax));
+    }
+
     /// One window's percentiles, under the caller's lock, with a `name_` prefix.
     ///
     /// PERCENTILES BECAUSE A MEAN HIDES THE TAIL, and the tail is what a 50-camera fleet is
@@ -518,10 +529,9 @@ int main(int argc, char** argv) {
                 // would report the p99 of the frames that went well.
                 {
                     std::lock_guard<std::mutex> lock(latency_lock);
-                    latency_us.push_back(
-                        static_cast<uint32_t>(std::max<int64_t>(0, result.waited_us)));
+                    latency_us.push_back(microseconds_clamped(result.waited_us));
                     if (captured_to_emitted_us > 0) {
-                        frame_us.push_back(static_cast<uint32_t>(captured_to_emitted_us));
+                        frame_us.push_back(microseconds_clamped(captured_to_emitted_us));
                     }
                 }
             },
@@ -903,6 +913,17 @@ int main(int argc, char** argv) {
         // at capture, so it is the one a deployment is judged on.
         report_window("reassembly_us", latency_lock, latency_us);
         report_window("frame_us", latency_lock, frame_us);
+        // IN THE OUTPUT, not only in a comment: `captured_ns` is stamped on every source path
+        // there is, so a frame window with fewer samples than the reassembly one means some
+        // source stopped stamping -- and a reader comparing the two figures has to know that
+        // the second describes a subset.
+        {
+            const std::lock_guard<std::mutex> held(latency_lock);
+            if (frame_us.size() < latency_us.size()) {
+                std::cout << "frame_us_unstamped " << (latency_us.size() - frame_us.size())
+                          << "\n";
+            }
+        }
         // Reported unconditionally, zero included: a number that appears only when it is
         // non-zero is a number a reader does not know to look for.
         std::cout << "events_unwritable " << unwritable.load() << "\n";
