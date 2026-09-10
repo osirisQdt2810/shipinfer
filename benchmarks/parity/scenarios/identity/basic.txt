@@ -1,0 +1,95 @@
+# Cross-camera identity, instant by instant. The C++ port and the reference read THIS file and
+# must answer the same ids, which is what makes the port a port rather than a rewrite.
+#
+# Line-oriented and not JSON, for the reason `golden/plans/*.plan` is: the C++ side reads it in
+# a test binary with no JSON parser, and a format both halves can write in ten lines cannot
+# drift the way two parsers can.
+#
+#   scenario <name> <max_age> <capacity> <max_tracks>
+#   instant  <label>:<camera>#<track>:<x>,<y> ...      (an embedding per observation)
+#
+# Embeddings are two-dimensional on purpose: (1,0) and (0,1) are orthogonal, so "looks alike"
+# and "looks nothing alike" are readable rather than arithmetic.
+
+# Two cameras the clusterer put together: the thing mtmc exists for.
+scenario two_cameras_one_cluster 30 4096 8192
+instant 5:cam0#1:1,0 5:cam1#7:1,0
+
+# One camera twice in one cluster. One identity is one object, so this is two identities --
+# the invariant the reference trusted would never be tested.
+scenario same_camera_twice 30 4096 8192
+instant 0:cam0#1:1,0 0:cam0#2:1,0
+
+# The larger cluster is served first, so it takes the lower id. Ties by first appearance.
+scenario largest_first 30 4096 8192
+instant 3:cam0#1:1,0 9:cam1#1:0,1 9:cam2#1:0,1
+
+# Labels mean nothing between instants; the identity has to survive a relabelling.
+scenario persists_across_relabel 30 4096 8192
+instant 0:cam0#1:1,0 0:cam1#7:1,0
+instant 4:cam0#1:1,0 4:cam1#7:1,0
+
+# Two identities overlap the cluster equally; the one continuously confirmed longest wins.
+scenario oldest_wins 30 4096 8192
+instant 0:cam0#1:1,0
+instant 0:cam0#1:1,0
+instant 0:cam0#1:1,0
+instant 0:cam0#1:1,0
+instant 0:cam1#1:0,1
+instant 0:cam0#1:1,0 0:cam1#1:0,1
+
+# A camera's track id changes -- occlusion, then a new track. A live track outranks a stale one.
+scenario stale_slot_replaced 30 4096 8192
+instant 0:cam0#1:1,0 0:cam1#1:1,0
+instant 0:cam0#2:1,0 0:cam1#1:1,0
+
+# The incumbent is IN the cluster, so it is part of the overlap it is judged against and
+# scores its own similarity to itself. A draw keeps the slot.
+scenario incumbent_in_cluster_draws 30 4096 8192
+instant 0:cam0#1:0,1 0:cam1#1:1,0
+instant 0:cam0#1:0,1 0:cam0#2:1,0 0:cam1#1:1,0
+
+# The incumbent is live but in ANOTHER cluster, so it is not in the overlap -- the only shape
+# in which a challenger can out-score it. The loser keeps an identity of its own.
+scenario challenger_wins_from_another_cluster 30 4096 8192
+instant 0:cam0#1:0,1 0:cam1#1:1,0 0:cam2#1:1,0
+instant 1:cam0#1:0,1 0:cam1#1:1,0 0:cam2#1:1,0 0:cam0#2:1,0
+
+# Two known identities one instant thinks are one. Merging on one frame's evidence is how
+# identities oscillate, so nothing happens.
+scenario two_known_identities 30 4096 8192
+instant 0:cam0#1:1,0
+instant 0:cam1#1:0,1
+instant 0:cam0#1:1,0 0:cam1#1:0,1
+
+# Ageing is counted in INSTANTS, including quiet ones.
+scenario age_out 2 4096 8192
+instant 0:cam0#1:1,0
+instant 0:cam1#1:0,1
+instant 0:cam1#1:0,1
+instant 0:cam1#1:0,1
+instant 0:cam1#1:0,1
+
+# The track bound evicts the least recently seen.
+scenario track_bound 100 4096 2
+instant 0:cam0#1:1,0
+instant 0:cam1#1:0,1
+instant 0:cam2#1:1,1
+
+# The identity bound evicts a whole identity.
+scenario identity_bound 100 2 8192
+instant 0:cam0#1:1,0
+instant 0:cam1#1:0,1
+instant 0:cam2#1:1,1
+
+# TIES, and the rule is FIRST APPEARANCE rather than label value -- two clusters of the same
+# size, the later label seen first. Ids are issued in group order, so the answer is the order.
+scenario equal_clusters_tie 30 4096 8192
+instant 7:cam0#1:1,0 7:cam1#1:1,0 3:cam2#1:0,1 3:cam3#1:0,1
+
+# The same rule where the sort has to hold it over eighteen groups: every cluster is size 1,
+# so all of them tie, and the ids expose the order the sort left them in. libstdc++'s
+# `std::sort` is incidentally stable below its insertion-sort threshold and stops being so
+# here, which is why this scenario is eighteen wide rather than four.
+scenario wide_tie_keeps_first_appearance 30 4096 8192
+instant 17:cam00#1:0,1 16:cam01#1:1,2 15:cam02#1:2,3 14:cam03#1:3,4 13:cam04#1:4,5 12:cam05#1:5,6 11:cam06#1:6,7 10:cam07#1:7,8 9:cam08#1:8,9 8:cam09#1:9,10 7:cam10#1:10,11 6:cam11#1:11,12 5:cam12#1:12,13 4:cam13#1:13,14 3:cam14#1:14,15 2:cam15#1:15,16 1:cam16#1:16,17 0:cam17#1:17,18

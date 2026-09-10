@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-10 — cross-camera global ids on the C++ plane, held to the reference
+
+`GlobalIdAssigner` (`pipeline/mtmc/identity.{h,cpp}`), the twin of
+`shipvision/mtmc/identity.py`. It is HERE and not in the submodule because the submodule ruled
+on it: an identity map keyed on (camera, track) "is Python's to own -- it is the stateful half"
+(`mtmc/frames.h`). The library ships the stateless (n, n) passes; turning a per-instant cluster
+label into an id that persists is the caller's, so a C++ `mtmc` stage cannot exist without it.
+Lane-free and CUDA-free, so it compiles offline and its goldens run on a plain runner. Two
+gates: 44 checks on its own invariant (`owner_[k] == g` exactly when `k` is in `members_[g]`)
+and a parity binary against the reference's answers to a shared scenario file. THE TIE-BREAK
+HAD NO DISCRIMINATING SCENARIO -- largest-cluster-first, ties by first appearance, and a
+`stable_sort` -> `sort` mutation passed everything because libstdc++'s sort is incidentally
+stable below its threshold. Eighteen groups wide now, and it fails.
+---
+
 ## 2026-09-10 — the C++ bench reports a latency, for the first time
 
 `cli/bench` printed 18 counters and no latency, while the sizing section says the bottleneck is
