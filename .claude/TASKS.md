@@ -2736,10 +2736,40 @@ hook down, for when the operator asked to see something before it is executed.
       cores are shared). It does not follow that the VRAM route is worse in a deployment where
       nothing else runs on the host -- it follows that on THIS box, at THIS load, the upload
       was not the wall.
-      NEXT: (1) find detect-only's real ceiling on this route by removing the generator limit;
-      (2) price the segmenter's whole-frame variant, since that is the plane-divergence and the
-      biggest single cost; (3) the C++ plane still has no `mtmc`, so "decode -> mtmc track"
-      cannot be measured end to end until PR 3 lands (the barrier half is built and green).
+      **THE CAMERA SPLIT MATTERS AND THE GENERATOR IS THE CAP.** `rtpjitterbuffer` costs per
+      CAMERA, not per frame -- 136 CPU-s at 10 cameras, 170 at 25, 182 at 50 -- so the same
+      offer through fewer cameras leaves more of the box for the plane. Same route, same plan:
+      | cameras x fps | offered | RTSP delivered | accepted |
+      |---|---|---|---|
+      | 10 x 500 | 5 000 | 2 531 | 2 531 (generator-bound) |
+      | 50 x 100 | 5 000 | 3 661 | 2 696 |
+      | 25 x 200 | 5 000 | 3 440 | 3 240 |
+      | 25 x 400 | 10 000 | 3 413 | **3 324** |
+      So the RTSP generator caps at ~3 400 img/s of delivery on this box and DETECT-ONLY TAKES
+      ESSENTIALLY ALL OF IT: **3 324 img/s, which is above V167's 3 000 target, and still
+      generator-limited** -- its own ceiling on this route is not yet known.
+      **AND THE DEPLOYABLE CHAIN AT THE SAME SPLIT: 424.8 img/s.** 25x200, 6 stages including
+      `track`. So the whole pipeline is **7.1x short** of 3 000 while ONE model is already over
+      it.
+      **THE ARITHMETIC THAT SETTLES WHETHER 3 000 IS REACHABLE ON FOUR A5000s.** Normalising
+      the 11.74 invocations to detect-equivalents by input pixels (640x640 = 1, 256x128 =
+      1/12.5): 2.47 + 9.27/12.5 = **3.21 detect-equivalents per image**. At 424.8 img/s that is
+      1 364 equivalents/s against detect-only's 3 324 -- so the chain achieves 41% of the pure
+      rate in equivalent work, and the missing 2.4x is the crop kernels, the scatter,
+      reassembly and seven model instances per device contending. Even with that overhead gone
+      the chain would do 3 324 / 3.21 = **1 036 img/s**. Reaching 3 000 needs the per-image
+      work down to 3 324/3 000 = **1.11 detect-equivalents**, i.e. about ONE detect-sized
+      inference per image and nothing else.
+      **SO: 3 000 img/s for detector + segmenter + two embedders is not reachable on four
+      A5000s, and not by scheduling.** It needs fewer or cheaper models per image, or more
+      devices -- and 16 GPUs at 4x the devices is ~1 700 img/s of THIS chain, still short, so
+      the chain has to get cheaper too. That is a design conversation, and the levers are
+      priced above.
+      NEXT: (1) price the segmenter's WHOLE-FRAME variant, which is the plane divergence and
+      the biggest single cost (5.5x for 1.47 invocations); (2) `latency_ms` is 200 by default
+      and there is no jitter on loopback -- 276 of our 625 CPU-s are the RTP receive path;
+      (3) the C++ plane still has no `mtmc`, so "decode -> mtmc track" cannot be measured end
+      to end until PR 3 lands (the barrier half is built and green).
 
 - [~] **V165-WHOLE-PIPELINE-4500 · THE TARGET IS NOW ABSOLUTE AND IT IS THE WHOLE CHAIN.**
       4 500 img/s from `decode -> ... -> mtmc track`, not a multiple of anything -- so the
