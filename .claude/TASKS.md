@@ -2718,7 +2718,35 @@ hook down, for when the operator asked to see something before it is executed.
       which is what stops the port drifting the first time either side is edited. A verified
       port whose verification is not in the tree is a verified port for exactly one afternoon.
 
-- [ ] BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE · scope the engine existence and digest checks to the
+- [ ] BENCH-PRECISION-SELECTS-NO-PLAN · `--precision` names the BASELINE's flat engines and
+      nothing else. Our side loads `model_repository/<name>/1/model.plan` whatever precision it
+      holds, so on a `--systems shipinfer` run the flag changes nothing except which file the
+      digest guard compares against -- and when that flat file is absent the guard now warns and
+      continues. Two ways out, and the choice is a design call: resolve the PLAN path by
+      precision (`model.plan` becomes `model.<precision>.plan`, which the repository's
+      `engine_file` parameter can already express), or have the bench install the precision's
+      plan before a run the way `build_engines.py --install` does. Until then `int8` cannot come
+      back to the bench's `--precision` choices, because it would be a knob that lies. Found
+      while fixing `BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE`, and named by #216's review round 2.
+
+- [~] BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE · BUILT AND GREEN, waiting only for a free PR slot
+      (#217 is in review; one at a time). On `fix/the-engine-checks-follow-the-chain`:
+      `require_inputs(system)` takes the caller's own name -- each system already called it for
+      itself, so the name was available and simply not asked for -- the baseline needs the two
+      FLAT engines, our side needs the repository, and an unknown name is refused rather than
+      silently checking nothing. `require_same_engines` covers FOUR models: for the embedders
+      it is not a cross-system check (the baseline runs one model per image) but the one that
+      says our side loaded the precision ASKED for, which `--precision fp16` never did for the
+      two models carrying ~9 of the chain's ~11.7 invocations. The silent skip is loud now.
+      4 198 offline tests green, `pre-commit` clean. `int8` deliberately does NOT come back to
+      the bench: the blocker removed here was one of two, since our side loads
+      `model_repository/<m>/1/model.plan` whatever it holds -- so on a shipinfer-only run the
+      flag selects nothing at all. That is `BENCH-PRECISION-SELECTS-NO-PLAN`, below.
+      A box-dependent fixture was fixed on the way: `_config` left `emb_engine` unset, so
+      `resolved()` filled it from the repository root and the test checked whatever engines the
+      box happened to hold -- passing in a worktree with an empty `models/` and failing in a
+      checkout that has them.
+      ORIGINAL: scope the engine existence and digest checks to the
       models a run actually loads. Found by #216's first review round. `require_inputs`
       (`benchmarks/harness/config.py`) demands BOTH `yolo26n_<prec>.engine` and
       `yolo26n-seg_<prec>.engine` unconditionally -- no reference to `--systems` or to which
