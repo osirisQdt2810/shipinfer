@@ -2744,6 +2744,13 @@ hook down, for when the operator asked to see something before it is executed.
       four-model chain costs 4.96x of throughput (3 315.7 / 669.1), which is the 2.65 models
       plus the crops and the scatter. So 0.70x is not a scheduling result; it is the price of
       computing four models per image against a baseline that computes one.
+      **AND THE DETECT-ONLY RUN IS GPU-BOUND, WHICH RULES OUT SCHEDULING FOR THE LAST 1.45x.**
+      Measured from the same run's accounting: `per_device_busy_pct ship_detector 2:131.5
+      3:131.1 4:130.3 6:117.8` (two instances per device, so ~130% is both busy) against
+      `command_cores_busy 9.05` of 48 cores -- the host is at ~19% while every GPU is
+      saturated, `pipe` threads are 58.1% of 402.6 host CPU-s, and `accounted_pct` is 99.0. So
+      the remaining 1.45x cannot come from queues, placement or thread counts; it has to come
+      from doing less work per image (INT8, the fused kernels) or from more devices.
       REMAINING LEVERS for the last 1.45x, both untouched: INT8 (fp16 alone gave 1.23x on the
       full chain), and the fused kernels -- `ldd csrc/build/bench` still links no shipvision
       library, so every letterbox and crop in these numbers is torch/CPU.
@@ -3043,10 +3050,28 @@ hook down, for when the operator asked to see something before it is executed.
       `test_chain.py` used two `kind: track` elements as generic shapes, and two trackers over
       one camera's rows is two ids for one detection. Disjoint `classes:`, which is the remedy
       the refusal's own message names.
-      COST, on the pair the change makes possible (same chain, same source, lane in vs out,
-      8x10x20 s on two GPUs): 1 595 complete events tracked against 1 600 untracked -- 0.3%,
-      inside this box's noise AT THAT LOAD, and `RESULTS.md` says it that way rather than
-      claiming the design load.
+      COST -- AND THE FIRST ANSWER WAS A DEFECT OF MINE, NOT A COST. The pair read 1 595
+      complete events tracked against 1 600 untracked and I called it 0.3%, "inside this box's
+      noise AT THAT LOAD". ROUND 2's reviewer said that may be reading the bug as noise, and
+      was right: the stage let the shard's ordering refusal reach `Stage::run`, so the stage
+      FAILED, so the collector never got the `track` slot `planned()` had promised and the
+      frame went out incomplete. Three tracked runs lost 5, 12 and 17 events; after the fix two
+      runs complete every frame (1598/1598 and 1600/1600) and the reordering is NAMED --
+      `track_frames_untracked track 2` and `track 1`. `RESULTS.md` now says that.
+      **ROUND 2 (10 Sep, `782e42e`): two BLOCKING, both real, both reproduced before fixing.**
+      (1) the incomplete-frame defect above -- the stage now catches `InferenceError` only,
+      attaches an empty batch and counts it, the way `track.py` returns `_untracked(item)`; a
+      `ConfigError` still fails the stage. (2) TWO RUNNABLE TRACKERS SHARED ONE SHARD:
+      `bytetrack.cpp` handed every caller one function-local static and a shard is keyed by
+      camera, so on the chain #215 makes legal -- two slots, disjoint selections, one camera --
+      both see `(cam0, 42)` and the second was refused forever. Reproduced verbatim as a
+      mutant: "camera 'cam-pair': frame 1 reached the tracker after frame 1". The cache moved
+      to `create_associator(impl, slot)`, which is `track.py::_do_open`'s shape (a shard per
+      ELEMENT INSTANCE). Both non-blocking items taken too: `AssociatorRegistry::create`
+      answers a ConfigError instead of `std::out_of_range`, and the per-frame copy of the
+      detection vector is gone for a slot that selects every row. The body was rewritten FROM
+      THE DIFF -- round 1's `Content / Changes` described files that are in no commit, which is
+      the rule I broke.
       **PR 2's DESIGN, established by reading rather than guessing (10 Sep):**
       (1) THE MECHANISM IS ALREADY THERE. `pipeline/events/records.cpp:70` maps a field named
       `track_id` to `Field::TrackId`, which fills `record.track_id` from an `ObjectBatch` row.
