@@ -142,6 +142,26 @@ namespace {
               "and they come back in INPUT order, not sorted");
     }
 
+    void one_track_twice_in_one_instant_is_refused() {
+        // #220's review named the shape: both copies read the same previous count so the run
+        // advances once (correct), and then BOTH are admitted -- and the caller zips
+        // `admitted` against the clusterer's labels, so one track takes two rows of the matrix
+        // and contests itself. No golden can hold it: the emitter's scenario format is
+        // line-oriented over distinct keys and the reference's dicts would collapse the pair.
+        ObservationGate gate(options(1, 0.0));
+        std::string message;
+
+        try {
+            gate.filter({seen("cam0", 1, 200.0), seen("cam0", 1, 200.0)});
+        } catch (const InferenceError& error) {
+            message = error.what();
+        }
+
+        check(message.find("cam0#1") != std::string::npos, "the duplicate is named");
+        check(message.find("twice in one instant") != std::string::npos,
+              "and the reason is the instant's shape, not the track's size");
+    }
+
     void reset_forgets_every_run() {
         ObservationGate gate(options(3));
         gate.filter({seen("cam0", 1, 200)});
@@ -163,6 +183,7 @@ int main() {
     the_height_test_is_strictly_greater_than_the_threshold();
     a_frame_with_no_extent_admits_nothing_rather_than_dividing_by_zero();
     the_admitted_keep_their_input_order();
+    one_track_twice_in_one_instant_is_refused();
     reset_forgets_every_run();
     std::printf("%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;

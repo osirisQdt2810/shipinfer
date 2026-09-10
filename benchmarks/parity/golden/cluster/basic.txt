@@ -1,0 +1,47 @@
+# The REFERENCE's answer to scenarios/cluster/*.txt. Emitted, never hand-edited:
+#   python scripts/emit_parity_golden.py --kind cluster --scenario basic --emit-golden
+scenario two_cameras_alike
+ids cam0#1=-1 cam1#7=-1
+ids cam0#1=-1 cam1#7=-1
+ids cam0#1=0 cam1#7=0
+ids cam0#1=0 cam1#7=0
+ids cam0#1=0 cam1#7=0
+identities 1
+scenario two_cameras_unalike
+ids cam0#1=-1 cam1#7=-1
+ids cam0#1=-1 cam1#7=-1
+ids cam0#1=0 cam1#7=1
+ids cam0#1=0 cam1#7=1
+ids cam0#1=0 cam1#7=1
+identities 2
+scenario gated_by_height
+ids cam0#1=-1 cam1#7=-1
+ids cam0#1=-1 cam1#7=-1
+ids cam0#1=-1 cam1#7=0
+ids cam0#1=-1 cam1#7=0
+ids cam0#1=-1 cam1#7=0
+identities 1
+scenario three_cameras
+ids cam0#1=-1 cam1#1=-1 cam2#1=-1
+ids cam0#1=-1 cam1#1=-1 cam2#1=-1
+ids cam0#1=0 cam1#1=0 cam2#1=1
+ids cam0#1=0 cam1#1=0 cam2#1=1
+identities 2
+scenario appearance_just_above_the_threshold
+ids cam0#1=-1 cam1#1=-1
+ids cam0#1=-1 cam1#1=-1
+ids cam0#1=0 cam1#1=0
+ids cam0#1=0 cam1#1=0
+identities 1
+scenario appearance_well_below_the_threshold
+ids cam0#1=-1 cam1#1=-1
+ids cam0#1=-1 cam1#1=-1
+ids cam0#1=0 cam1#1=1
+ids cam0#1=0 cam1#1=1
+identities 2
+scenario one_camera_twice_alike
+ids cam0#1=-1 cam0#2=-1 cam1#1=-1
+ids cam0#1=-1 cam0#2=-1 cam1#1=-1
+ids cam0#1=0 cam0#2=1 cam1#1=0
+ids cam0#1=0 cam0#2=1 cam1#1=0
+identities 2

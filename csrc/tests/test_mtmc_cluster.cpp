@@ -57,6 +57,13 @@ namespace {
     const mtmc::ClusterRegistrar kFake("fake",
                                        [] { return std::make_shared<CountingTracker>(); });
 
+    // A FACTORY THAT FAILS, which is what makes the null-cache fix testable. Registered here
+    // rather than in the lane because the shape is the seam's, not the algorithm's: the lane's
+    // real tracker is simply the first factory in the tree that CAN throw.
+    const mtmc::ClusterRegistrar kThrows("throws", []() -> std::shared_ptr<ClusterTracker> {
+        throw ConfigError("bad algorithm config");
+    });
+
     void the_registry_hands_out_one_tracker_per_slot() {
         // A cross-camera tracker IS the identity space for a group, so two instances would
         // issue two contradictory sets of global ids for the same objects.
@@ -116,6 +123,28 @@ namespace {
               "and does not call a correctly-spelled name unknown");
     }
 
+    void a_factory_that_throws_caches_nothing() {
+        // `made()[{impl, slot}]` default-inserted BEFORE the factory ran, so a constructor that
+        // threw left a null `shared_ptr` under that key -- and `made_cluster_trackers()` copies
+        // every entry unfiltered, so the bench's per-slot report would dereference it: a
+        // segfault in the REPORTING path, minutes after and nowhere near the configuration
+        // error that caused it. Twice, because the second attempt is what would find the
+        // cached null and answer it as a tracker.
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            bool refused = false;
+            try {
+                mtmc::create_cluster_tracker("throws", "quay");
+            } catch (const ConfigError&) {
+                refused = true;
+            }
+            check(refused, "a throwing factory is refused, and again on the retry");
+        }
+
+        for (const mtmc::MadeClusterTracker& made : mtmc::made_cluster_trackers()) {
+            check(made.tracker != nullptr, "no null tracker is ever listed: " + made.slot);
+        }
+    }
+
     void what_was_built_is_listable() {
         mtmc::create_cluster_tracker("fake", "listed");
         bool found = false;
@@ -149,6 +178,7 @@ int main() {
     an_unknown_impl_is_refused_by_name();
     the_registry_refuses_an_absent_name_with_its_own_error();
     a_lane_less_build_blames_the_LANE_and_not_the_name();
+    a_factory_that_throws_caches_nothing();
     what_was_built_is_listable();
     the_seam_takes_a_whole_instant();
     std::printf("%d checks, %d failure(s)\n", checks, failures);

@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-10 — the lane unit behind the cross-camera seam
+
+The `shipvision` half, composed rather than reimplemented: `gate.filter`, the (n, n) gram
+(E.E^T on unit vectors, because `matchers/appearance/matcher.h` says the embeddings arrive
+already multiplied), `GatedMatcher::build` for distances, `AgglomerativeClusterer::fit_predict`
+for labels, `GlobalIdAssigner::assign` for ids that persist. It is the ONLY unit here that
+includes a `shipvision` header, which is what keeps the seam, the gate and the identity map in
+the offline tier. Cameras become integer codes by FIRST APPEARANCE, and the default matcher
+falls open with no homography -- an unsurveyed site gets appearance-only association rather
+than a refusal. Every observation is answered whether gated or not, a gated one with `-1`,
+because "unidentifiable" and "absent" are different facts. `--kind cluster` emits the whole
+composition's golden -- the only gate that catches a piece wired to the wrong neighbour.
+
+---
+
 ## 2026-09-10 — the cross-camera seam, and the gate in front of it
 
 `ClusterTracker` (`pipeline/mtmc/cluster.{h,cpp}`) is the shape `tracking/associator.h` is, for
@@ -27,7 +42,7 @@ silently: unit checks and a reference golden pin each, and swapping either fails
 on it: an identity map keyed on (camera, track) "is Python's to own -- it is the stateful half"
 (`mtmc/frames.h`). The library ships the stateless (n, n) passes; turning a cluster label into
 an id that persists is the caller's, so a C++ `mtmc` stage cannot exist without it. Lane-free
-and CUDA-free, so it compiles offline and its goldens run on a plain runner. Two gates: 48
+and CUDA-free, so it compiles offline and its goldens run on a plain runner. Two gates: 57
 checks on its own invariant and a parity binary against the reference's answers. THE TIE-BREAK
 HAD NO DISCRIMINATING SCENARIO -- largest-cluster-first, ties by first appearance, and a
 `stable_sort` -> `sort` mutation passed everything because libstdc++'s sort is incidentally

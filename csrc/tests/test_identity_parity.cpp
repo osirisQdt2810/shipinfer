@@ -37,21 +37,6 @@ namespace {
         }
     }
 
-    std::vector<std::string> lines_of(const std::string& path, bool keep_comments) {
-        std::ifstream file(path);
-        if (!file) throw ConfigError("cannot read " + path);
-        std::vector<std::string> out;
-        std::string line;
-        while (std::getline(file, line)) {
-            while (!line.empty() && (line.back() == ' ' || line.back() == '\r'))
-                line.pop_back();
-            if (line.empty()) continue;
-            if (!keep_comments && line[0] == '#') continue;
-            out.push_back(line);
-        }
-        return out;
-    }
-
     struct Instant {
         std::vector<int> labels;
         std::vector<IdentityObservation> observations;
@@ -83,7 +68,7 @@ namespace {
 
     std::vector<Scenario> read_scenarios(const std::string& path) {
         std::vector<Scenario> scenarios;
-        for (const std::string& line : lines_of(path, false)) {
+        for (const std::string& line : parity::read_lines(path, false)) {
             std::istringstream stream(line);
             std::string head;
             stream >> head;
@@ -111,7 +96,7 @@ namespace {
         const std::vector<Scenario> scenarios =
             read_scenarios(resolve("scenarios/identity/basic.txt"));
         const std::vector<std::string> golden =
-            lines_of(resolve("golden/identity/basic.txt"), false);
+            parity::read_lines(resolve("golden/identity/basic.txt"), false);
 
         std::vector<std::string> written;
         for (const Scenario& scenario : scenarios) {
@@ -153,7 +138,7 @@ namespace {
         // A golden nobody can regenerate is a golden that gets hand-edited the first time it
         // fails, which is how a gate becomes a rubber stamp.
         const std::vector<std::string> all =
-            lines_of(resolve("golden/identity/basic.txt"), true);
+            parity::read_lines(resolve("golden/identity/basic.txt"), true);
         bool named = false;
         for (const std::string& line : all) {
             if (line.find("emit_parity_golden.py --kind identity") != std::string::npos) {
