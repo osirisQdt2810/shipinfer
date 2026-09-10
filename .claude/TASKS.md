@@ -2930,7 +2930,14 @@ hook down, for when the operator asked to see something before it is executed.
       open item aimed at the ~4x -> 5x gap. Opening one is a decision about the target, which
       is why it waits on this question rather than the other way round.
 
-- [!] **CSRC-GRAPH-HAS-NO-TRACKING · OPERATOR: please merge #169 (PR 1 of 3) -- it adds a
+- [~] **CSRC-GRAPH-HAS-NO-TRACKING · #169 MERGED BY THE OPERATOR 10 Sep (`a9867e3`), so
+      PR 2 of 3 is mine to build and needs no stacking.** What #169 landed: the in-tree
+      external lane and `TrackerShard` behind it. WHAT PR 2 IS: a `track` stage in the C++
+      perception graph that fills `ObjectRecord::track_id` -- an `optional<int64_t>` in
+      `core/events/schema.h` that is emitted today and always null, with
+      `body_track_id_vec`/`ship_track_id_vec` already on the wire. So it is a stage plus a
+      fill, not a schema change. PR 3 is `mtmc`.
+      ORIGINAL: it adds a
       **A RULE FOR THE PORT, from #199 (9 Sep): a FIRST `camera_added` resets nothing.** The
       Python element reset a camera's tracker on every announcement, and because the runner
       announces AFTER the ingest actor exists, a frame that arrived first had its brand new
