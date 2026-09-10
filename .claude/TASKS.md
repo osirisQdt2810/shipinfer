@@ -1911,7 +1911,7 @@ hook down, for when the operator asked to see something before it is executed.
       OVER: the parity pair's Python half asserts `shipinfer_pipeline_frame_latency_us` in
       `metrics.py`, a string already on main -- so it is green today and would STAY green
       if the Python arm never surfaced the number anywhere. The body's "asserts both
-      windows on both planes" therefore claimed more than the tests guard. STILL OPEN, and
+      windows on both planes" therefore claimed more than the tests guard. PR #213 CLOSES IT, and
       it is three lines plus a field: `"frame": read_total(runner.metrics.frame_latency_us)`
       in `counters()` (and `None` in the short-run literal),
       `ShipInferResult.steady_frame_latency`, and print it beside the reassembly line with
