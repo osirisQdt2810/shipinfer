@@ -1876,6 +1876,25 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE HERE because the C++ plane is the one the measurement was taken on, and a
       Python A/B needs its own before/after at the design load to claim anything.
 
+- [ ] **DOES-THE-KNOB-MOVE-C1? · the one C1 question that does NOT need the operator (10 Sep).**
+      `C1-WHAT-IS-THE-5x-AGAINST?` is blocked on which comparison the >=5x is against -- the
+      operator's to answer. But the fourth ratio, `rows per host CPU-second`, is the only one
+      with a LIKE-FOR-LIKE denominator, and the blocking-sync knob acts directly on its
+      denominator: -24% total host CPU on the C++ plane, -8.3% on the Python one. That is an
+      IMPLICATION in the ledger and not a measurement, so measure it.
+      SHAPE, replicating #190's three passes exactly so the control is comparable: GPUs
+      1/3/4/5/6, 50 x 20 x 40 s, `--source nvdec`, rows summed from `per_device_rows`, CPU from
+      `command_cpu_s` (which for the RTSP arm excludes the servers -- they are siblings of the
+      wrapper, discounted separately through `--pid`). Verified against the surviving artefacts:
+      `.artifacts/cpp/ratio-{a,b,c}.log` carry 669.65 / 703.78 / 657.13 CPU-s and rows summing
+      to the ledger's 240 180 / 267 334 / 241 268.
+      THREE ARMS PER PASS, not two: baseline, ours flag-OFF, ours flag-ON. The flag-off arm is
+      the control from THIS sitting, so the comparison is internal and does not rest on a
+      figure measured a day earlier on a differently-loaded box. Arm order ROTATES between
+      passes, because always running the flag-on arm last would let a drift inside a pass look
+      like the knob.
+      NOT A DEFAULT CHANGE: the knob stays off unless this says otherwise, and if it does say
+      otherwise that is a separate PR with this measurement as its evidence.
 - [~] **THE-DISCOUNT-STOPS-AT-THE-GENERATORS-OWN-CHILDREN · PR #207 IN REVIEW (10 Sep),
       all three fixed.** `cpu_seconds` reads `cutime`/`cstime` too, so the discount was
       0.11 CPU-s where the truth is 0.50 -- a third to a quarter of the generator's real
