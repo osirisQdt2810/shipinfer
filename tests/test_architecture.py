@@ -330,6 +330,66 @@ class TestEveryProbeSubprocessTestsThisCheckout:
         )
 
 
+class TestTheKernelsPythonHalfIsCoveredByASecondLeg:
+    """189 of CI's 248 skips were the submodule, so `track`, `mtmc` and `reid` were covered
+    on developers' machines and on no machine that gates a merge (run 34344651408).
+
+    A SECOND leg, not a change to the first: the `test` job fetches no submodule BECAUSE that
+    is the check on ADR-001's promise -- the offline tier must pass without the fused kernels.
+    Adding the submodule there would delete the property it exists to prove, so both are
+    asserted here and the pair is the point.
+    """
+
+    JOB = "tests-with-kernels"
+
+    @property
+    def _workflows(self) -> Path:
+        return Path(__file__).resolve().parents[1] / ".github" / "workflows"
+
+    def _load(self, name: str) -> dict:
+        import yaml
+
+        return yaml.safe_load((self._workflows / name).read_text())
+
+    def test_both_workflows_run_it(self) -> None:
+        for name in ("ci.yml", "pr-pipeline.yml"):
+            assert self.JOB in self._load(name)["jobs"], f"{name} does not run {self.JOB}"
+
+    def test_the_merge_gate_waits_for_it(self) -> None:
+        """Otherwise it is decoration: a red leg would merge anyway, which is the whole of
+        `CI-CPP-JOBS-ARE-POST-MERGE` one job over."""
+        merge = self._load("pr-pipeline.yml")["jobs"]["merge"]
+
+        assert self.JOB in merge["needs"]
+
+    def test_the_first_leg_still_fetches_no_submodule(self) -> None:
+        """The property the second leg exists to preserve, and the one a later simplification
+        would take away -- `execution.provider: auto` promises the tier runs without the
+        kernels, and not fetching them in that job is how it stays true."""
+        for name in ("ci.yml", "pr-pipeline.yml"):
+            steps = self._load(name)["jobs"]["test"]["steps"]
+            checkout = next(
+                s for s in steps if str(s.get("uses", "")).startswith("actions/checkout")
+            )
+
+            assert not (checkout.get("with") or {}).get("submodules"), (
+                f"{name}'s `test` job now fetches submodules, so nothing checks that the "
+                "offline tier passes without them"
+            )
+
+    def test_it_takes_the_submodule_by_name_and_never_recursively(self) -> None:
+        """`--recursive` also pulls `benchmarks/baseline`, a third-org SSH remote the runner
+        cannot read, and one failing submodule aborts the whole checkout -- two red mains and
+        a review verdict that was never computed."""
+        for name in ("ci.yml", "pr-pipeline.yml"):
+            run = "\n".join(
+                str(step.get("run", "")) for step in self._load(name)["jobs"][self.JOB]["steps"]
+            )
+
+            assert "3rdparty/shipvision" in run, f"{name}: {self.JOB} names no submodule"
+            assert "--recursive" not in run, f"{name}: {self.JOB} would abort on baseline"
+
+
 class TestImportIsCheap:
     """import shipinfer must not drag in a backend, so the CLI stays usable on a bare host."""
 
