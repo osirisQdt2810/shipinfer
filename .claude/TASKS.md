@@ -3368,7 +3368,22 @@ hook down, for when the operator asked to see something before it is executed.
           belongs in `benchmarks/parity/` as a `--kind identity` golden the way the plan
           golden is, and that is the next increment
           (`MTMC-IDENTITY-PARITY-IS-NOT-COMMITTED`).
-        * **3c -- `MtmcStage` + the plan's `mtmc` node**, gluing 3a and 3b into the graph.
+        * **3c -- the seam is BUILT; the stage and the lane unit remain.** Built:
+          `csrc/shipinfer/pipeline/mtmc/cluster.{h,cpp}` -- `ClusterTracker` takes a whole
+          INSTANT and answers a global id per (camera, track), with a registry keyed per
+          (impl, slot) because a cross-camera tracker IS a group's identity space and a second
+          instance would issue a second contradictory set of ids. 9 checks against a fake, in
+          the offline tier. `ClusterRegistry::create` answers a ConfigError rather than
+          `std::out_of_range` (the hole #215's review found in its sibling) and a lane-less
+          build blames the LANE rather than the name.
+          REMAINING, and the algorithm is already read off the reference so it needs no
+          rediscovery: (a) the LANE UNIT behind the seam -- gram = E.E^T, then
+          `GatedMatcher::build(gram, observations, n)` for distances, then
+          `AgglomerativeClusterer::fit_predict(distances, n)` for labels, then 3b's
+          `GlobalIdAssigner::assign(observations, labels)`; plus the hit/size GATE that
+          `ClusterMTMCTracker.track` applies before clustering, which is one more small
+          stateful piece; (b) `MtmcStage`, which is barrier + scatter and nothing else; (c) the
+          plan's `mtmc` node and the `global_id` event field.
       UNTIL 3c LANDS, "decode -> mtmc track" cannot be measured on the C++ plane at all, which
       is what V165/V167's target is defined over -- so this is on the critical path for the
       target and not a side quest.
