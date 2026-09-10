@@ -2746,6 +2746,11 @@ hook down, for when the operator asked to see something before it is executed.
       same change, re-emit `golden/identity/basic.txt`, and flip
       `two_challengers_from_one_camera_BOTH_land_and_the_reference_does_the_same` from `== 2`
       to `== 1` -- that test exists to make this loud rather than to endorse it.
+      AND THE PIN IS NOT A GATE, which #219's round 2 was right to say out loud: the claim
+      "the reference does the same" lives in a comment and no scenario can hold it, because
+      `drive_identity.py` runs the reference with `validate_every_step=True` and would throw
+      rather than answer. So the day the upstream fix lands, that C++ check flips on somebody
+      remembering this line -- which is why the line names the test.
       IMPACT: in production `validate_every_step` is off, so nothing reports it. The state stays
       plausible -- `member_from_camera` returns whichever member came first, forever -- so one
       global id carries two tracks from one camera and the second is a ghost no instant can
