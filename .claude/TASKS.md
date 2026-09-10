@@ -3121,7 +3121,7 @@ hook down, for when the operator asked to see something before it is executed.
       register's only defence against becoming a suppression list is that each entry is
       somebody's open work.
 
-- [~] **CSRC-GRAPH-HAS-NO-TRACKING · #169 MERGED BY THE OPERATOR 10 Sep (`a9867e3`), so
+- [~] **CSRC-GRAPH-HAS-NO-TRACKING · PR 2 of 3 MERGED 10 Sep as #215 (squash `d71af8c`), APPROVE on round 4 after three BLOCKING rounds. PR 3 (`mtmc`) is what remains.** #169 was merged by the operator (`a9867e3`), so
       PR 2 of 3 is mine to build and needs no stacking.** What #169 landed: the in-tree
       external lane and `TrackerShard` behind it. WHAT PR 2 IS: a `track` stage in the C++
       perception graph that fills `ObjectRecord::track_id` -- an `optional<int64_t>` in
