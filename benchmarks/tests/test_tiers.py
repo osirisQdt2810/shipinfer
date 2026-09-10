@@ -242,6 +242,99 @@ class TestTheProfileReadsOneWindow:
         assert steady.quantile(0.5) >= 2000.0  # the bucket that holds 2000, not the 100s
         assert read_cell(histogram, stage="detect").mean == pytest.approx(860.0)  # whole run
 
+    def test_every_label_is_summed_when_the_label_is_not_the_question(self) -> None:
+        """`read_total`, which the reassembly window needs: it is observed per camera like
+        everything else on that plane, and compared against a C++ figure that is ONE
+        distribution. Picking a camera would compare a fiftieth against the whole."""
+        from benchmarks.harness.histograms import read_cell, read_total
+        from shipinfer.core.metrics.histogram import Histogram
+
+        histogram = Histogram("h", "test")
+        for value in (1000.0, 1000.0):
+            histogram.observe(value, camera="cam0")
+        histogram.observe(500_000.0, camera="cam1")
+
+        whole = read_total(histogram)
+
+        assert whole.count == 3
+        assert whole.count == sum(
+            read_cell(histogram, camera=c).count for c in ("cam0", "cam1")
+        )
+        assert whole.mean == pytest.approx((1000.0 + 1000.0 + 500_000.0) / 3)
+        # The BUCKETS have to add up too, not only `_count`: summing cells means adding each
+        # edge's counter, and a last-write-wins bug leaves the two totals disagreeing while
+        # `count` and `mean` still look right.
+        assert sum(whole.counts) == whole.count, whole.counts
+        # And the tail is the slow camera's, which is the point of summing rather than picking.
+        assert whole.quantile(0.99) >= 500_000.0
+        assert read_cell(histogram, camera="cam0").quantile(0.99) < 500_000.0
+
+    def test_the_reassembly_window_reaches_the_report_and_not_only_the_result(self) -> None:
+        """The failure this exists for: the figure was written into the harness's snapshot
+        twice a run and read ZERO times, so the arm it was meant to make comparable printed no
+        latency at all. A field nobody prints is two `samples()` scans for nothing.
+        """
+        import io
+        from contextlib import redirect_stdout
+
+        from benchmarks.harness.histograms import read_total
+        from benchmarks.run_bench import _print_reassembly
+        from shipinfer.core.metrics.histogram import Histogram
+
+        histogram = Histogram("h", "test")
+        for value in (1000.0, 2000.0, 500_000.0):
+            histogram.observe(value, camera="cam0")
+
+        class _Result:
+            steady_reassembly = read_total(histogram)
+            steady_is_whole_run = False
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            _print_reassembly(_Result())
+        printed = out.getvalue()
+
+        assert "reassembly (steady, 3 frames)" in printed, printed
+        assert "p50" in printed and "p95" in printed and "p99" in printed, printed
+
+    def test_a_run_with_no_reassembly_samples_prints_nothing(self) -> None:
+        """A zero line is worse than no line here: it would read as a fast run rather than as
+        a run whose frames never finished."""
+        import io
+        from contextlib import redirect_stdout
+
+        from benchmarks.run_bench import _print_reassembly
+
+        class _Result:
+            steady_reassembly = None
+            steady_is_whole_run = True
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            _print_reassembly(_Result())
+
+        assert out.getvalue() == ""
+
+    def test_the_report_is_wired_into_the_arm_that_needs_it(self) -> None:
+        """The link a unit test cannot reach, and the one that was missing."""
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parents[1] / "run_bench.py").read_text(
+            encoding="utf-8"
+        )
+        arm = source.split("def measure_shipinfer_in_full(")[1].split("\ndef ")[0]
+
+        assert "_print_reassembly(result)" in arm
+
+    def test_an_unobserved_histogram_sums_to_an_empty_cell(self) -> None:
+        from benchmarks.harness.histograms import read_total
+        from shipinfer.core.metrics.histogram import Histogram
+
+        whole = read_total(Histogram("h", "test"))
+
+        assert whole.count == 0
+        assert whole.mean == 0.0
+
     def test_a_snapshot_cannot_be_subtracted_from_an_earlier_one(self) -> None:
         from benchmarks.harness.histograms import read_cell
         from shipinfer.core.metrics.histogram import Histogram

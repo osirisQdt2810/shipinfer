@@ -532,6 +532,11 @@ class PipelineRunner:
         # to cancel. Harmless only while the shipped sink discards the future; the first
         # caller that awaits one would hang.
         try:
+            # EVERY finished frame: `_emit_resolved` returns early for an eviction, and a
+            # shedding run is the one whose window a reader needs. INSIDE the try, because the
+            # `finally` is what resolves the future and a raise above it would hang the
+            # awaiter -- `observe` cannot, but position is not proof.
+            self._metrics.reassembly_us.observe(result.waited_us, camera=result.camera_id)
             self._emit_resolved(result, future)
         finally:
             if future is not None and not future.done():

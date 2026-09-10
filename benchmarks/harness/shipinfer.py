@@ -61,7 +61,7 @@ from typing import Any
 
 from benchmarks.harness.analysis import BUFFER_SUFFIX
 from benchmarks.harness.config import BenchConfig
-from benchmarks.harness.histograms import HistogramCell, read_cell
+from benchmarks.harness.histograms import HistogramCell, read_cell, read_total
 from benchmarks.harness.sampler import OccupancySampler
 
 __all__ = [
@@ -136,6 +136,10 @@ class ShipInferResult:
     #: duration by a whole-run count is the two-window mistake the comment above describes.
     steady_frames_accepted: int = 0
     steady_stage_latency: dict[str, HistogramCell] = field(default_factory=dict)
+    #: The reassembly window over the same steady window, summed across cameras. The C++
+    #: plane prints `reassembly_us_p50/p95/p99` on stdout; without this field the Python arm
+    #: reported no latency at all and the comparison needed a debugger.
+    steady_reassembly: HistogramCell | None = None
     #: True when the run ended before its own warm-up. The `steady_*` fields are then the
     #: whole run, and anything built on them has to say so rather than call it steady.
     steady_is_whole_run: bool = False
@@ -487,6 +491,11 @@ def run_shipinfer(
                 "stages": {
                     s: read_cell(runner.metrics.stage_latency_us, stage=s) for s in stages
                 },
+                # The window the C++ plane prints as `reassembly_us_*`, so the two planes'
+                # latency can be compared at all -- bucketed here, exact there. Summed over
+                # cameras, because that plane reports one distribution and this one observes
+                # per camera like everything else here.
+                "reassembly": read_total(runner.metrics.reassembly_us),
             }
 
         sampler = OccupancySampler(log, probe, interval_s=config.sample_interval_s, meta=meta)
@@ -520,6 +529,10 @@ def run_shipinfer(
                 # `steady_s` below is, on this path, and `steady_is_whole_run` says so.
                 "compute_us": {},
                 "stages": {},
+                # PRESENT and `None`, not absent: `minus` is called on it below and reads
+                # `None` as "since the start", while a missing key would turn a too-short run
+                # into a `KeyError` -- which is what the neighbouring keys are all here for.
+                "reassembly": None,
             }
             warmup_taken = window_started
         steady_s = max(0.0, time.monotonic() - warmup_taken)
@@ -561,6 +574,7 @@ def run_shipinfer(
                 s: cell.minus(at_warmup["stages"].get(s))
                 for s, cell in at_end["stages"].items()
             },
+            steady_reassembly=at_end["reassembly"].minus(at_warmup["reassembly"]),
             steady_is_whole_run=whole_run,
             frames_accepted=runner.frames_accepted,
             events_emitted=runner.sink.emitted,

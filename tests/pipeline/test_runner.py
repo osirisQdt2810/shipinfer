@@ -652,6 +652,23 @@ class TestObservability:
         assert metrics.objects_total.value(camera="cam0", object_class="ship") == 3
         assert metrics.objects_total.value(camera="cam0", object_class="person") == 3
 
+    def test_the_reassembly_window_is_observed_for_every_finished_frame(self, runner_for):
+        """The window the C++ plane prints as `reassembly_us_*`. Observed in `_emit`, which is
+        the one funnel every finished frame goes through -- `_emit_resolved` returns early for
+        an eviction, and a run whose tail is shedding is the run whose window a reader needs.
+        """
+        runner = runner_for().start()
+        publish(runner, 3)
+        assert wait_for(lambda: runner.sink.emitted == 3)
+
+        cell = runner.metrics.reassembly_us
+        samples = {
+            tuple(labels): value
+            for name, labels, value in cell.samples()
+            if name.endswith("_count")
+        }
+        assert samples == {(("camera", "cam0"),): 3}, samples
+
     def test_a_skipped_branch_is_counted_not_invisible(self, runner_for):
         runner = runner_for([PERSON]).start()
         publish(runner, 2)
