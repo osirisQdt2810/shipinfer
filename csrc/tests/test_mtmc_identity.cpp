@@ -99,6 +99,28 @@ namespace {
 
     // ------------------------------------------------------- the deterministic ordering
 
+    void a_zero_embedding_is_refused_THE_WAY_THE_REFERENCE_REFUSES_IT() {
+        // No golden can hold this: the reference raises in `shipvision/types.py`'s
+        // `_as_unit_vector` before it answers anything, so `--kind identity` cannot emit the
+        // scenario at all (measured -- ConfigurationError, "an all-zero track embedding has
+        // no direction, so it cannot be normalised"). The port answered 0 instead, which is a
+        // divergence in a REFUSAL: the plausible cosine-0-from-everything the reference calls
+        // out by name. So the agreement is asserted here, against the reference's own words.
+        GlobalIdAssigner assigner(options());
+        std::string message;
+
+        try {
+            assigner.assign({look("cam0", 1, 0, 0), look("cam1", 1, 1, 0)}, {0, 0});
+        } catch (const InferenceError& error) {
+            message = error.what();
+        }
+
+        check(message.find("cam0#1") != std::string::npos,
+              "the refusal names the track, not just the condition");
+        check(message.find("no direction") != std::string::npos,
+              "and gives the reference's reason for refusing rather than a bare type error");
+    }
+
     void every_observation_leaves_with_an_id() {
         GlobalIdAssigner assigner(options());
 
@@ -420,6 +442,7 @@ int main() {
     the_options_are_refused_when_they_would_forget_everything();
     labels_that_do_not_line_up_are_refused();
     a_track_with_no_embedding_is_refused_by_name();
+    a_zero_embedding_is_refused_THE_WAY_THE_REFERENCE_REFUSES_IT();
     every_observation_leaves_with_an_id();
     one_cluster_across_two_cameras_is_one_identity();
     two_tracks_from_ONE_camera_in_one_cluster_get_two_identities();

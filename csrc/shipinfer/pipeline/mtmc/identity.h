@@ -24,6 +24,7 @@
 
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -133,12 +134,16 @@ namespace shipinfer::mtmc {
         //: produces the same ids twice, which is the difference between a reproducible bug
         //: and a haunting.
         std::vector<std::vector<size_t>> ordered_groups(const std::vector<int>& labels) const;
-        void assign_group(const std::vector<IdentityObservation>& group,
-                          std::vector<int64_t>& matched);
+        //: KEYS, not observations: the features are already in `features_`, normalised by
+        //: `observe`, so taking the observations copied an embedding per track per instant --
+        //: 750 heap copies of a real 2048-float vector at the design load, for a `.key`.
+        void assign_group(const std::vector<TrackKey>& keys, std::set<int64_t>& matched);
         void resolve_between_identities(const TrackKey& key, int64_t owner, int64_t target,
                                         const std::vector<const std::vector<float>*>& overlap);
+        //: `exclude` is a SET: it grows by one per group, and a linear scan per cluster key
+        //: made this O(groups^2) over an instant of ~750 mostly-singleton clusters.
         std::vector<int64_t> candidate_ids(const std::vector<TrackKey>& keys,
-                                           const std::vector<int64_t>& exclude) const;
+                                           const std::set<int64_t>& exclude) const;
         int64_t select_by_oldest(const std::vector<int64_t>& candidates) const;
         //: This identity's existing track on `camera_id`, or absent. One identity holds at
         //: most one track per camera: it is one object, and a camera that sees it twice at one

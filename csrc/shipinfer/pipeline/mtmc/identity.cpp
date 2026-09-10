@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 
 namespace shipinfer::mtmc {
 
@@ -11,10 +12,18 @@ namespace shipinfer::mtmc {
             double sum = 0.0;
             for (const float value : embedding) sum += static_cast<double>(value) * value;
             const double norm = std::sqrt(sum);
-            // A ZERO VECTOR STAYS ZERO rather than becoming a division by it. `similarity`
-            // then answers 0 for it, which is the same answer an empty comparison set gets:
-            // appearance is silent and the caller's other rules decide.
-            if (!(norm > 0.0)) return embedding;
+            // A ZERO VECTOR IS REFUSED, because the reference refuses it -- measured, in
+            // `shipvision/types.py::_as_unit_vector`: "an all-zero track embedding has no
+            // direction ... Left alone it sits at cosine 0 from every gallery entry, which is
+            // a plausible-looking answer to every query rather than an obvious failure." A
+            // port that answered 0 here would diverge in a REFUSAL, which no golden can
+            // catch: the reference raises before it answers anything to compare against.
+            if (!(norm > 0.0)) {
+                throw InferenceError(
+                    "an all-zero track embedding has no direction, so it cannot be "
+                    "normalised; at cosine 0 from everything it is a plausible answer to "
+                    "every query rather than an obvious failure");
+            }
             std::vector<float> out(embedding.size());
             for (size_t i = 0; i < embedding.size(); ++i) {
                 out[i] = static_cast<float>(static_cast<double>(embedding[i]) / norm);
@@ -98,7 +107,13 @@ namespace shipinfer::mtmc {
                                      "appearance, so an un-embedded track cannot be assigned");
             }
             const TrackKey& key = observation.key;
-            features_[key] = normalised(observation.embedding);
+            try {
+                features_[key] = normalised(observation.embedding);
+            } catch (const InferenceError& error) {
+                // NAMED, because "some track has a zero embedding" sends the reader to 750 of
+                // them. The reason is `normalised`'s; the subject is this key.
+                throw InferenceError(key.str() + ": " + error.what());
+            }
             // CONSECUTIVE hits, which is what `select_by_oldest` reads as age: a track seen
             // at this instant and the one before continues its run, and any gap restarts it.
             const auto seen = last_seen_.find(key);
@@ -215,7 +230,7 @@ namespace shipinfer::mtmc {
     }
 
     std::vector<int64_t> GlobalIdAssigner::candidate_ids(
-        const std::vector<TrackKey>& keys, const std::vector<int64_t>& exclude) const {
+        const std::vector<TrackKey>& keys, const std::set<int64_t>& exclude) const {
         // COUNTED rather than scanned. The reference walks its whole global storage and
         // intersects each identity's member list with the cluster; counting how many of the
         // cluster's keys each id already owns is identical -- `owner_[k] == g` exactly when
@@ -225,7 +240,7 @@ namespace shipinfer::mtmc {
         for (const TrackKey& key : keys) {
             const int64_t owner = owner_of(key);
             if (owner < 0) continue;
-            if (std::find(exclude.begin(), exclude.end(), owner) != exclude.end()) continue;
+            if (exclude.count(owner) != 0) continue;
             ++counts[owner];
         }
         size_t best = 0;
@@ -281,11 +296,8 @@ namespace shipinfer::mtmc {
         }
     }
 
-    void GlobalIdAssigner::assign_group(const std::vector<IdentityObservation>& group,
-                                        std::vector<int64_t>& matched) {
-        std::vector<TrackKey> keys;
-        keys.reserve(group.size());
-        for (const IdentityObservation& observation : group) keys.push_back(observation.key);
+    void GlobalIdAssigner::assign_group(const std::vector<TrackKey>& keys,
+                                        std::set<int64_t>& matched) {
         const std::vector<int64_t> candidates = candidate_ids(keys, matched);
 
         if (candidates.empty()) {
@@ -299,10 +311,11 @@ namespace shipinfer::mtmc {
                 // frame's evidence is how identities oscillate, so nothing happens.
                 return;
             }
-            // ONE IDENTITY PER CAMERA, even here. Two same-camera keys can only reach one
-            // cluster if the matcher's exclusion mask was bypassed, and the reference trusted
-            // that it never would be -- so its brand-new identities could hold two tracks
-            // from one camera, which nothing downstream expects.
+            // ONE IDENTITY PER CAMERA, even for a brand-new cluster -- and the reference
+            // splits it the same way: `same_camera_twice` in `golden/identity/basic.txt` is
+            // `cam0#1=0 cam0#2=1`, and removing this guard fails the parity gate, not just
+            // the unit test. Two same-camera keys reach one cluster when the matcher's
+            // exclusion mask was bypassed; the answer is two identities, on both planes.
             const int64_t global_id = issue();
             std::vector<std::string> claimed;
             for (const TrackKey& key : fresh) {
@@ -313,12 +326,12 @@ namespace shipinfer::mtmc {
                 claimed.push_back(key.camera_id);
                 adopt(key, global_id);
             }
-            matched.push_back(global_id);
+            matched.insert(global_id);
             return;
         }
 
         const int64_t target = select_by_oldest(candidates);
-        matched.push_back(target);
+        matched.insert(target);
         const std::vector<TrackKey> members_of_target = members(target);
         std::vector<const std::vector<float>*> overlap_features;
         std::vector<TrackKey> non_overlap;
@@ -483,12 +496,13 @@ namespace shipinfer::mtmc {
         ++step_;
         observe(observations);
 
-        std::vector<int64_t> matched;
+        std::set<int64_t> matched;
+        std::vector<TrackKey> keys;
         for (const std::vector<size_t>& indices : ordered_groups(labels)) {
-            std::vector<IdentityObservation> group;
-            group.reserve(indices.size());
-            for (const size_t index : indices) group.push_back(observations[index]);
-            assign_group(group, matched);
+            keys.clear();
+            keys.reserve(indices.size());
+            for (const size_t index : indices) keys.push_back(observations[index].key);
+            assign_group(keys, matched);
         }
 
         std::map<TrackKey, int64_t> result;

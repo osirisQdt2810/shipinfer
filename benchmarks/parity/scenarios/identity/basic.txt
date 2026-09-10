@@ -93,3 +93,59 @@ instant 7:cam0#1:1,0 7:cam1#1:1,0 3:cam2#1:0,1 3:cam3#1:0,1
 # here, which is why this scenario is eighteen wide rather than four.
 scenario wide_tie_keeps_first_appearance 30 4096 8192
 instant 17:cam00#1:0,1 16:cam01#1:1,2 15:cam02#1:2,3 14:cam03#1:3,4 13:cam04#1:4,5 12:cam05#1:5,6 11:cam06#1:6,7 10:cam07#1:7,8 9:cam08#1:8,9 8:cam09#1:9,10 7:cam10#1:10,11 6:cam11#1:11,12 5:cam12#1:12,13 4:cam13#1:13,14 3:cam14#1:14,15 2:cam15#1:15,16 1:cam16#1:16,17 0:cam17#1:17,18
+
+# OLDEST CONFIRMED, and here that is NOT the lowest id -- which every earlier scenario let
+# coincide, so `select_by_oldest` was indistinguishable from `return candidates.front()`.
+# cam0 gets a run, goes quiet for five instants and comes back (its run restarted), while cam1
+# is confirmed throughout; then one cluster holds both and the YOUNGER identity has to win.
+scenario oldest_confirmed_is_not_the_lowest_id 30 4096 8192
+instant 0:cam0#1:1,0
+instant 0:cam0#1:1,0 1:cam1#1:1,0
+instant 1:cam1#1:1,0
+instant 1:cam1#1:1,0
+instant 1:cam1#1:1,0
+instant 1:cam1#1:1,0
+instant 1:cam1#1:1,0
+instant 0:cam0#1:1,0 1:cam1#1:1,0
+instant 7:cam0#1:1,0 7:cam1#1:1,0
+
+# ONE IDENTITY IS CONTINUED BY ONE CLUSTER. Two clusters in one instant each hold a member of
+# identity 0, so both would name it as a candidate; the first takes it and the second must not,
+# or one id is handed to two groups at once and the newcomer behind the second joins a group it
+# was never clustered with. The newcomers are what makes the difference visible: cam2 is
+# adopted into 0 and cam3 must NOT be.
+scenario one_identity_is_continued_by_one_cluster 30 4096 8192
+instant 0:cam0#1:1,0 0:cam1#1:1,0
+instant 0:cam0#1:1,0 0:cam2#1:1,0 1:cam1#1:1,0 1:cam3#1:1,0
+
+# THE IDENTITY BOUND EVICTS THE LEAST RECENTLY SEEN, and the ORDER is the behaviour. Every
+# earlier bound scenario introduced a brand-new camera each instant, so the ids were 0 1 2
+# whichever identity was dropped -- or whether eviction ran at all. Here cam0 is the least
+# recent when the third identity arrives, so it is the one that goes and comes back NEW.
+scenario identity_bound_drops_the_least_recent 100 2 8192
+instant 0:cam0#1:1,0
+instant 1:cam1#1:0,1
+instant 1:cam1#1:0,1
+instant 2:cam2#1:1,1
+instant 0:cam0#1:1,0
+
+# THE max_age BOUNDARY, which `age_out` above cannot see because nothing comes back. Two
+# scenarios one instant apart: a track that returns while it is still remembered keeps its id,
+# and one that returns after the bound gets a new one. An off-by-one moves exactly one of them.
+scenario age_out_returns_while_remembered 2 4096 8192
+instant 0:cam0#1:1,0
+instant 0:cam1#1:0,1
+instant 0:cam0#1:1,0
+
+scenario age_out_returns_on_the_last_remembered_instant 2 4096 8192
+instant 0:cam0#1:1,0
+instant 0:cam1#1:0,1
+instant 0:cam1#1:0,1
+instant 0:cam0#1:1,0
+
+scenario age_out_returns_after_the_bound 2 4096 8192
+instant 0:cam0#1:1,0
+instant 0:cam1#1:0,1
+instant 0:cam1#1:0,1
+instant 0:cam1#1:0,1
+instant 0:cam0#1:1,0
