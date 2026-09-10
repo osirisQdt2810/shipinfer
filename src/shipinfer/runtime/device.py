@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import ctypes.util
 import os
 import threading
 from collections.abc import Iterable, Iterator, Mapping
@@ -55,6 +56,17 @@ class DeviceManager:
     def __init__(self, settings: DeviceSettings | None = None) -> None:
         self._settings = settings or DeviceSettings()
         self._visible: tuple[int, ...] = self._resolve_visible()
+        # doc: long why the knob is applied HERE and nowhere later
+        # HERE, and this is the last point at which it can work: `_resolve_visible` calls
+        # `device_count()`, which takes no context, and `_validate` below calls
+        # `memory_info(index)` for every visible device -- `cudaMemGetInfo` under a device
+        # guard, which INITIALISES that device's primary context. The driver refuses
+        # `cudaSetDeviceFlags` once a context exists, so a call from anywhere further out
+        # (`InferenceServer.start`, an instance's `start`) is a no-op that warns 216 per
+        # device and leaves the threads spinning -- measured, and the reason this moved.
+        if blocking_sync_requested():
+            applied = prefer_blocking_sync(self._visible)
+            _LOG.info("blocking synchronise on device(s) %s", list(applied) or "none")
         if self._settings.validate_on_start:
             self._validate()
 
@@ -266,14 +278,39 @@ def prefer_blocking_sync(devices: Iterable[int]) -> tuple[int, ...]:
     wanted = list(devices)
     if not wanted:
         return ()  # a CPU-only host must not dlopen the driver's runtime to learn that
+    # doc: long the three names, and which images each one is there for
+    # `find_library` first, then the SONAME, then the dev symlink -- the same shape
+    # `core/thread_name.py` uses for libc, for the same reason: the name on the developer's
+    # box is not the name where the measurement is taken. MEASURED in the three images this
+    # repository runs: `shipinfer-gst:jammy` and `:jammy-nvdec` (where every benchmark runs)
+    # resolve `cudart` to `libcudart.so.12` and load all three names, while
+    # `pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime` (the offline TEST image) has none of
+    # them on the loader path -- torch keeps its own under `torch/lib/`. That image runs no
+    # GPU benchmark, so the warning below is the right outcome there rather than a failure.
+    candidates = [ctypes.util.find_library("cudart"), "libcudart.so.12", "libcudart.so"]
+    libcudart = None
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            libcudart = ctypes.CDLL(candidate)
+            break
+        except OSError:
+            continue
+    if libcudart is None:
+        _LOG.warning(
+            "%s asked for, but libcudart is not loadable here (tried %s)",
+            BLOCKING_SYNC_ENV,
+            [name for name in candidates if name],
+        )
+        return ()
     try:
-        libcudart = ctypes.CDLL("libcudart.so")
         libcudart.cudaSetDevice.restype = ctypes.c_int
         libcudart.cudaSetDevice.argtypes = [ctypes.c_int]
         libcudart.cudaSetDeviceFlags.restype = ctypes.c_int
         libcudart.cudaSetDeviceFlags.argtypes = [ctypes.c_uint]
-    except OSError:
-        _LOG.warning("%s asked for, but libcudart is not loadable here", BLOCKING_SYNC_ENV)
+    except AttributeError:  # pragma: no cover - a libcudart without the symbols
+        _LOG.warning("%s asked for, but libcudart has no cudaSetDeviceFlags", BLOCKING_SYNC_ENV)
         return ()
 
     applied: list[int] = []

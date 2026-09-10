@@ -21,11 +21,7 @@ from shipinfer.core.tracing import NullTraceSink, TraceSink, build_trace_sink
 from shipinfer.engine.ensemble import EnsembleModel
 from shipinfer.engine.model import Model
 from shipinfer.repository import ModelRepository
-from shipinfer.runtime.device import (
-    DeviceManager,
-    blocking_sync_requested,
-    prefer_blocking_sync,
-)
+from shipinfer.runtime.device import DeviceManager
 from shipinfer.runtime.memory import MemoryPool
 from shipinfer.runtime.native import is_native_available, native_version, resolve_provider
 
@@ -292,16 +288,6 @@ class InferenceServer:
         mesh: Any = None
         try:
             provider = resolve_provider(self._settings.execution.provider)
-            # doc: long why the knob is applied here and nowhere later
-            # BEFORE any model, because the driver refuses `cudaSetDeviceFlags` once a device
-            # has a context -- and the first backend built takes one. Off unless asked for:
-            # it trades wake-up latency for host CPU, and the C++ plane measured that trade
-            # (`THE-INSTANCE-THREADS-SPIN-ON-cudaStreamSynchronize`: instance-thread CPU
-            # halved, events +15% at the design load). This plane's instance threads wait in
-            # the same place, so they take the same knob and the same default.
-            if blocking_sync_requested():
-                applied = prefer_blocking_sync(self._devices.visible_gpus)
-                _LOG.info("blocking synchronise on device(s) %s", list(applied) or "none")
             _LOG.info(
                 "starting shipinfer | devices: %s | data plane: %s%s",
                 self._devices.describe(),

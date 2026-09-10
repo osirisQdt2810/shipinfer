@@ -110,6 +110,65 @@ class TestItIsInertUnlessAskedFor:
         assert "libcudart" in caplog.text
 
 
+class TestItIsAppliedBeforeAnyDeviceHasAContext:
+    """The wiring, which is the part that broke -- and the part no test covered.
+
+    The first draft called this from `InferenceServer.start`, one constructor too late:
+    `DeviceManager.__init__` validates by reading `memory_info(index)` for every visible
+    device, `cudaMemGetInfo` runs under a device guard, and that INITIALISES the primary
+    context. The driver then refuses `cudaSetDeviceFlags` (216), so the knob warned once per
+    device and the threads kept spinning -- the operator sets it, sees nothing worth stopping
+    for, and gets the behaviour the knob exists to remove.
+    """
+
+    def test_the_flag_lands_before_the_validation_that_takes_a_context(
+        self, monkeypatch
+    ) -> None:
+        order: list[str] = []
+        monkeypatch.setenv(BLOCKING_SYNC_ENV, "1")
+        monkeypatch.setattr(
+            device_module,
+            "prefer_blocking_sync",
+            lambda devices: order.append(f"flag{tuple(devices)}") or (),
+        )
+        monkeypatch.setattr(device_module, "device_count", lambda: 2)
+        monkeypatch.setattr(
+            device_module,
+            "memory_info",
+            lambda index: order.append(f"memory_info({index})") or (1, 2),
+        )
+        monkeypatch.setattr(device_module, "device_properties", lambda index: f"gpu{index}")
+
+        device_module.DeviceManager()
+
+        assert order[0] == "flag(0, 1)", order
+        assert order[1:] == ["memory_info(0)", "memory_info(1)"], order
+
+    def test_nothing_is_applied_when_the_knob_is_unset(self, monkeypatch) -> None:
+        """The default path must not reach for libcudart at all -- ADR-001: this constructor
+        runs on a machine with no driver."""
+        reached: list[str] = []
+        monkeypatch.delenv(BLOCKING_SYNC_ENV, raising=False)
+        monkeypatch.setattr(
+            device_module, "prefer_blocking_sync", lambda devices: reached.append("flag") or ()
+        )
+        monkeypatch.setattr(device_module, "device_count", lambda: 1)
+        monkeypatch.setattr(device_module, "memory_info", lambda index: (1, 2))
+        monkeypatch.setattr(device_module, "device_properties", lambda index: "gpu")
+
+        device_module.DeviceManager()
+
+        assert reached == []
+
+    def test_the_server_no_longer_knows_about_the_flag(self) -> None:
+        """It moved into the device layer, and `engine/pool.py` keeping a second call site is
+        how the two would drift back apart."""
+        pool = (ROOT / "src" / "shipinfer" / "engine" / "pool.py").read_text(encoding="utf-8")
+
+        assert "blocking_sync" not in pool
+        assert "prefer_blocking_sync" not in pool
+
+
 class _Fn:
     """A libcudart entry point double: records the prototype the caller declares."""
 
