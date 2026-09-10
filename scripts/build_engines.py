@@ -132,16 +132,18 @@ def report(precision: str) -> int:
     return 1 if missing else 0
 
 
-#: Where the calibration frames come from: the benchmark's own replay folders, so the
-#: activations calibrated for are the activations the measurement produces.
+#: The benchmark's own frame folders, so the activations calibrated for are the ones the
+#: measurement produces. 2K and not `BenchConfig.resolution`'s 4k because every batch is
+#: letterboxed to the engine's extent first: the source resolution changes the resampling,
+#: not the activation ranges the scales come from.
 CALIBRATION_DIRS = (
     REPO / "benchmarks" / "baseline" / "data" / "person_2K",
     REPO / "benchmarks" / "baseline" / "data" / "ship_2K",
 )
-#: doc: long why a few hundred images and not the whole folder
-#: Calibration runs one FORWARD PASS per batch inside the build, so the set size is build
-#: time, and the entropy criterion's histograms stop moving after a few hundred images. 256
-#: at batch 8 is 32 passes, about a minute, and is the figure TensorRT's own guidance uses.
+#: A CAP, not a promise: calibration runs one forward pass per batch INSIDE the build, so the
+#: set size is build time, and the entropy criterion's histograms stop moving after a few
+#: hundred images. 256 is TensorRT's own guidance; this box holds 14 usable frames, and that
+#: build took 426.6 s -- so the number below is the ceiling and the corpus is the limit.
 CALIBRATION_IMAGES = 256
 CALIBRATION_BATCH = 8
 

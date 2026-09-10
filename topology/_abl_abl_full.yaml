@@ -1,0 +1,62 @@
+# ABLATION CHAIN, not a deployment: every model
+#
+# One of four variants that price the stages of `ship_person_cpu.yaml` by running
+# subsets of it at one load. Nothing runs these but the measurement.
+name: abl_full
+elements:
+  decode:
+    impl: replay
+
+  # The one element that letterboxes a whole frame, so it is the one that has to undo exactly
+  # that transform. `decode:` here is the *output* decode -- how the engine's rows become
+  # source-pixel boxes -- and has nothing to do with the video decoder above it.
+  detect:
+    impl: pool
+    model: ship_detector
+    params:
+      decode:
+        # 0.25 < the tracker's track_threshold (shipvision ByteTrack: 0.5) ON PURPOSE:
+        # detections in [0.25, 0.5) are published in events (track_id: null) and used by
+        # ByteTrack only to CONTINUE tracks, never to start one. V148's first real run
+        # surfaced exactly this: a 0.47 person in every event, tracked by nothing — correct.
+        class_labels: {0: person, 8: ship}
+        score_threshold: 0.25
+        max_detections: 300
+
+  # Whole-frame on the PYTHON plane today: a YOLO-seg engine emits detection rows and a bank
+  # of mask prototypes, and the fold that turns those into one area per object is not a
+  # per-row scatter-back (P6-SEGMENT-CROP). It declares `classes: [ship]` anyway, and that is
+  # not premature: the C++ plane DOES crop per row, so a resolved plan without this line says
+  # "every row" there -- the ship segmenter on every person crop at 640x640, and a
+  # `mask_area_px` filed on every person record.
+  segment:
+    impl: pool
+    model: ship_segmenter
+    params:
+      classes: [ship]
+
+  # The fan-out. Both embedders crop from the *source* frame, one call for all N boxes, and
+  # file one vector per detection row under `meta["vectors"]` -- so the two of them cover
+  # disjoint rows of the same frame and never overwrite each other.
+  embed_ship:
+    impl: pool
+    model: ship_embedder
+    params:
+      classes: [ship]
+
+  # `after: detect`, not the `embed_ship` declared above it: a person embedding is computed
+  # from the detector's crop, and the ship segmenter is not in its path.
+  embed_person:
+    impl: pool
+    model: person_embedder
+    params:
+      classes: [person]
+
+  # BOTH branches, or `embed_person` would have no successor and the chain would be refused
+  # for a branch that reaches no output. This is where the payload is dropped and the item
+  # becomes `meta@cpu`.
+  output:
+    impl: jsonlines
+    params:
+      path: var/events.jsonl
+      flush_every: 64
