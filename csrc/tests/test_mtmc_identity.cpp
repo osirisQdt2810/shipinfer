@@ -121,6 +121,82 @@ namespace {
               "and gives the reference's reason for refusing rather than a bare type error");
     }
 
+    // doc: long the promise is about what did NOT happen, which takes a before and an after
+    void a_refused_instant_leaves_no_trace_and_can_be_retried() {
+        // #219's approval asked for this: `++step_` and `observe`'s writes used to run before
+        // the embeddings were checked, so a bad fifth observation left a half-written history
+        // -- the step advanced, the first four remembered -- that the NEXT instant read as
+        // fact. The caller could not retry; `reset()` was the only way back, and nothing said
+        // so. Now every embedding is checked before anything moves.
+        GlobalIdAssigner assigner(options());
+        assigner.assign({look("cam0", 1, 1, 0)}, {0});
+        const int64_t step = assigner.step();
+        const int64_t issued = assigner.issued();
+        const int64_t owner = assigner.owner_of(key("cam0", 1));
+
+        bool threw = false;
+        try {
+            assigner.assign({look("cam0", 1, 1, 0), look("cam1", 1, 0, 0)}, {0, 0});
+        } catch (const InferenceError&) {
+            threw = true;
+        }
+
+        check(threw, "the zero embedding is refused");
+        check(assigner.step() == step, "and the step did not advance");
+        check(assigner.issued() == issued, "no id was issued");
+        check(assigner.size() == 1 && assigner.owner_of(key("cam0", 1)) == owner,
+              "and cam0#1 is exactly as it was, so the instant can be sent again");
+        const auto retried =
+            assigner.assign({look("cam0", 1, 1, 0), look("cam1", 1, 0, 1)}, {0, 1});
+        check(retried.at(key("cam0", 1)) == owner,
+              "the retry continues the identity rather than starting a new history");
+    }
+
+    void two_widths_in_a_VIRGIN_assigners_first_instant_are_refused() {
+        // #220's review: the width comparison was guarded on `width_ != 0` and `width_` was
+        // only assigned after the loop, so the FIRST instant of an assigner's life compared
+        // nothing. A chain with two embedders mixes widths on every instant including that
+        // one, so it merged two incomparable tracks into one global id -- and `gate.h` says
+        // a merge is the unrecoverable direction -- then refused every instant afterwards.
+        // The test the old guard passed seeded the width with a good instant first, which is
+        // the one state where it worked.
+        GlobalIdAssigner assigner(options());
+        std::string message;
+
+        try {
+            assigner.assign({IdentityObservation{key("cam0", 1), {1.0f, 0.0f}},
+                             IdentityObservation{key("cam1", 1), {1.0f, 0.0f, 0.0f}}},
+                            {0, 0});
+        } catch (const InferenceError& error) {
+            message = error.what();
+        }
+
+        check(message.find("cam1#1") != std::string::npos,
+              "the second width is refused on the first instant, naming the track");
+        check(assigner.step() == 0 && assigner.size() == 0,
+              "and nothing moved: no merge published, no half-written space to reset");
+    }
+
+    void a_second_embedding_width_is_refused_by_both_widths() {
+        // The same fact `similarity` used to discover much later: one identity space is fed by
+        // one embedder. Caught in the pre-pass now, so it cannot arrive after two groups have
+        // been assigned.
+        GlobalIdAssigner assigner(options());
+        assigner.assign({look("cam0", 1, 1, 0)}, {0});
+        std::string message;
+
+        try {
+            assigner.assign({IdentityObservation{key("cam1", 1), {1.0f, 0.0f, 0.0f}}}, {0});
+        } catch (const InferenceError& error) {
+            message = error.what();
+        }
+
+        check(message.find("cam1#1") != std::string::npos, "the refusal names the track");
+        check(message.find("3-dimensional") != std::string::npos &&
+                  message.find("built on 2") != std::string::npos,
+              "and both widths, because either one alone could be the wrong side");
+    }
+
     void every_observation_leaves_with_an_id() {
         GlobalIdAssigner assigner(options());
 
@@ -443,6 +519,9 @@ int main() {
     labels_that_do_not_line_up_are_refused();
     a_track_with_no_embedding_is_refused_by_name();
     a_zero_embedding_is_refused_THE_WAY_THE_REFERENCE_REFUSES_IT();
+    a_refused_instant_leaves_no_trace_and_can_be_retried();
+    two_widths_in_a_VIRGIN_assigners_first_instant_are_refused();
+    a_second_embedding_width_is_refused_by_both_widths();
     every_observation_leaves_with_an_id();
     one_cluster_across_two_cameras_is_one_identity();
     two_tracks_from_ONE_camera_in_one_cluster_get_two_identities();
