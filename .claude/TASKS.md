@@ -2700,6 +2700,20 @@ hook down, for when the operator asked to see something before it is executed.
       is not a convenience here, it is the only method that works, and `compare()`'s CPU column
       would have nothing to fill both halves of in one run.
 
+- [ ] BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE · scope the engine existence and digest checks to the
+      models a run actually loads. Found by #216's first review round. `require_inputs`
+      (`benchmarks/harness/config.py`) demands BOTH `yolo26n_<prec>.engine` and
+      `yolo26n-seg_<prec>.engine` unconditionally -- no reference to `--systems` or to which
+      models the chain holds -- and `harness/shipinfer.py` calls it on the shipinfer-only path
+      too, so `--systems shipinfer` does not dodge it. Two consequences, both live: a
+      detect-only measurement cannot be driven from `run_bench.py` at all, and `--precision
+      int8` could only ever raise because the SEGMENTER does not build at int8 on this
+      hardware (TensorRT finds no implementation for its mask-prototype head). #216 removed
+      `int8` from the bench's choices rather than leave a flag that always fails; this item is
+      what earns it back. `require_same_engines` has the mirror-image gap: it covers
+      `ship_detector` and `ship_segmenter` only, so on `ship_person_cpu` the two embedders'
+      plans are outside the byte-identity guard entirely.
+
 - [~] **V167-GSTREAMER-ONLY-3000 · THE FIRST NUMBERS ON THE MANDATED ROUTE, 10 Sep.**
       Every figure below is `--source nvdec` over **gstreamer RTSP** from an **offline H.264
       video** (`benchmarks/baseline/data/.rtsp/*.h264`, encoded once by ffmpeg from the 1080p
