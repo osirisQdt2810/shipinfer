@@ -1876,8 +1876,23 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE HERE because the C++ plane is the one the measurement was taken on, and a
       Python A/B needs its own before/after at the design load to claim anything.
 
-- [~] **BOTH-PLANES-SHOULD-REPORT-THE-SAME-LATENCY-WINDOW · half (b) MERGED as #211
-      (10 Sep) with #210's two nits. HALF (a) IS BUILT AND WAITING TO OPEN.**
+- [x] **BOTH-PLANES-SHOULD-REPORT-THE-SAME-LATENCY-WINDOW · DONE: #211 (b), #212 (a),
+      #213 the gap #212's review found (10 Sep). Both planes report both windows.**
+      THREE RIDERS from #213's review, for whenever those files are next touched -- all
+      wording, none a defect:
+      (1) `bench.cpp:916` blames a short frame window on "some source stopped stamping",
+      but `captured_to_emitted_us` also stays 0 when `event_of`/`to_json` THROWS, so a
+      NaN-score run prints `frame_us_unstamped N` for another reason. `events_unwritable`
+      is printed right below and disambiguates it; the sentence is narrower than the
+      condition.
+      (2) The two PYTHON windows have different populations: `reassembly_us` is observed
+      for every finished frame including evictions (`runner.py:539`), `frame_latency_us`
+      only after a successful emit and only when `event.latency_us` is truthy (`:648`). So
+      a gap between the printed `N frames` counts means EVICTED, not unstamped. Visible,
+      undocumented.
+      (3) `microseconds_clamped` has no unit test -- it is in an anonymous namespace in the
+      TU with `main`, so reaching it means moving it. Worth doing if a second caller
+      appears.
       #211 TOOK THREE ROUNDS AND EACH FOUND SOMETHING REAL. Round 1: a fabricated
       `camera="unknown"` on a branch that cannot fire (the tag rule), a duplicated reader,
       an `observe` above the `try` that resolves the future, and a `# doc: long` marker my
