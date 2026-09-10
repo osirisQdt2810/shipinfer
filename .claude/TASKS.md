@@ -1808,8 +1808,18 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE YET, and deliberately not guessed at: the flag is a device-wide scheduling
       decision and it needs the before/after in the same sitting to mean anything.
 
-- [~] **WHICH-THREADS-SPEND-THE-HOST-CPU · ANSWERED, PR #201 (9 Sep), and the leading
-      hypothesis was WRONG.** Measured in the container at the design load -- 50x20x70 s,
+- [x] **WHICH-THREADS-SPEND-THE-HOST-CPU · MERGED as #201 (9 Sep), APPROVE on round 3, and
+      the leading hypothesis was WRONG.**
+      ROUND 2 FOUND THE ONE PLACE THE TID KEY WAS THROWN AWAY: `top()` re-keyed by NAME, and a
+      name is not unique -- fifty cameras' GStreamer jitterbuffer threads share one `comm`, so
+      a mapping dropped every duplicate but the LAST, the smallest of a collided set, and read
+      as "few and cheap". The class rows were right all along; only that one lied, from the
+      function whose docstring says a class can hide the answer. Rows keyed by tid now.
+      AND I NAMED A FILE THAT WAS NOT IN THE DIFF -- `deploy/rootless/cpp.sh` -- in both the
+      commit message and a review reply, because I described the work from the WORKING TREE
+      (where the A/B's changes also sat) instead of from `git diff origin/main`. Amended out
+      and corrected on the thread. That is the repo's own rule, broken in the direction it
+      warns about. Measured in the container at the design load -- 50x20x70 s,
       RTSP -> NVDEC, GPUs 1/3/4/5/6 idle, 99.6% of the process's CPU accounted:
         class                       cpu-s  threads  share  per thread
         model instances (mdl-*)     577.6       35  51.6%       16.5
