@@ -1882,7 +1882,16 @@ hook down, for when the operator asked to see something before it is executed.
       `prefer_blocking_sync`. Benign THERE (five lines into `main()`, before any device is
       chosen) which is why it was not a blocker, but it should ride with the next change to
       that file rather than being rediscovered.
-- [ ] **HOST-CPU-ACCOUNTING-FOLDS-IN-ITS-GENERATOR · #204's non-blocking notes (10 Sep).**
+- [~] **HOST-CPU-ACCOUNTING-FOLDS-IN-ITS-GENERATOR · PR #205 IN REVIEW (10 Sep) fixes all four.**
+      A drop-box the wrapper exports and the generator declares itself into, so a spawned
+      generator is named in `spawned_generators` AND subtracted -- `bench_cpu_s` is what
+      `accounted_pct` divides by, because an external `--pid` generator is absent from
+      `wait4`'s rusage while a reaped child is inside it. Demonstrated on a real RTSP run:
+      both servers declared (0.84 + 0.93 of 90.84 CPU-s), `accounted_pct` 85.1. Reverting
+      the skip set puts it at **284.7%**, which is the incoherence. Also: the walk's
+      docstring word, `--threads-interval 0` as an opt-out wired to
+      `SHIPINFER_BENCH_HOST_CPU_INTERVAL`, and a recycled tid retiring the thread it
+      replaces. Suite 4153. ORIGINAL:
       (1) THE ONE THAT MATTERS: the Python RTSP arm starts its two `rtsp_serve.py` servers as
       CHILDREN of the bench (`benchmarks/harness/rtsp.py:111`), so #204's tree walk now
       samples them while the wrapper passes no `--pid` -- `--source rtsp` reports a `threads`
