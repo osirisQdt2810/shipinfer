@@ -71,3 +71,4 @@ edge track mtmc meta@cpu
 edge mtmc output meta@cpu
 field embedding embed_person embed_ship
 field mask_area_px segment
+field track_id track

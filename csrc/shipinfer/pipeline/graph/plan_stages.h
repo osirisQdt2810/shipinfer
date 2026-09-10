@@ -61,6 +61,24 @@ namespace shipinfer {
         std::optional<MaskAreaSpec> fold;
     };
 
+    //: The tracker's slot, when the plan declares one this plane can run. `output` is the
+    //: `ObjectBatch` name its ids arrive under, derived by `output_of` like every other
+    //: stage's so the plan's `field track_id <slot>` line finds them.
+    struct TrackStageSpec {
+        std::string slot;
+        std::string output;
+        //: The chain's `impl:`, which is the registry key -- `tracking/associator.h`. The
+        //: algorithm inside an impl (`params: algorithm: bytetrack`) is that lane's own
+        //: business and the plan does not carry it.
+        std::string impl;
+        //: WHICH ROWS THIS TRACKER SEES, on `CropSpec`'s convention and for the same reason:
+        //: the Python element states `selects_rows = True` and feeds its tracker only the
+        //: declared rows, so a plane that tracked every row would emit ids the other never
+        //: does AND different ids for the rows they share -- association and the per-camera
+        //: counter would have seen boxes the other tracker never got.
+        int class_id = CropSpec::kAnyClass;
+    };
+
     struct PlanStages {
         std::string detect_slot;
         std::string detect_model;
@@ -68,6 +86,10 @@ namespace shipinfer {
         std::vector<CropSpec> crops;
         //: The per-object stages, in the plan's order.
         std::vector<ObjectStageSpec> objects;
+        //: SEVERAL, because the chain permits it: `_check_one_filler_per_row` refuses two
+        //: trackers whose selections overlap and allows two that are disjoint, so a plane that
+        //: refused the second outright would throw on a chain the other plane loads.
+        std::vector<TrackStageSpec> tracks;
         std::vector<std::string> stage_names;
         pipeline::events::ClassLabels labels;
         pipeline::events::FieldMap fields;
@@ -84,6 +106,13 @@ namespace shipinfer {
     // same question -- and a second copy of the answer is how one door runs a slot the other
     // reports as "not run here".
     bool plane_runs(const std::string& kind);
+
+    // ...and which of those kinds runs an ENGINE, which is a different question now that one
+    // of them does not. `bench_models.cpp` asks this one: a `track` slot with a stray `model:`
+    // is a loadable chain (`chain.py`: a model on an element that needs none is "meaningless,
+    // but accepted"), and asking `plane_runs` there sent it to `fed_row_of`, which found no
+    // crop or letterbox extent and aborted the WHOLE run over a slot that needs no engine.
+    bool plane_runs_a_model(const std::string& kind);
 
     std::string crop_payload_of(const std::string& slot);
     std::string output_of(const std::string& slot);

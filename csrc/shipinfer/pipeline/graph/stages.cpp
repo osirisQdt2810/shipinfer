@@ -247,6 +247,81 @@ namespace shipinfer {
           output_(std::move(output)),
           combine_(std::move(combine)) {}
 
+    TrackStage::TrackStage(std::string name, std::string output, int class_id,
+                           std::shared_ptr<tracking::Associator> associator)
+        // doc: long two events this stage has to tell apart, and what needing DETECTIONS cost
+        // CONSUMES the detections and does NOT need them. `needs` is "present AND NON-EMPTY",
+        // so needing DETECTIONS skipped the stage on every frame the detector answered with
+        // ZERO boxes -- and an unadvanced tracker does not age, so a ship that left frame
+        // stays lost-but-alive with a Kalman prediction where it was and the next object near
+        // that box is published with its id. `consumes` gates on `available()` (`detected_`),
+        // so the stage still skips the frame the detector never answered for -- `track.py`'s
+        // `detections is None` arm -- and now runs on the zero-box frame, which is that
+        // file's other arm: "an empty `Detections` still advances the tracker below, because
+        // ageing is how a track dies".
+        : Stage(std::move(name), {DETECTIONS}, {}, {output}),
+          output_(std::move(output)),
+          class_id_(class_id),
+          associator_(std::move(associator)) {}
+
+    size_t TrackStage::do_run(FrameState& state) {
+        // THE SELECTED ROWS ONLY, and the filtered copy keeps `(*selected)[i].index` -- the
+        // associator's answer is parallel to what it was GIVEN, so the ids still land on the
+        // detector's own indices rather than on the selection's.
+        //
+        // NO COPY at all for a slot that selects every row, which is the common shape: the
+        // associator takes a const reference and the frame's own vector is already the answer.
+        // A selected slot reuses `selected_` rather than allocating one per frame.
+        //
+        // `!= kAnyClass` and not `>= 0`, the same reading `CropStage` makes: `kNoClass` is
+        // negative too, so `>= 0` would treat a declared EMPTY selection as every row -- the
+        // opposite of what it means.
+        const std::vector<Detection>* selected = &state.detections();
+        if (class_id_ != CropSpec::kAnyClass) {
+            selected_.clear();
+            for (const Detection& det : state.detections()) {
+                if (det.class_id == class_id_) selected_.push_back(det);
+            }
+            selected = &selected_;
+        }
+        ObjectBatch batch;
+        batch.name = output_;
+        batch.width = 1;
+        // CAUGHT HERE, and not left to `Stage::run`. A tracker refuses a frame that does not
+        // advance its camera's stream, and a pool of workers reorders frames routinely -- so
+        // this is an ordinary outcome. Letting it out would make the stage FAIL, which never
+        // delivers the slot to the collector, so the frame the graph promised sits in
+        // `pending_` until `sweep()` retires it as a TIMEOUT: published a reassembly window
+        // late and counted in the fault channel, for a frame whose only problem is that it
+        // has no ids. `track.py` catches the same refusal and returns `_untracked(item)`.
+        std::vector<int> ids;
+        try {
+            ids = associator_->ids(state.tag().camera_id, state.tag().frame_id, *selected);
+        } catch (const InferenceError&) {
+            // NOT swallowed: counted on the associator, which is shared per slot, so the run
+            // can report it. Only this type -- a ConfigError from a misconfigured tracker is
+            // a fault and must still fail the stage.
+            associator_->note_untracked();
+            ids.clear();
+        }
+        for (size_t row = 0; row < ids.size() && row < selected->size(); ++row) {
+            // A row per CONFIRMED id only. `-1` is "matched no track", and an absent row is how
+            // `events/records.cpp` leaves `track_id` null for that object.
+            if (ids[row] < 0) continue;
+            batch.object_indices.push_back((*selected)[row].index);
+            // FLOAT, because `ObjectBatch::data` is one: exact for ids below 2^24, and a
+            // monotonic per-camera counter reaches that after ~16.7M tracks. The Python plane
+            // carries the same ids as `int64`, so the two planes differ THERE and the ledger
+            // holds the item; nothing here can widen the carrier alone.
+            batch.data.push_back(static_cast<float>(ids[row]));
+        }
+        const size_t rows = batch.rows();
+        // Attached even when EMPTY, like a crop payload: the name exists, so a reader that
+        // joins on it finds an answer rather than a missing key.
+        state.attach(std::move(batch));
+        return rows;
+    }
+
     size_t ObjectStage::do_run(FrameState& state) {
         const DevicePayload* payload = state.payload(source_);
         if (payload == nullptr)

@@ -152,7 +152,13 @@ EXTERNAL: dict[str, ExternalLane] = {
     "shipvision": ExternalLane(
         units=(
             "shipinfer/pipeline/tracking/shard.cpp",
+            # The associator behind the seam, in the lane for the same reason the shard is:
+            # it includes `shard.h`. `tracking/associator.cpp` is deliberately NOT here -- it
+            # includes only lane-free headers, so it compiles in every build and its refusal
+            # is what a lane-less binary answers with.
+            "shipinfer/pipeline/tracking/bytetrack.cpp",
             "tests/test_tracking_shard.cpp",
+            "tests/test_tracking_associator.cpp",
         ),
         packages=(),
         include_root="3rdparty/shipvision/csrc",

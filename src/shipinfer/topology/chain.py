@@ -970,8 +970,13 @@ def _check_row_selection(nodes: Sequence[ElementNode]) -> None:
 
 #: Which event field a kind's rows fill. ONE definition -- `plan.py` imports it from here and
 #: writes the same table into a plan's `field` lines. Two copies would decide different things
-#: the day a kind is added: only in `plan.py` and the plan emits candidates this check ignores.
-ROW_FIELD_KINDS = {ElementKind.EMBED: "embedding", ElementKind.SEGMENT: "mask_area_px"}
+#: the day a kind is added. TRACK scatters per row like the other two, so the "two slots
+#: cannot fill one row's field" refusal below covers it too.
+ROW_FIELD_KINDS = {
+    ElementKind.EMBED: "embedding",
+    ElementKind.SEGMENT: "mask_area_px",
+    ElementKind.TRACK: "track_id",
+}
 
 
 # doc: long the same state is refused per frame today, which is an outage and a log flood
