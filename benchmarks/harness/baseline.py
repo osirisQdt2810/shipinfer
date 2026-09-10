@@ -320,7 +320,7 @@ def run_baseline(config: BenchConfig, out_dir: Path | None = None) -> BaselineRe
         FileNotFoundError: an input is missing; the message names it.
     """
     config = config.resolved()
-    config.require_inputs()
+    config.require_inputs("baseline")
     out = out_dir or config.out_dir / "baseline"
     out.mkdir(parents=True, exist_ok=True)
     log = out / "buffers.jsonl"
