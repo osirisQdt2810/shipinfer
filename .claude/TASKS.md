@@ -1886,7 +1886,23 @@ hook down, for when the operator asked to see something before it is executed.
       `TestBothPlanesNameTheSameLatencyWindow` asserting both the metric family AND that
       both derive it from the collector opening the frame -- so a rename or a changed
       window on either side fails. Both falsified. Suite 4168.
-      (a) STILL OWED, and it is the one the operator's latency requirement names: After it, the two planes report DIFFERENT windows:
+      (a) BUILT AND MEASURED TOO, waiting on #211 to merge before it opens: and like (b) it
+      was a SUMMARY, not a measurement. `FrameTag::captured_ns` (`core/types.h:49`) has been a
+      steady stamp since ingest was written, and `core/events/schema.cpp:264` already computes
+      `event.latency_us` from it on EVERY event -- so `cli/bench.cpp` only had to sample and
+      print it. `report_window(prefix, ...)` replaces `report_latency` so the two windows cannot
+      drift in format, the sample is taken BEFORE `to_json` (the call that refuses a NaN, so a
+      run whose events carry one still reports its latency), and both push under one lock.
+      **AND THE TWO WINDOWS ARE CLOSE, which is worth knowing rather than assuming:** replay
+      p50 57 024 against 57 136 us (112 us apart), nvdec p50 64 947 against 65 490 (543 us) and
+      p99 295 492 against 302 104 (6.6 ms). So the reassembly window is 99%+ of the end-to-end
+      figure on both sources, the ingest gap shows only in the tail -- and #210's knob result
+      was an END-TO-END result all along.
+      #211's ROUND 1 was four findings and two were sharper than they read: a fabricated
+      `camera="unknown"` label on a branch that cannot fire (the tag rule), and a duplicated
+      reader whose test did not cover the part that differed -- breaking the bucket accumulation
+      to last-write-wins left it GREEN, because `count` and `mean` come from other rows.
+      ORIGINAL (a): After it, the two planes report DIFFERENT windows:
         Python: `frame_latency_us` -- "capture to emission ... the number the deployment is
                 judged on" (`pipeline/metrics.py:166-169`), plus `stage_latency_us`, and the
                 harness already reads the latter into the run's JSON.
