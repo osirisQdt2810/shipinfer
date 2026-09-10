@@ -2785,9 +2785,27 @@ hook down, for when the operator asked to see something before it is executed.
       SO 4.0-4.2k img/s DETECT-ONLY on four GPUs = **4.2-4.4x** the fp16 baseline's 959.6,
       from a config value. Spread is +/-9% within a setting (the page's noise floor is ~15%),
       so 2-vs-4 at 25% is larger than the spread but the individual runs are quoted above.
+      **THE FULL CHAIN GOES THE OTHER WAY, AND THAT IS THE ANSWER TO THE 5x QUESTION.** Same
+      GPUs, fp16, 50x20x40 s, all four models' instance counts scaled together (2/2/2/1 ->
+      4/4/4/2 -> 6/6/6/3):
+      | instances | img/s | ship_detector | ship_segmenter | person_embedder | ship_embedder |
+      |---|---|---|---|---|---|
+      | x1 (the repository's) | **669.8, 694.8** | 142% | 100% | 132% | 47% |
+      | x2 | 479.0 | 327% | 240% | 199% | 111% |
+      | x3 | 428.9 | 468% | 295% | 197% | 159% |
+      MORE INSTANCES MAKES THE FULL CHAIN WORSE, because x1 is ALREADY past the concurrency
+      peak: four models at 2/2/2/1 is SEVEN instances per device, where detect-only peaked at
+      four. And `nvidia-smi` sampled through an x1 run reads **74-99%, mostly ~90%, on all
+      four devices**, so the four-model chain at the design load is device-bound with ~10%
+      headroom -- not 7x of it.
+      **SO THE TWO READINGS ARE NOW BOTH MEASURED AND THEY DIVERGE HARD.** One model per image
+      (the baseline's own shape): 4.0-4.2k img/s = 4.2-4.4x, and 5x is a knob or two away.
+      Four models per image: ~700 img/s = 0.72x, devices ~90% busy, so 5x (4 798 img/s) is
+      ~7x less compute per image than this hardware does -- INT8 is worth maybe 1.5-2x of
+      that, not 7x. On four A5000s, 5x on the four-model chain is not a scheduling result and
+      not a precision result; it is either fewer models per image or ~28 GPUs.
       REMAINING LEVERS: INT8 (fp16 alone gave 1.23x on the full chain, and it cuts the engine
-      time the peak is now made of), the batched letterbox, and re-taking the FULL chain's
-      number with the instance counts at their peaks rather than at 2/2/2/1.
+      time both peaks are made of) and the batched letterbox.
       **THE QUESTION THIS PUTS TO THE OPERATOR, and it is theirs rather than mine:** 5x on the
       FOUR-MODEL chain, or 5x on work comparable to the baseline's one model? The metric is
       settled (V164, images/s) -- what is not settled is what the chain must compute while
