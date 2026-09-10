@@ -419,6 +419,27 @@ generator.wait()
 """
 
 
+def _fake_tree(children: dict[int, list[int]]):
+    """A `process_tree` stand-in that respects parentage AND `skip`.
+
+    Both matter now: `_sample` asks for a *generator's* subtree as well as the bench's, so a
+    fake that answered with the whole map would sweep the bench's own pid into the exclusion.
+    """
+
+    def walk(pid: int, skip: object = frozenset()) -> list[int]:
+        found: list[int] = []
+        pending = [pid]
+        while pending:
+            current = pending.pop()
+            if current in found or current in skip:  # type: ignore[operator]
+                continue
+            found.append(current)
+            pending.extend(children.get(current, []))
+        return found
+
+    return walk
+
+
 class TestAGeneratorTheBenchSpawnedIsNotTheBench:
     """The RTSP arm starts its two `rtsp_serve.py` servers INSIDE the bench container, because
     the rootless daemon has no NAT. So they are children of the bench and their CPU is already
@@ -528,11 +549,7 @@ class TestAGeneratorTheBenchSpawnedIsNotTheBench:
         box = tmp_path / "generators.pids"
         box.write_text("", encoding="utf-8")
         tree = {os.getpid(): {1: ("pipe-0", 1.0)}, 100: {2: ("gen-0", 5.0)}}
-        monkeypatch.setattr(
-            host_cpu,
-            "process_tree",
-            lambda pid, skip=frozenset(): [p for p in tree if p not in skip],
-        )
+        monkeypatch.setattr(host_cpu, "process_tree", _fake_tree({os.getpid(): [100]}))
         monkeypatch.setattr(host_cpu, "thread_cpu", lambda pid: tree[pid])
         monkeypatch.setattr(host_cpu, "cpu_seconds", lambda pid: 5.0)
         sampler = host_cpu.ThreadSampler(os.getpid(), interval_s=10.0, generators=box)
@@ -547,34 +564,59 @@ class TestAGeneratorTheBenchSpawnedIsNotTheBench:
         assert sampler.generator_cpu() == {100: 5.0}
         assert sampler.total() == pytest.approx(1.0)
 
-    def test_an_unreadable_tick_does_not_retire_the_purge(
+    def test_an_unreadable_tick_cannot_undo_a_declaration(
         self, host_cpu: ModuleType, tmp_path: Path, monkeypatch
     ) -> None:
-        """`_generator_pids` answers with an empty set on `OSError`, so one unreadable tick
-        re-adds the generator's threads. A purge that only ran when the set GREW would then
-        never run again -- threads in the table, CPU out of the denominator, which is the
-        284.7% incoherence in miniature and with nothing to notice it.
+        """`_generator_pids` answers with an empty set on `OSError`, so an unreadable tick
+        says "no generators" — and the pids that were declared are remembered rather than
+        re-admitted. Three ticks: undeclared, declared, unreadable.
         """
         box = tmp_path / "generators.pids"
         tree = {os.getpid(): {1: ("pipe-0", 1.0)}, 100: {2: ("gen-0", 5.0)}}
-        monkeypatch.setattr(
-            host_cpu,
-            "process_tree",
-            lambda pid, skip=frozenset(): [p for p in tree if p not in skip],
-        )
+        monkeypatch.setattr(host_cpu, "process_tree", _fake_tree({os.getpid(): [100]}))
         monkeypatch.setattr(host_cpu, "thread_cpu", lambda pid: tree[pid])
         monkeypatch.setattr(host_cpu, "cpu_seconds", lambda pid: 5.0)
         sampler = host_cpu.ThreadSampler(os.getpid(), interval_s=10.0, generators=box)
 
+        sampler._sample()
+        assert "gen" in sampler.by_class(), "the pre-condition: undeclared, so it is sampled"
         box.write_text("100\n", encoding="utf-8")
         sampler._sample()
+        assert "gen" not in sampler.by_class(), sampler.by_class()
         box.unlink()
-        sampler._sample()
-        assert "gen" in sampler.by_class(), "the pre-condition: an unreadable tick re-adds it"
-        box.write_text("100\n", encoding="utf-8")
         sampler._sample()
 
         assert "gen" not in sampler.by_class(), sampler.by_class()
+        assert sampler.total() == pytest.approx(1.0)
+
+    def test_a_generators_own_child_is_purged_with_it(
+        self, host_cpu: ModuleType, tmp_path: Path, monkeypatch
+    ) -> None:
+        """`cutime` charges a reaped `ffmpeg` to the server that waited for it, so leaving the
+        child's THREADS in the breakdown counts that CPU twice -- once in `threads_cpu_s` and
+        once out of `bench_cpu_s`. The first tick here is the unreadable one, which is the only
+        way the subtree gets in: the walk does not descend into a declared generator.
+        """
+        box = tmp_path / "generators.pids"
+        tree = {
+            os.getpid(): {1: ("pipe-0", 1.0)},
+            100: {2: ("gen-0", 5.0)},
+            200: {3: ("ffmpeg", 9.0)},
+        }
+        monkeypatch.setattr(
+            host_cpu, "process_tree", _fake_tree({os.getpid(): [100], 100: [200], 200: []})
+        )
+        monkeypatch.setattr(host_cpu, "thread_cpu", lambda pid: tree[pid])
+        monkeypatch.setattr(host_cpu, "cpu_seconds", lambda pid: 14.0)
+        sampler = host_cpu.ThreadSampler(os.getpid(), interval_s=10.0, generators=box)
+
+        sampler._sample()
+        assert {"gen", "ffmpeg"} <= set(sampler.by_class()), sampler.by_class()
+
+        box.write_text("100\n", encoding="utf-8")
+        sampler._sample()
+
+        assert set(sampler.by_class()) == {"pipe"}, sampler.by_class()
         assert sampler.total() == pytest.approx(1.0)
 
     def test_declaring_is_a_no_op_when_nobody_is_measuring(
@@ -647,12 +689,12 @@ class TestAGeneratorsOwnChildrenAreDiscountedToo:
         script = (
             "import subprocess, sys, time\n"
             f"subprocess.run([sys.executable, '-c', {_SPIN.format(seconds=SPIN_S)!r}])\n"
-            "time.sleep(30)\n"
+            "time.sleep(12)\n"
         )
         child = subprocess.Popen([sys.executable, "-c", script], env=checkout_env())
         own = with_children = 0.0
         try:
-            deadline = time.monotonic() + 20.0
+            deadline = time.monotonic() + 8.0
             while time.monotonic() < deadline:
                 try:
                     line = Path(f"/proc/{child.pid}/stat").read_text(encoding="utf-8")

@@ -30,8 +30,9 @@ from pathlib import Path
 
 TICKS_PER_SECOND = os.sysconf("SC_CLK_TCK")
 
-#: Where a load generator inside the bench's own process tree says so, one pid per line. The
-#: wrapper creates the path and exports it; `scripts/rtsp_serve.py` declares itself into it.
+#: Where a load generator inside the bench's own process tree is declared, one pid per line.
+#: The wrapper creates the path and exports it; `benchmarks/harness/rtsp.py` writes each RTSP
+#: server's `Popen.pid` as it starts one.
 GENERATOR_PIDFILE_ENV = "SHIPINFER_HOST_CPU_PIDFILE"
 
 
@@ -52,7 +53,7 @@ def declare_generator(pid: int | None = None) -> bool:
 
 
 def ticks_from_stat(line: str, *, with_children: bool = False) -> float:
-    """The `utime + stime` ticks in one `/proc/<pid>/stat` line, optionally plus its children'.
+    """The `utime + stime` ticks in one `/proc/<pid>/stat` line, optionally with its children.
 
     Parsed from the LAST `)` rather than by splitting on spaces: field 2 is the executable
     name in parentheses, and it can contain both -- `python (old)` is a legal `comm`, and so
@@ -185,6 +186,10 @@ class ThreadSampler:
         #: Lifetime CPU of each generator the bench spawned, sampled while it is still alive
         #: -- it dies with the bench, so there is no reading it afterwards.
         self._generator_cpu: dict[int, float] = {}
+        #: Every pid ever seen UNDER a declared generator. Accumulated, never pruned: a child
+        #: that has since exited still must not come back into the breakdown, and `cutime`
+        #: has already charged it to the generator.
+        self._generator_tree: set[int] = set()
         self._thread = threading.Thread(target=self._run, name="host-cpu-sampler", daemon=True)
 
     def start(self) -> None:
@@ -223,11 +228,18 @@ class ThreadSampler:
 
     def _sample(self) -> None:
         generators = self._generator_pids()
+        # The generator's OWN DESCENDANTS as well as the generator: `cutime` charges a reaped
+        # `ffmpeg` to the server that waited for it, so a subtree left in the breakdown is
+        # counted twice over -- once in `threads_cpu_s` and once out of `bench_cpu_s`, which
+        # is how `accounted_pct` passes 100%.
+        for generator in generators:
+            self._generator_tree.update(process_tree(generator))
+        excluded = frozenset(generators | self._generator_tree)
         # EVERY tick, not only when the set grows. A generator is declared once its pid
         # exists, so a tick can precede the declaration -- and `_generator_pids` answers with
         # an empty set on `OSError`, so one unreadable tick can re-add threads a growth-only
         # guard would then never purge again. It is a comprehension over a few hundred tids.
-        self._forget(generators)
+        self._forget(excluded)
         for pid in generators:
             cpu = cpu_seconds(pid)
             if cpu is not None:
@@ -235,7 +247,7 @@ class ThreadSampler:
         # Every process in the tree, because a tid is unique host-wide and a shard child's
         # model threads are the ones this instrument exists to name -- but not a generator's,
         # which is inside the tree and is not the bench.
-        for pid in process_tree(self._pid, skip=generators):
+        for pid in process_tree(self._pid, skip=excluded):
             for tid, (name, cpu) in thread_cpu(pid).items():
                 previous = self._seen.get(tid)
                 if previous is None or cpu >= previous[2]:
