@@ -1130,6 +1130,29 @@ WHAT THIS SETTLES, and it settles the question I had put to the operator:
    while the whole chain is ~700 when detect is the heaviest single model; why a pipeline that
    keeps its data on VRAM is not much faster than that; and what `replay` even is.
 
+### V166 — 10 Sep. Two sentences of mine that read as a contradiction, and the question they hid
+
+> bạn vừa bảo replay là decode trên host, được lupload lên VRAM, sau đó lại bảo là "that is
+> exactly the trip gstreamer rtsp->nv12->all on VRAM" tức là sao? sao câu trước đá câu sau thế
+
+> tôi đang hỏi là: HIỆN TẠI ĐANG đi theo đường nào, lúc thì bảo là replay,lúc thì là gstreamer.
+> NÓI 1 điều consistency đi, nói dex hiểu vào, tôi muốn biết: pipeline hiện tại đạt được img/s
+> cao nhất, đang đi theo đường pipelinen nào, input đầu vaoaf là gì và đi qua những module nào
+
+FAIR, AND THE SENTENCE WAS MINE. "replay ... that is exactly the trip nv12 removes" reads as
+"replay IS the nv12 route", which is the reverse of what I measured. The two routes are
+opposites: `replay` decodes on the HOST and uploads every frame; `gstreamer rtsp -> nv12`
+decodes on the GPU and never uploads.
+
+THE ANSWER OWED, and it is now the ledger's own table under `V165-WHOLE-PIPELINE-4500`: every
+number in this session is `replay`; the highest (4 716 img/s) executed ONE module (`detect`);
+the four-model chain over the same route is 695; and the whole pipeline to `mtmc` has never
+been measured, for two reasons that are both measured rather than asserted.
+
+STANDING RULE THIS SETS: **quote the route and the modules that EXECUTED beside any img/s
+figure.** A number without them invites exactly this confusion, and the run prints both
+(`chain 'x': N stage(s), not run here: ...`).
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
@@ -1310,6 +1333,8 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 
 | Rule | Where |
 |---|---|
+| **The target is 4 500 img/s for the WHOLE pipeline**, `decode -> ... -> mtmc track`, absolute rather than a multiple of the baseline | **V165** |
+| **Quote the route and the modules that EXECUTED beside any img/s figure** — `replay` (host decode + an upload per frame) and `nv12` (NVDEC into VRAM, no upload) are opposite routes, and the run prints both (`chain 'x': N stage(s), not run here: ...`) | **V166** |
 | **Decide it yourself** — do not park a design call as an operator question. `[!]` is for genuinely blocked (a dead GPU, an unbuildable image, a credential), not for a judgement you can make and defend; safety confirmations still stand | **V154** |
 | **A PR serves one feature** — implement / fix / speed-up, with its tests inside it. Do not slice one feature into `feat()` + `test()` + `docs()`, and do not open a two-line PR at all; still inside V80's ~15 commit / ~25 file cap | **V153** |
 | **System tests run the real chain, decode → output**, on the topology the feature uses (fleet / deepstream / threading); mock-only verification is not verification | **V148** |
