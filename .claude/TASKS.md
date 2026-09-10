@@ -3340,7 +3340,7 @@ hook down, for when the operator asked to see something before it is executed.
       around `track(cluster) -> list[GlobalTrack]`) has NO C++ twin. A C++ `mtmc` stage is
       therefore not a wrapper the way `track` was; the stateful global-id assignment has to be
       ported too. Hence:
-        * **3a -- the instant barrier. BUILT AND GREEN** on `feat/the-cpp-plane-syncs-instants`:
+        * **3a -- the instant barrier. OPEN AS #217** (83 checks, ASan clean, offline tier) on `feat/the-cpp-plane-syncs-instants`:
           `csrc/shipinfer/pipeline/mtmc/barrier.{h,cpp}` + `csrc/tests/test_mtmc_barrier.cpp`,
           83 checks, five clean runs, ASan/UBSan clean, and it compiles in the OFFLINE tier
           (pure, no lane, no CUDA) exactly as `topology/barrier.py` is pure. One deliberate
