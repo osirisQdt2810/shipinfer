@@ -1876,7 +1876,14 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE HERE because the C++ plane is the one the measurement was taken on, and a
       Python A/B needs its own before/after at the design load to claim anything.
 
-- [ ] **THE-DISCOUNT-STOPS-AT-THE-GENERATORS-OWN-CHILDREN · #205's three findings (10 Sep).**
+- [~] **THE-DISCOUNT-STOPS-AT-THE-GENERATORS-OWN-CHILDREN · PR #207 IN REVIEW (10 Sep),
+      all three fixed.** `cpu_seconds` reads `cutime`/`cstime` too, so the discount was
+      0.11 CPU-s where the truth is 0.50 -- a third to a quarter of the generator's real
+      cost, with `accounted_pct` reading 48.3% for a breakdown that was missing nothing.
+      `thread_cpu` deliberately does NOT: the kernel keeps those fields only for a thread
+      group's leader. `_forget` runs every tick and `_declared` is gone. The docstring
+      describes the spawner-declared drop-box it actually has. Both code findings
+      falsified; suite 4158. ORIGINAL:
       (1) `cpu_seconds` reads `/proc/<pid>/stat` fields 14/15 only, never 16/17
       (`cutime`/`cstime`), so a generator's OWN children are not discounted -- and
       `scripts/rtsp_serve.py:139` shells out to `ffmpeg -c:v libx264` over the whole JPEG set
@@ -1898,7 +1905,7 @@ hook down, for when the operator asked to see something before it is executed.
       the principle for the no-generator case. The answer to the second is that absent and
       empty mean different things here -- "not measured" versus "measured, none found" -- and a
       zero would be a claim the run cannot make; that belongs in the docstring.
-- [~] **BENCH-CPP-LEAVES-THE-CURRENT-DEVICE · PR #206 IN REVIEW (10 Sep).**
+- [x] **BENCH-CPP-LEAVES-THE-CURRENT-DEVICE · MERGED as #206 (10 Sep).**
       `gpuGetDevice(&previous)` before the walk and `gpuSetDevice(previous)` after it, so
       the block is safe by construction rather than by position. Source-level assertion in
       `tests/runtime/test_blocking_sync.py` because a driverless tier cannot call
