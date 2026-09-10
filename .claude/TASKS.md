@@ -1876,8 +1876,28 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE HERE because the C++ plane is the one the measurement was taken on, and a
       Python A/B needs its own before/after at the design load to claim anything.
 
-- [~] **DOES-THE-KNOB-HURT-AT-A-FIFTH-OF-THE-LOAD? · the one regime its own comment names,
-      and now measurable (10 Sep).** `cli/bench.cpp` says the blocking-sync knob is off by
+- [x] **DOES-THE-KNOB-HURT-AT-A-FIFTH-OF-THE-LOAD? · NO -- IT HELPS MORE. Measured 10 Sep,
+      and the caveat in `bench.cpp`'s own comment is FALSIFIED.**
+      50 cameras x 4 fps (a fifth of 20) on GPUs 1-5, `--source nvdec`, 40 s, off/on
+      interleaved twice, all four `exit=0`, ZERO drops and zero timeouts in every arm:
+      | | off1 | on1 | off2 | on2 | pair 1 | pair 2 |
+      |---|---|---|---|---|---|---|
+      | host CPU-s | 363.6 | 202.0 | 378.7 | 168.9 | **-44.4%** | **-55.4%** |
+      | frame p50 us | 67 339 | 64 984 | 65 185 | 66 404 | -3.5% | +1.9% |
+      | frame p95 us | 109 614 | 114 015 | 114 633 | 103 607 | +4.0% | -9.6% |
+      | frame p99 us | 498 860 | 138 718 | 419 364 | 124 798 | **-72.2%** | **-70.2%** |
+      | frame max us | 911 191 | 387 137 | 839 384 | 373 823 | -57.5% | -55.5% |
+      | events complete | 7 849 | 7 784 | 7 834 | 7 780 | -0.8% | -0.7% |
+      **THE TAIL IS WHERE IT SHOWS, and it goes the RIGHT way**: p50 and p95 are flat
+      (within +-10%, i.e. noise) while p99 falls ~70% and the max ~56%. The spin's cost at
+      light load is not a per-synchronise wake-up, it is OCCASIONAL LONG STALLS -- p99
+      420-500 ms and max 840-910 ms with it, 125-139 ms and 374-387 ms without. Throughput
+      is flat because the load is offer-limited and nothing is shed either way.
+      SO THE DEFAULT SHOULD FLIP, on evidence in BOTH regimes rather than one. What is
+      still unmeasured is a FIFTIETH of the load -- one camera, one GPU -- where the
+      wake-up could dominate a nearly idle device; the PR names that rather than implying
+      the whole range is covered.
+      ORIGINAL: `cli/bench.cpp` says the blocking-sync knob is off by
       default "because it trades wake-up latency for host CPU, and the host is only the wall at
       this load -- at a fifth of it the trade goes the other way". That sentence has never been
       measured; it was reasoning. At the DESIGN load the trade does not appear at all: -40% host
