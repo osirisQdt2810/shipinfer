@@ -278,7 +278,7 @@ class TestTheProfileReadsOneWindow:
         from contextlib import redirect_stdout
 
         from benchmarks.harness.histograms import read_total
-        from benchmarks.run_bench import _print_reassembly
+        from benchmarks.run_bench import _print_latency
         from shipinfer.core.metrics.histogram import Histogram
 
         histogram = Histogram("h", "test")
@@ -287,14 +287,19 @@ class TestTheProfileReadsOneWindow:
 
         class _Result:
             steady_reassembly = read_total(histogram)
+            steady_frame_latency = read_total(histogram)
             steady_is_whole_run = False
 
         out = io.StringIO()
         with redirect_stdout(out):
-            _print_reassembly(_Result())
+            _print_latency(_Result())
         printed = out.getvalue()
 
         assert "reassembly (steady, 3 frames" in printed, printed
+        # BOTH windows: the C++ arm prints two blocks, and a report with one of them cannot be
+        # put beside it. This is the assertion #212's review found missing -- the parity test's
+        # Python half was green on a string in `metrics.py` that no report surfaced.
+        assert "frame      (steady, 3 frames" in printed, printed
         assert "p50" in printed and "p95" in printed and "p99" in printed, printed
         # The caveat has to be in the line a human reads: `quantile` returns the bucket's
         # UPPER edge, so beside the C++ arm's exact figures an unqualified p50 reads as this
@@ -308,15 +313,16 @@ class TestTheProfileReadsOneWindow:
         import io
         from contextlib import redirect_stdout
 
-        from benchmarks.run_bench import _print_reassembly
+        from benchmarks.run_bench import _print_latency
 
         class _Result:
             steady_reassembly = None
+            steady_frame_latency = None
             steady_is_whole_run = True
 
         out = io.StringIO()
         with redirect_stdout(out):
-            _print_reassembly(_Result())
+            _print_latency(_Result())
 
         assert out.getvalue() == ""
 
@@ -329,7 +335,7 @@ class TestTheProfileReadsOneWindow:
         )
         arm = source.split("def measure_shipinfer_in_full(")[1].split("\ndef ")[0]
 
-        assert "_print_reassembly(result)" in arm
+        assert "_print_latency(result)" in arm
 
     def test_an_unobserved_histogram_sums_to_an_empty_cell(self) -> None:
         from benchmarks.harness.histograms import read_total

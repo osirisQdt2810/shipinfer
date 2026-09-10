@@ -140,6 +140,10 @@ class ShipInferResult:
     #: plane prints `reassembly_us_p50/p95/p99` on stdout; without this field the Python arm
     #: reported no latency at all and the comparison needed a debugger.
     steady_reassembly: HistogramCell | None = None
+    #: Capture to emission over the same window -- the C++ plane's `frame_us_*`. Separate from
+    #: `steady_reassembly` because the two windows differ, and both are reported so a reader
+    #: can see by how much rather than assume.
+    steady_frame_latency: HistogramCell | None = None
     #: True when the run ended before its own warm-up. The `steady_*` fields are then the
     #: whole run, and anything built on them has to say so rather than call it steady.
     steady_is_whole_run: bool = False
@@ -496,6 +500,11 @@ def run_shipinfer(
                 # cameras, because that plane reports one distribution and this one observes
                 # per camera like everything else here.
                 "reassembly": read_total(runner.metrics.reassembly_us),
+                # And capture to emission, which is the window the C++ plane prints as
+                # `frame_us_*` and this plane's own docstring calls "the number the deployment
+                # is judged on". Reported for the same reason: a metric nothing surfaces is a
+                # comparison that needs a debugger.
+                "frame": read_total(runner.metrics.frame_latency_us),
             }
 
         sampler = OccupancySampler(log, probe, interval_s=config.sample_interval_s, meta=meta)
@@ -533,6 +542,7 @@ def run_shipinfer(
                 # `None` as "since the start", while a missing key would turn a too-short run
                 # into a `KeyError` -- which is what the neighbouring keys are all here for.
                 "reassembly": None,
+                "frame": None,
             }
             warmup_taken = window_started
         steady_s = max(0.0, time.monotonic() - warmup_taken)
@@ -575,6 +585,7 @@ def run_shipinfer(
                 for s, cell in at_end["stages"].items()
             },
             steady_reassembly=at_end["reassembly"].minus(at_warmup["reassembly"]),
+            steady_frame_latency=at_end["frame"].minus(at_warmup["frame"]),
             steady_is_whole_run=whole_run,
             frames_accepted=runner.frames_accepted,
             events_emitted=runner.sink.emitted,

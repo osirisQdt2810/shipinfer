@@ -548,25 +548,29 @@ def _print_device_table(
             print(f"  {'  (busy)':<18} {spread}")
 
 
-def _print_reassembly(result: Any) -> None:
-    """The reassembly window, beside the C++ arm's three lines and in the same units.
+def _print_latency(result: Any) -> None:
+    """BOTH windows, beside the C++ arm's two blocks and in the same units.
 
-    Printed and not only returned: without it the Python arm's report carried no latency at
-    all, so the like-for-like comparison this figure exists for needed a debugger.
+    Printed and not only carried: a metric nothing surfaces is a comparison that needs a
+    debugger, which is what both of these were until they were printed here.
     """
-    cell = getattr(result, "steady_reassembly", None)
-    if cell is None or not cell.count:
-        return
-    window = "whole run" if result.steady_is_whole_run else "steady"
-    # "BUCKET UPPER EDGES" in the line a human reads, not only in the metric's help string:
-    # `quantile` returns the upper edge, so a true 51 ms p50 prints as 63 000 against
-    # `_STAGE_BUCKETS_US` -- ~24% high, always that way, and beside the C++ arm's exact
-    # figures it reads as this plane being slower. The mean is exact, so it goes too.
-    print(
-        f"\nreassembly ({window}, {cell.count} frames, bucket upper edges): "
-        f"p50 {cell.quantile(0.5):.0f} us  p95 {cell.quantile(0.95):.0f} us  "
-        f"p99 {cell.quantile(0.99):.0f} us  mean {cell.mean:.0f} us (exact)"
+    windows = (
+        ("reassembly", getattr(result, "steady_reassembly", None)),
+        ("frame     ", getattr(result, "steady_frame_latency", None)),
     )
+    window = "whole run" if result.steady_is_whole_run else "steady"
+    for name, cell in windows:
+        if cell is None or not cell.count:
+            continue
+        # "BUCKET UPPER EDGES" in the line a human reads, not only in the help string:
+        # `quantile` returns the upper edge, so a true 51 ms p50 prints as 63 000 against
+        # `_STAGE_BUCKETS_US` -- ~24% high, always that way, and beside the C++ arm's exact
+        # figures it reads as this plane being slower. The mean is exact, so it goes too.
+        print(
+            f"\n{name} ({window}, {cell.count} frames, bucket upper edges): "
+            f"p50 {cell.quantile(0.5):.0f} us  p95 {cell.quantile(0.95):.0f} us  "
+            f"p99 {cell.quantile(0.99):.0f} us  mean {cell.mean:.0f} us (exact)"
+        )
 
 
 def measure_shipinfer_in_full(
@@ -618,7 +622,7 @@ def measure_shipinfer_in_full(
         ["\nper-device execution (the balancing evidence):"],
         shipinfer.device_tables(result),
     )
-    _print_reassembly(result)
+    _print_latency(result)
     offered = shipinfer.offered_rates(cfg, result)
     capacity = shipinfer.per_module_capacity(cfg, instances=result.instances)
     return run, ours, result, offered, capacity
