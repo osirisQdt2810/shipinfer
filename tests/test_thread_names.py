@@ -29,6 +29,7 @@ from shipinfer.core.thread_name import (
     kernel_name,
     start_thread,
 )
+from shipinfer.core.types import Device
 
 #: `SYS_gettid` on x86-64. `threading.get_native_id()` exists, but this file is about
 #: what the KERNEL holds, so it asks the kernel for the id as well as for the name.
@@ -241,18 +242,34 @@ def test_the_two_planes_agree_on_a_model_instances_label() -> None:
 def test_no_two_instances_share_a_kernel_name() -> None:
     """The 15-byte budget's one real failure mode, over the format the runtime builds:
     `engine/model.py` names an instance `{model}_{ordinal}_{device}`.
+
+    WITH `Device`, not with `range(8)`. The interpolated value is a `Device`, so the composite
+    is `person_embedder_0_cuda:3` -- and the first draft of this test wrote `..._3`, a string
+    the runtime never builds. Every instance thread on this plane came out `mdl-<model>`,
+    twenty of them in one class, with this assertion green over 64 synthetic names. Exactly
+    the failure `test_a_model_instances_label_is_built_from_the_name_the_runtime_passes`
+    describes for the other plane, in the test written to stop it.
     """
     models = sorted(p.name for p in (ROOT / "model_repository").iterdir() if p.is_dir())
     assert len(models) >= 4, models
 
     labels = {
-        instance_thread_label(f"{model}_{ordinal}_{device}")
+        instance_thread_label(f"{model}_{ordinal}_{Device.cuda(device)}")
         for model in models
         for device in range(8)
         for ordinal in range(2)
     }
     assert len(labels) == len(models) * 8 * 2, sorted(labels)
     assert all(len(label) <= _BUDGET for label in labels), sorted(labels)
+    assert all(label.startswith("m") and "." in label for label in labels), sorted(labels)
+
+
+def test_the_label_reads_the_device_out_of_the_composite_the_runtime_builds() -> None:
+    """The one assertion the set above cannot make: `mdl-<name>` is also 64 distinct labels
+    under 15 bytes, so distinctness alone never noticed the device going missing."""
+    assert instance_thread_label(f"ship_detector_0_{Device.cuda(3)}") == "m3.0-ship_detec"
+    assert instance_thread_label(f"ship_segmenter_1_{Device.cuda(7)}") == "m7.1-ship_segme"
+    assert instance_thread_label(f"ship_detector_0_{Device.cpu()}") == "mdl-ship_detect"
 
 
 def test_every_call_site_fits_without_truncation() -> None:
