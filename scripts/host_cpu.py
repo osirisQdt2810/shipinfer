@@ -92,13 +92,13 @@ def cpu_seconds(pid: int) -> float | None:
 def thread_cpu(pid: int) -> dict[int, tuple[str, float]]:
     """``{tid: (name, cpu_seconds)}`` for one process, from `/proc/<pid>/task/`.
 
-    The process's OWN two fields, without `cutime`/`cstime`: the kernel maintains those only
-    for a thread group's leader, so including them here would charge every reaped child to
-    whichever thread happened to wait for it and inflate the breakdown's total.
+    The process's OWN two fields, without `cutime`/`cstime`: a per-thread `stat` reports the
+    THREAD GROUP's figures for those, so EVERY row carries every reaped child and the CPU
+    `cpu_seconds` subtracts would return once per thread. Measured -- three threads, a 0.6 s
+    child reaped by a non-leader, `cutime=50` on all three.
 
-    One directory deeper than :func:`cpu_seconds`, and `comm` separately
-    rather than out of `stat`: a thread name can contain a `)` and the parse below already
-    keys on the LAST one, so reading the name from its own file is both simpler and exact.
+    `comm` separately rather than out of `stat`, one directory deeper than
+    :func:`cpu_seconds`: a thread name can contain a `)` and the parse keys on the LAST one.
     """
     out: dict[int, tuple[str, float]] = {}
     try:
@@ -186,9 +186,9 @@ class ThreadSampler:
         #: Lifetime CPU of each generator the bench spawned, sampled while it is still alive
         #: -- it dies with the bench, so there is no reading it afterwards.
         self._generator_cpu: dict[int, float] = {}
-        #: Every pid ever seen UNDER a declared generator. Accumulated, never pruned: a child
-        #: that has since exited still must not come back into the breakdown, and `cutime`
-        #: has already charged it to the generator.
+        #: Every pid ever seen UNDER a declared generator. Accumulated because an exited child
+        #: must not come back and `cutime` has charged it already; never pruned, which is safe
+        #: only while pid reuse cannot happen inside one run (`pid_max` is 4194304 here).
         self._generator_tree: set[int] = set()
         self._thread = threading.Thread(target=self._run, name="host-cpu-sampler", daemon=True)
 
@@ -257,7 +257,14 @@ class ThreadSampler:
                     self._seen[tid] = (pid, name, cpu)
 
     def _forget(self, pids: frozenset[int]) -> None:
-        """Drop every thread owned by one of ``pids``, live or retired."""
+        """Drop every thread owned by one of ``pids``, live or retired.
+
+        Retroactive, because a generator is declared only once its pid exists and a tick can
+        precede that. Reaches only what was seen ALIVE: a grandchild caught by a
+        pre-declaration tick and gone by the next stays -- the boundary, and not expected,
+        since `Popen` and the declaration are two statements apart in `harness/rtsp.py`.
+        A reused pid would now also stop the walk descending, taking a whole subtree.
+        """
         self._seen = {tid: row for tid, row in self._seen.items() if row[0] not in pids}
         self._retired = [row for row in self._retired if row[0] not in pids]
 
