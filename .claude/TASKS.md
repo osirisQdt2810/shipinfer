@@ -3449,8 +3449,21 @@ hook down, for when the operator asked to see something before it is executed.
           accesses holding the mutex, and a 40-line control program in the same
           `condition_variable::wait_for` shape reproduces them, so they are the toolchain's
           modelling rather than this code.
-        * **3b -- the stateful tracker twin. BUILT AND VERIFIED AGAINST THE REFERENCE** on the
-          same branch: `csrc/shipinfer/pipeline/mtmc/identity.{h,cpp}` (`GlobalIdAssigner`, a
+        * **3b -- OPEN AS #219 (`feat/cross-camera-global-ids`, 1 commit, 9 files,
+          +1583/-54), automerge on.** Built from paths onto the current main rather than by
+          replaying wtbar's commits, so #217's reviewed barrier is untouched. AND IT FOUND A
+          HOLE IN ITS OWN COVERAGE: the tie-break (largest cluster first, ties by FIRST
+          APPEARANCE -- a decision the reference argues for) had no discriminating scenario,
+          and a `stable_sort` -> `sort` mutation passed every test, because libstdc++'s
+          `std::sort` is incidentally stable below its insertion-sort threshold and every tie
+          set was smaller. `wide_tie_keeps_first_appearance` is eighteen groups wide now and
+          fails it (cam00 takes id 9); `equal_clusters_tie` fails a tie broken by label value.
+          Both goldens re-emitted FROM THE REFERENCE. The emitter's `--kind identity` went in
+          through ONE writer rather than a fifth copy of the same twelve lines (`plan`,
+          `record`, `mask`, `event` each carried it verbatim), and every existing kind was
+          diffed byte-for-byte against main's copy. ASan/UBSan clean, 23 offline binaries / 0
+          failures, 4 202 offline Python green, three red probes.
+          ORIGINAL (3b -- the stateful tracker twin, built and verified against the reference): `csrc/shipinfer/pipeline/mtmc/identity.{h,cpp}` (`GlobalIdAssigner`, a
           port of `shipvision/mtmc/identity.py`) + `csrc/tests/test_mtmc_identity.cpp`, 44
           checks, ASan/UBSan clean, offline tier. **TWELVE SCENARIOS THROUGH BOTH
           IMPLEMENTATIONS PRODUCE BYTE-IDENTICAL ID MAPS AND ISSUE COUNTS** -- not just my own
