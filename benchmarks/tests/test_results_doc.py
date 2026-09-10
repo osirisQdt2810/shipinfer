@@ -26,22 +26,38 @@ def test_the_readme_points_at_it() -> None:
 
 
 @pytest.mark.parametrize("name", ["plan.cpp", "from_plan.cpp"])
-def test_the_chain_measured_still_has_no_tracking(name: str) -> None:
-    """`RESULTS.md` says "hand tracklets downstream" is in no number above, and this is the
-    check behind that sentence. When tracking lands, this fails -- which is the point: the
-    ratios were measured on a chain SHORTER than the deployed one, so adding the stage adds
-    work on our side and every ratio has to be re-taken.
+def test_the_chain_measured_now_tracks_and_still_has_no_mtmc(name: str) -> None:
+    """This test used to assert the OPPOSITE and failing was its purpose.
+
+    It read "track not in body and mtmc not in body" behind `RESULTS.md`'s largest negative
+    claim, and tracking landing broke it -- which is how the page got re-measured instead of
+    going quiet. What is left of the claim is `mtmc`, so that is what it asserts, plus that
+    the graph does reach a tracker by name.
     """
     body = (GRAPH / name).read_text(encoding="utf-8")
-    assert (
-        "track" not in body and "mtmc" not in body
-    ), f"{name} now builds a tracking node; benchmarks/RESULTS.md still claims it does not"
+
+    assert "mtmc" not in body, f"{name} now builds an mtmc node; RESULTS.md still excludes it"
+    if name == "from_plan.cpp":
+        assert "create_associator" in body, (
+            "the graph no longer asks for a tracker, so the page's tracking numbers describe "
+            "a chain that is not being built"
+        )
 
 
 def test_the_binary_stamps_its_own_disclaimer() -> None:
-    """The page quotes the bench's note rather than asserting the exclusion itself."""
+    """The page quotes the bench's note rather than asserting the exclusion itself.
+
+    The note is DERIVED now: "tracking" appears in it only when the run's own `stages` do not
+    contain a track slot. A constant claim is the kind that keeps being printed after it stops
+    being true, which is what happened to the tracking half of this sentence.
+    """
     bench = (REPO_ROOT / "csrc" / "shipinfer" / "cli" / "bench.cpp").read_text(encoding="utf-8")
-    assert "tracking and fused kernels are NOT in this " in bench
+
+    assert "fused kernels are NOT in this measurement" in bench
+    assert 'if (!tracked) out << ", and neither is tracking";' in bench
+    # FROM THE PLAN, not from a scan of `stage_names`: those are SLOT names, so a chain whose
+    # tracker is called `tap:` would run one and stamp "neither is tracking".
+    assert "!planned.tracks.empty()));" in bench
 
 
 def test_the_one_at_a_time_quote_is_the_harness_own_words() -> None:

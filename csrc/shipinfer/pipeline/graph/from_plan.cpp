@@ -1,5 +1,7 @@
 #include "shipinfer/pipeline/graph/from_plan.h"
 
+#include "shipinfer/pipeline/tracking/associator.h"
+
 namespace shipinfer {
 
     std::set<std::string> loaded_names(const ModelMap& models) {
@@ -30,6 +32,23 @@ namespace shipinfer {
             dag.add(std::make_unique<ObjectStage>(object.slot, *models.at(object.model),
                                                   object.source, object.output, timeout,
                                                   std::move(combine)));
+        }
+        // LAST, and after the croppers for the reason the chain gives itself (`after:
+        // [embed_ship, embed_person]`): the ids are scattered onto the same rows their vectors
+        // are, and a tracker that ran first would be tracking boxes nothing had embedded.
+        //
+        // The ASSOCIATOR by name, and the stage built here: `tracking/associator.h` explains
+        // the two build lines that put the tracker in another unit -- one measured as a binary
+        // that would not link, the other as a lane whose CI job is g++ alone.
+        for (const TrackStageSpec& track : planned.tracks) {
+            // ONE ASSOCIATOR PER SLOT, shared by every worker -- `create_associator` keys its
+            // cache by (impl, slot) and says why both halves are needed. Two slots with
+            // disjoint selections over one camera are TWO identity spaces, the way
+            // `track.py::_do_open` builds a shard per element instance; sharing one would
+            // have each slot refuse the other's frames as out of order, forever.
+            dag.add(std::make_unique<TrackStage>(
+                track.slot, track.output, track.class_id,
+                tracking::create_associator(track.impl, track.slot)));
         }
         return dag;
     }

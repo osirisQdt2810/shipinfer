@@ -1,5 +1,7 @@
 #include "shipinfer/pipeline/graph/plan_stages.h"
 
+#include "shipinfer/pipeline/tracking/associator.h"
+
 namespace shipinfer {
 
     namespace {
@@ -10,8 +12,21 @@ namespace shipinfer {
             return kind == "embed" || kind == "segment";
         }
 
+        // A stage this plane implements IN TREE rather than through an engine, so `runnable`
+        // below cannot ask it for a loaded model -- a tracker has none.
+        bool in_tree(const std::string& kind) {
+            return kind == "track";
+        }
+
         bool runnable(const PlanNode& node, const std::set<std::string>& loaded) {
             if (!plane_runs(node.kind)) return false;
+            // THE REGISTRY, not `true`. A tracker lives in an external lane, and a binary built
+            // without that lane has no registrar -- so answering "runnable" there would put
+            // the slot in `stage_names`, claim it in the run's own note, and then throw when
+            // the Dag asked for it. Asking the registry makes a lane-less build report
+            // `track` in `unsupported` instead, which is what it did before there was a
+            // tracker at all and is the only coherent answer.
+            if (in_tree(node.kind)) return tracking::ASSOCIATORS().has(node.impl);
             return !node.model.empty() && loaded.count(node.model) != 0;
         }
 
@@ -141,7 +156,11 @@ namespace shipinfer {
     }
 
     bool plane_runs(const std::string& kind) {
-        return kind == "detect" || crops(kind);
+        return kind == "detect" || crops(kind) || kind == "track";
+    }
+
+    bool plane_runs_a_model(const std::string& kind) {
+        return plane_runs(kind) && !in_tree(kind);
     }
 
     std::string crop_payload_of(const std::string& slot) {
@@ -155,10 +174,17 @@ namespace shipinfer {
     PlanStages plan_stages(const ResolvedPlan& plan, const std::set<std::string>& loaded) {
         PlanStages built;
         const PlanNode* detect = nullptr;
+        std::vector<const PlanNode*> trackers;
         std::vector<const PlanNode*> croppers;
         for (const PlanNode& node : plan.nodes) {
             if (!runnable(node, loaded)) {
                 built.unsupported.push_back(node.slot);
+            } else if (node.kind == "track") {
+                // NOT refused for being a second one. Two trackers over one camera's rows is
+                // refused at LOAD by `chain.py::_check_one_filler_per_row` when their
+                // selections overlap, and permitted when they are disjoint -- so refusing here
+                // would throw on a chain the Python plane runs.
+                trackers.push_back(&node);
             } else if (node.kind == "detect") {
                 // REFUSED, not last-wins. Two detectors is a supported chain shape on the
                 // Python plane (`topology/plan.py::_labels` unions their tables), so a plan
@@ -217,6 +243,20 @@ namespace shipinfer {
                 object.fold = fold;
             }
             built.objects.push_back(std::move(object));
+            built.stage_names.push_back(node->slot);
+        }
+        // AFTER the croppers, because a tracker consumes what the detector produced and its
+        // ids are scattered onto the same rows the embedders' vectors are -- the chain says so
+        // too (`after: [embed_ship, embed_person]`).
+        for (const PlanNode* node : trackers) {
+            TrackStageSpec spec;
+            spec.slot = node->slot;
+            spec.output = output_of(node->slot);
+            spec.impl = node->impl;
+            // `class_of`, the same reader the croppers use: no `classes:` is every row, a
+            // declared empty selection is no rows, and a named one is that class's id.
+            spec.class_id = class_of(plan, *node);
+            built.tracks.push_back(std::move(spec));
             built.stage_names.push_back(node->slot);
         }
         // An `ObjectBatch` is keyed by a stage's OUTPUT name and not its own (`stages.cpp`:

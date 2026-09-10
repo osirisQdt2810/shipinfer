@@ -47,11 +47,11 @@ namespace shipinfer {
         const bool from_plan = !engines.repository.empty();
         std::vector<BenchModel> models;
         for (const PlanNode& node : plan.nodes) {
-            // A kind this plane does not run is not this list's business, even when it names a
-            // model: `recognize: {impl: pool}` is a valid chain and `plan_stages` reports it
-            // as "not run here". Asked BEFORE any refusal, so such a slot cannot abort a run
-            // that was never going to include it.
-            if (node.model.empty() || !plane_runs(node.kind)) continue;
+            // A kind this plane runs no ENGINE for is not this list's business, even when it
+            // names a model: `recognize: {impl: pool}` is a valid chain and `plan_stages`
+            // reports it as "not run here", and a `track` slot runs in tree. Asked BEFORE any
+            // refusal, so such a slot cannot abort a run it was never going to be part of.
+            if (node.model.empty() || !plane_runs_a_model(node.kind)) continue;
 
             const std::vector<int64_t> fed_row = fed_row_of(node);
             const auto seen =

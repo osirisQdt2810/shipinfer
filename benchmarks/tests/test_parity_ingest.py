@@ -367,6 +367,36 @@ class TestKnownDivergences:
                 f"nothing reproduces is a suppression, not a decision"
             )
 
+    def test_the_cpp_plane_reads_no_tracker_params(self) -> None:
+        """The `tracker_options` entry's reproducing case, read off both trees.
+
+        Documentary rather than differential: the difference is in what each plane READS from
+        a chain file, so no golden here contains it. What it produces is two `track_id`
+        streams for one chain -- Python honouring `options`/`regression_reset`, the C++ plane
+        running ByteTrack's defaults and recovering from a stream restart an operator asked it
+        never to recover from. This test fails, and should, the moment the plumbing lands.
+        """
+        python = (ROOT / "src" / "shipinfer" / "topology" / "elements" / "track.py").read_text()
+        for param in ("algorithm", "options", "regression_reset", "attribution_iou"):
+            assert f'self.params.get("{param}"' in python, (
+                f"track.py no longer reads {param!r}; the tracker_options entry describes a "
+                f"divergence that has changed shape"
+            )
+
+        plan = (ROOT / "csrc" / "shipinfer" / "pipeline" / "graph" / "plan.h").read_text()
+        for absent in ("regression_reset", "tracker_option", "attribution_iou"):
+            assert absent not in plan, (
+                f"PlanNode now carries {absent!r}, so the C++ plane can read the tracker's "
+                f"params -- close the tracker_options entry and delete this test with it"
+            )
+        lane = (
+            ROOT / "csrc" / "shipinfer" / "pipeline" / "tracking" / "bytetrack.cpp"
+        ).read_text()
+        assert "TrackerShard shard_;" in lane, (
+            "the lane's shard is no longer default-constructed; if it now takes options, the "
+            "tracker_options entry is closed"
+        )
+
     def test_the_two_halves_of_the_register_name_the_same_ids(self) -> None:
         """Both directions, because only one was guarded and the other was the hole.
 

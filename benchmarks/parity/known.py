@@ -44,8 +44,26 @@ class KnownDivergence:
         return self.explains is not None and self.explains(python_record, cpp_record)
 
 
-#: Empty, and that is the goal state: P6-D1/D2/D3 were the last three, closed by converging
-#: the planes rather than by excusing them. An entry is added only with its citations, an
-#: OPEN ledger line naming the fix, and a case that reproduces it -- the tests here enforce
-#: all three, and the C++ half of the register must name the same ids.
-KNOWN: Mapping[str, KnownDivergence] = {}
+#: One entry, documentary (``explains=None``): the difference is in what each plane READS
+#: from a chain, so it reaches no trace field -- it reaches two different ``track_id``
+#: streams for one chain file, which no golden here holds yet. P6-D1/D2/D3 were closed by
+#: converging the planes, and this one is open work with the same intent.
+KNOWN: Mapping[str, KnownDivergence] = {
+    "tracker_options": KnownDivergence(
+        id="tracker_options",
+        seam="track.track_id",
+        python=(
+            "src/shipinfer/topology/elements/track.py:526-541 reads params `algorithm`, "
+            "`options`, `regression_reset` and `attribution_iou`, and TrackerShard refuses an "
+            "unknown option key at open()"
+        ),
+        cpp=(
+            "csrc/shipinfer/pipeline/tracking/bytetrack.cpp holds a default-constructed "
+            "TrackerShard, and PlanNode carries no options, algorithm or regression_reset, so "
+            "a chain that states them runs the defaults with nothing saying so"
+        ),
+        decided_in="PR #215 review round 3, finding 2",
+        ledger="[ ] CSRC-TRACKER-OPTIONS carry the tracker's params on the plan",
+        case="test_the_cpp_plane_reads_no_tracker_params",
+    )
+}

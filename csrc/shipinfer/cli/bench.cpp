@@ -43,6 +43,7 @@
 #include "shipinfer/pipeline/graph/stages.h"
 #include "shipinfer/pipeline/queue_sink.h"
 #include "shipinfer/pipeline/reassembly/collector.h"
+#include "shipinfer/pipeline/tracking/associator.h"
 #include "shipinfer/runtime/containment.h"
 #include "shipinfer/scheduling/policies/registry.h"
 #include "shipinfer/scheduling/queues/fair.h"
@@ -217,7 +218,7 @@ namespace {
     std::string meta_json(const Options& options, const ResolvedPlan& plan,
                           const std::vector<std::string>& stages,
                           const std::vector<std::string>& unsupported,
-                          const std::vector<BenchModel>& models) {
+                          const std::vector<BenchModel>& models, bool tracked) {
         const PlanSettings& tuning = *plan.settings;
         std::ostringstream out;
         out << "{\"meta\": {\"system\": \"cpp\", \"config\": {";
@@ -269,8 +270,16 @@ namespace {
         out << "], \"unsupported\": [";
         for (size_t i = 0; i < unsupported.size(); ++i)
             out << (i ? ", " : "") << "\"" << unsupported[i] << "\"";
-        out << "], \"note\": \"C++ data plane; tracking and fused kernels are NOT in this "
-               "measurement\"}}";
+        // DERIVED, and it used to be a constant. "tracking ... NOT in this measurement" was
+        // true until this plane grew a tracking stage, and a static claim is the kind that
+        // keeps being printed after it stops being true.
+        //
+        // FROM THE PLAN, passed in, and NOT from `stages` -- which holds SLOT names, so a chain
+        // whose tracker is called `tap:` (as this tree's own fixtures do) would have run one
+        // and stamped "neither is tracking", relocating the same lie onto a name coincidence.
+        out << "], \"note\": \"C++ data plane; fused kernels are NOT in this measurement";
+        if (!tracked) out << ", and neither is tracking";
+        out << "\"}}";
         return out.str();
     }
 
@@ -612,7 +621,8 @@ int main(int argc, char** argv) {
                 return row;
             },
             options.sample_interval_s,
-            meta_json(options, plan, stage_names, planned.unsupported, specs));
+            meta_json(options, plan, stage_names, planned.unsupported, specs,
+                      !planned.tracks.empty()));
 
         // -- workers ----------------------------------------------------------------------
         std::atomic<bool> stopping{false};
@@ -863,6 +873,14 @@ int main(int argc, char** argv) {
                 std::cout << "queue_rejected_by_camera " << camera << " " << count << "\n";
             }
             std::cout << "queue_evicted " << stats.evicted << "\n";
+            // PER SLOT, from the associators rather than from a worker's Dag: one associator
+            // serves every worker for one slot, so this is the run's answer. A reordered
+            // frame is published with no ids and counted HERE -- not in `frames_failed` and
+            // not as a reassembly timeout, which is what it used to become.
+            for (const tracking::MadeAssociator& made : tracking::made_associators()) {
+                std::cout << "track_frames_untracked " << made.slot << " "
+                          << made.associator->untracked_frames() << "\n";
+            }
         };
 
         const size_t abandoned =
