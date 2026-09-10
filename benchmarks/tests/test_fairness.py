@@ -8,6 +8,7 @@ speed-up produced by the architecture.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -137,10 +138,13 @@ class TestOmpIsSymmetric:
 class TestBothSidesLoadTheSameEngine:
     """Existence was checked; identity was not, and identity is the property that matters."""
 
+    #: Every model the guard pairs, so the fixture cannot pass by having no plan to check.
+    _PAIRED = ("ship_detector", "ship_segmenter", "person_embedder", "ship_embedder")
+
     def _repository(self, tmp_path: Path, detector: bytes | None) -> Path:
-        """A repository holding a plan for both paired models, or for neither."""
+        """A repository holding a plan for every paired model, or for none of them."""
         root = tmp_path / "model_repository"
-        for model in ("ship_detector", "ship_segmenter"):
+        for model in self._PAIRED:
             version = root / model / "1"
             version.mkdir(parents=True)
             if detector is not None:
@@ -148,13 +152,42 @@ class TestBothSidesLoadTheSameEngine:
         return root
 
     def _config(self, tmp_path: Path, flat: bytes, plan: bytes) -> BenchConfig:
+        # EVERY engine named explicitly, including the embedders'. Left unset, `resolved()`
+        # fills them from the repository root -- so the test would check whatever engines this
+        # box happens to hold, pass in a worktree with an empty `models/`, and fail in a
+        # checkout that has them. A fixture that depends on the box is not a fixture.
         engine = tmp_path / "yolo26n_fp32.engine"
         engine.write_bytes(flat)
         return BenchConfig(
             det_engine=engine,
             seg_engine=engine,
+            emb_engine=engine,
             model_repository=self._repository(tmp_path, plan),
         )
+
+    def test_shipinfer_does_not_need_the_baselines_flat_engines(self, tmp_path: Path) -> None:
+        """The defect this scoping fixes: `require_inputs` demanded the segmenter's flat plan
+        whichever models a run would load, so a detector-only measurement could not start and
+        `--precision int8` could only ever raise -- the segmenter does not build at int8 here.
+        """
+        config = self._config(tmp_path, b"PLAN-A", b"PLAN-A")
+        absent = replace(
+            config,
+            det_engine=tmp_path / "nope_det.engine",
+            seg_engine=tmp_path / "nope_seg.engine",
+            person_frames=tmp_path,
+            ship_frames=tmp_path,
+        )
+
+        absent.require_inputs("shipinfer")  # the repository is what it needs, and it is there
+
+        with pytest.raises(FileNotFoundError, match="detector engine"):
+            absent.require_inputs("baseline")
+
+    def test_an_unknown_system_name_is_refused(self, tmp_path: Path) -> None:
+        """Rather than silently checking nothing, which is how a typo becomes a green run."""
+        with pytest.raises(ValueError, match="system must be"):
+            self._config(tmp_path, b"PLAN-A", b"PLAN-A").require_inputs("shipnfier")
 
     def test_identical_engines_pass(self, tmp_path: Path) -> None:
         self._config(tmp_path, b"PLAN-A", b"PLAN-A").require_same_engines()
@@ -166,6 +199,37 @@ class TestBothSidesLoadTheSameEngine:
 
         with pytest.raises(RuntimeError, match="measures the engines"):
             config.require_same_engines()
+
+    def test_the_embedders_are_inside_the_guard_too(self, tmp_path: Path) -> None:
+        """Not a cross-system check -- the baseline runs no embedder -- but the one that says
+        our side loaded the precision that was ASKED for.
+
+        With only the detector and segmenter paired, `--precision fp16` moved two of four
+        models and said nothing about the two that carry ~9 of the chain's ~11.7 invocations
+        per image.
+        """
+        config = self._config(tmp_path, b"PLAN-A", b"PLAN-A")
+        assert config.model_repository is not None
+        (config.model_repository / "person_embedder" / "1" / "model.plan").write_bytes(
+            b"PLAN-SOMETHING-ELSE"
+        )
+
+        with pytest.raises(RuntimeError, match="person_embedder"):
+            config.require_same_engines()
+
+    def test_an_unpaired_plan_warns_rather_than_passing_in_silence(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A single-system run may have no flat engine, and then nothing verifies which
+        precision the plan holds -- so the run says so instead of looking checked."""
+        config = replace(
+            self._config(tmp_path, b"PLAN-A", b"PLAN-A"),
+            emb_engine=tmp_path / "absent_reid.engine",
+        )
+
+        config.require_same_engines()
+
+        assert "person_embedder" in capsys.readouterr().err
 
     def test_a_missing_plan_is_refused_rather_than_skipped(self, tmp_path: Path) -> None:
         """Skipping an absent plan made the guard useless in the case it exists for.

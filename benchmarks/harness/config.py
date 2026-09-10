@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
@@ -223,6 +224,12 @@ class BenchConfig:
     #: ``model_repository/<name>/1/model.plan``, built from the same ONNX.
     det_engine: Path | None = None
     seg_engine: Path | None = None
+    #: The embedders' plan. The BASELINE never loads it -- it runs one model per image -- so
+    #: this is not part of the cross-system comparison. It is here because `--precision`
+    #: claimed to move "both sides" and did nothing at all to the two models that carry most
+    #: of the invocations: the chain runs ~7.8 person embeddings per image against 1.0
+    #: detections, and their plans were outside every check.
+    emb_engine: Path | None = None
     #: Which precision BOTH sides load when neither engine is named. `require_same_engines`
     #: below is what makes this a knob rather than a hazard: point it at fp16 without
     #: installing fp16 plans and the run is REFUSED, which is what that guard exists for.
@@ -391,32 +398,49 @@ class BenchConfig:
             det_engine=self.det_engine or root / "models" / f"yolo26n_{self.precision}.engine",
             seg_engine=self.seg_engine
             or root / "models" / f"yolo26n-seg_{self.precision}.engine",
+            emb_engine=self.emb_engine or root / "models" / f"reid_r50_{self.precision}.engine",
             model_repository=repository,
             instances_per_gpu=self.instances_per_gpu or resolved_instances,
         )
 
-    def require_inputs(self) -> None:
+    # doc: long why this takes the CALLER's name rather than checking everything
+    def require_inputs(self, system: str = "both") -> None:
         """Fail before a run rather than after 70 s of measuring nothing.
+
+        `system` is who is about to run: `"baseline"` loads the two FLAT engines and nothing
+        else, `"shipinfer"` loads plans out of the repository, and `"both"` is a caller that
+        has not said. It matters because the unconditional version demanded the segmenter's
+        flat plan whichever models a run would load -- so a detector-only measurement could not
+        start, and `--precision int8` could only ever raise, on a box where the segmenter does
+        not build at int8 at all. Each system already calls this for itself
+        (`baseline.py`, `shipinfer.py`), so the name was available and simply not asked for.
 
         Raises:
             FileNotFoundError: naming the missing artefact and how to produce it.
+            ValueError: `system` is not one of the three names.
         """
+        if system not in ("baseline", "shipinfer", "both"):
+            raise ValueError(
+                f"system must be 'baseline', 'shipinfer' or 'both', got {system!r}"
+            )
         resolved = self.resolved()
-        for label, path, remedy in (
-            (
-                "person frames",
-                resolved.person_frames,
-                "git submodule update --init benchmarks/baseline",
-            ),
-            (
-                "ship frames",
-                resolved.ship_frames,
-                "git submodule update --init benchmarks/baseline",
-            ),
-            ("detector engine", resolved.det_engine, "scripts/build_engines.py"),
-            ("segmenter engine", resolved.seg_engine, "scripts/build_engines.py"),
-            ("model repository", resolved.model_repository, "scripts/build_engines.py"),
-        ):
+        frames = "git submodule update --init benchmarks/baseline"
+        required: list[tuple[str, Path | None, str]] = [
+            ("person frames", resolved.person_frames, frames),
+            ("ship frames", resolved.ship_frames, frames),
+        ]
+        if system in ("baseline", "both"):
+            required.append(
+                ("detector engine", resolved.det_engine, "scripts/build_engines.py")
+            )
+            required.append(
+                ("segmenter engine", resolved.seg_engine, "scripts/build_engines.py")
+            )
+        if system in ("shipinfer", "both"):
+            required.append(
+                ("model repository", resolved.model_repository, "scripts/build_engines.py")
+            )
+        for label, path, remedy in required:
             assert path is not None  # resolved() filled it
             if not path.exists():
                 raise FileNotFoundError(
@@ -424,10 +448,18 @@ class BenchConfig:
                 )
         self.require_same_engines()
 
-    #: Which flat engine the baseline loads, against the plan the server loads for the same
-    #: model. Both sides must run the *same file* or the comparison measures the engines.
-    _ENGINE_PAIRS = (("ship_detector", "det_engine"), ("ship_segmenter", "seg_engine"))
+    #: Flat engine <-> repository plan. The first two are the cross-system pairing: both
+    #: sides must load the SAME file or the comparison measures the engines. The embedders
+    #: have no baseline counterpart, and are here for the other half of that property --
+    #: `--precision` has to reach the models carrying ~9 of the chain's ~11.7 invocations.
+    _ENGINE_PAIRS = (
+        ("ship_detector", "det_engine"),
+        ("ship_segmenter", "seg_engine"),
+        ("person_embedder", "emb_engine"),
+        ("ship_embedder", "emb_engine"),
+    )
 
+    # doc: long the two halves this guard holds, and why four models rather than two
     def require_same_engines(self) -> None:
         """Refuse unless each side's engine is byte-identical to the other's.
 
@@ -437,6 +469,12 @@ class BenchConfig:
         not recoverable from a serialised plan without loading it, so the check is on the
         bytes. `scripts/build_engines.py` copies one file into both places, which is what
         makes this hold.
+
+        FOUR MODELS and not the detector and segmenter alone. The embedders have no baseline
+        counterpart, so for them this is not a cross-system check: it is the one that says our
+        side loaded the precision that was ASKED for. Leaving them out meant `--precision fp16`
+        moved two of four models and said nothing about the two that carry ~9 of the chain's
+        ~11.7 invocations per image.
 
         Raises:
             RuntimeError: the two sides would load different engines for a model.
@@ -449,6 +487,18 @@ class BenchConfig:
             flat = getattr(resolved, attribute)
             plan = repository / model / "1" / "model.plan"
             if flat is None or not flat.is_file():
+                # OUT LOUD rather than skipped in silence: a single-system run may have no
+                # flat engine to compare against, and then nothing verifies which precision
+                # the plan holds. A run whose numbers are not attributable to a precision is
+                # a run somebody will attribute anyway.
+                if plan.is_file():
+                    print(
+                        f"WARNING: {model}: no {flat.name if flat else 'flat engine'} to "
+                        f"check {plan} against, so this run's precision for that model is "
+                        f"whatever is installed. Build it with `scripts/build_engines.py` if "
+                        f"the precision is part of what you are measuring.",
+                        file=sys.stderr,
+                    )
                 continue
             if not plan.is_file():
                 # Fails closed. Skipping an absent plan made the guard useless in exactly
