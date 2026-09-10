@@ -3340,7 +3340,21 @@ hook down, for when the operator asked to see something before it is executed.
       around `track(cluster) -> list[GlobalTrack]`) has NO C++ twin. A C++ `mtmc` stage is
       therefore not a wrapper the way `track` was; the stateful global-id assignment has to be
       ported too. Hence:
-        * **3a -- the instant barrier. OPEN AS #217** (83 checks, ASan clean, offline tier) on `feat/the-cpp-plane-syncs-instants`:
+        * **3a -- the instant barrier. OPEN AS #217, round 1 fixed and pushed (`ade3a31`).**
+          98 checks, ASan clean, offline tier. TWO BLOCKING, both real: `drop_camera` sealed
+          buckets with NO waiters where `topology/barrier.py` guards on the waiter count -- and
+          the harm is not a metric, since a sealed bucket is skipped by `match` and so refuses
+          the frames that would have completed it, costing every open instant its association
+          during a camera outage; and `~Waiting()` is noexcept and called the THROWING
+          `release()`, so one stray release under a parked waiter was a `std::terminate` with
+          nothing in the logs. AND MY FIRST FIX-TESTS DID NOT DISCRIMINATE: sealing neither
+          removes the bucket nor counts an event, so "one open instant, no complete" holds
+          either way -- which is also all the Python test I was porting asserts. The real
+          discriminators are what `retire` counts LATER and whether a frame that could still
+          join is admitted. Both mutants now fail legibly (4 FAILs; and `terminate called after
+          throwing ServerStateError`, which is the defect itself).
+          NOTE FOR 3b/3c: `wtbar`'s copy of `barrier.{h,cpp}` is now STALE -- these fixes are
+          on 3a's branch only. Rebase after #217 merges and take main's version. on `feat/the-cpp-plane-syncs-instants`:
           `csrc/shipinfer/pipeline/mtmc/barrier.{h,cpp}` + `csrc/tests/test_mtmc_barrier.cpp`,
           83 checks, five clean runs, ASan/UBSan clean, and it compiles in the OFFLINE tier
           (pure, no lane, no CUDA) exactly as `topology/barrier.py` is pure. One deliberate
