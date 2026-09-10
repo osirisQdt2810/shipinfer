@@ -1876,6 +1876,34 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE HERE because the C++ plane is the one the measurement was taken on, and a
       Python A/B needs its own before/after at the design load to claim anything.
 
+- [ ] **THE-GENERATOR-TREE-IS-REMEMBERED-NOT-PROVEN · #207 round 2's five notes (10 Sep).**
+      MUST WAIT for `DOES-THE-KNOB-MOVE-C1?` to finish: `scripts/host_cpu.py` is the instrument
+      those nine runs are being measured with, and editing it mid-measurement changes the
+      instrument between arms.
+      (1) COVERAGE GAP, not a defect: reinstating the growth guard ON TOP OF `_generator_tree`
+      passes all 43 tests, so "it fails on the old code" is true only against pre-#207 code.
+      The residual difference is real -- a tick where `process_tree(generator)` hits `OSError`
+      partway and misses a LIVE grandchild, the bench walk admits it, and with the guard the
+      next tick's `generators - _declared` is empty so it stays for the run. Removing
+      `_declared` is the safer shape; a test would pin why.
+      (2) `_generator_tree` is never pruned, and the comment leaves the reader to work out why
+      that is safe. It is safe because `pid_max` is 4194304 here, so reuse inside a 70 s run is
+      unreachable -- say so, because the cost is now larger than it was: a reused pid excludes a
+      bench process AND stops the walk descending, taking the whole subtree with it, where
+      before #207 only the single pid was dropped. `_seen` already guards the analogous tid case.
+      (3) `thread_cpu`'s stated MECHANISM is wrong while its conclusion is right: the kernel
+      does not charge a reaped child to "whichever thread waited for it" -- per-thread `stat`
+      reports the THREAD GROUP's `cutime`, so the leader's row carries all of it and non-leaders
+      read zero. The reviewer checked this on the host (60 ticks against `utime` 1).
+      (4) THE RESIDUAL HOLE the design cannot close: `_generator_tree` can only remember a
+      descendant it observed ALIVE, so a grandchild caught by a pre-declaration tick that then
+      exits before the next tick stays in the breakdown. Unreachable in practice (`Popen` and
+      `declare_generator` are two statements apart; the `ffmpeg` encode runs for seconds) but it
+      is the boundary and should be written down.
+      (5) PROCESS, for me rather than the code: Test Details named a test the diff no longer
+      contains, because round 2 REFRAMED it and I updated the round-2 section without
+      reconciling the list above it. The grep-the-body rule has to be re-run after every round,
+      not only before the first push.
 - [~] **DOES-THE-KNOB-MOVE-C1? · RUNNING (10 Sep): nine runs, three passes, rotated.**
       PREREQUISITE FOUND THE HARD WAY: `csrc/build/bench` in this checkout was built 9 Sep
       22:37, BEFORE #202 added the flag, so the first nvdec smoke printed no announce line
@@ -1903,8 +1931,8 @@ hook down, for when the operator asked to see something before it is executed.
       like the knob.
       NOT A DEFAULT CHANGE: the knob stays off unless this says otherwise, and if it does say
       otherwise that is a separate PR with this measurement as its evidence.
-- [~] **THE-DISCOUNT-STOPS-AT-THE-GENERATORS-OWN-CHILDREN · PR #207 IN REVIEW (10 Sep),
-      all three fixed.** `cpu_seconds` reads `cutime`/`cstime` too, so the discount was
+- [x] **THE-DISCOUNT-STOPS-AT-THE-GENERATORS-OWN-CHILDREN · MERGED as #207 (10 Sep),
+      all three fixed plus round 1's BLOCKING subtree finding.** `cpu_seconds` reads `cutime`/`cstime` too, so the discount was
       0.11 CPU-s where the truth is 0.50 -- a third to a quarter of the generator's real
       cost, with `accounted_pct` reading 48.3% for a breakdown that was missing nothing.
       `thread_cpu` deliberately does NOT: the kernel keeps those fields only for a thread
