@@ -1876,7 +1876,13 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE HERE because the C++ plane is the one the measurement was taken on, and a
       Python A/B needs its own before/after at the design load to claim anything.
 
-- [ ] **BENCH-CPP-LEAVES-THE-CURRENT-DEVICE · from #203 round 3's non-blocking note.**
+- [~] **BENCH-CPP-LEAVES-THE-CURRENT-DEVICE · PR #206 IN REVIEW (10 Sep).**
+      `gpuGetDevice(&previous)` before the walk and `gpuSetDevice(previous)` after it, so
+      the block is safe by construction rather than by position. Source-level assertion in
+      `tests/runtime/test_blocking_sync.py` because a driverless tier cannot call
+      `cudaGetDevice`; both C++ build tiers pass with `bench.cpp` in them, and the arm runs
+      with the flag on (`cuda: blocking sync on 2 device(s)`, exit 0, 399 frames, 0 drops).
+      ORIGINAL:
       `csrc/shipinfer/cli/bench.cpp:329-334` walks the devices to set the blocking-sync flag
       and does not put the caller's device back -- the same wart #203 fixed in
       `prefer_blocking_sync`. Benign THERE (five lines into `main()`, before any device is
