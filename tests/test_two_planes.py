@@ -171,7 +171,13 @@ class TestBothPlanesNameTheSameLatencyWindow:
         assert "reassembly_us_p50" in bench
 
     def test_both_measure_it_from_the_collector_opening_the_frame(self) -> None:
-        """Same window, or the two figures are not comparable however they are named."""
+        """Same window, or the two figures are not comparable however they are named.
+
+        On the exact expressions, and the brittleness is the point: a reformat that splits
+        either call over two lines fails this, and that failure costs a line of maintenance
+        while the alternative -- matching loosely -- is a test that survives the divisor
+        changing on one plane.
+        """
         python = (
             ROOT / "src" / "shipinfer" / "pipeline" / "reassembly" / "collector.py"
         ).read_text(encoding="utf-8")
