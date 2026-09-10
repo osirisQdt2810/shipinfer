@@ -57,6 +57,12 @@ Resolution = str
 #: The shapes the ShipInfer side can take; see :attr:`BenchConfig.topology`.
 TOPOLOGIES = ("single", "fleet", "service")
 
+#: What a BENCH RUN can ask for -- one short of ``build_engines.py``'s, which also builds
+#: ``int8``. The bench cannot: :meth:`require_inputs` demands the segmenter's plan whichever
+#: models a run loads, and the segmenter does not build at int8 here. The difference is
+#: ``BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE``'s subject, not an oversight.
+PRECISIONS = ("fp32", "fp16")
+
 _RESOLUTION_FOLDERS: dict[str, tuple[str, str]] = {
     "2k": ("person_2K", "ship_2K"),
     "4k": ("person_4K", "ship_4K"),
@@ -251,6 +257,13 @@ class BenchConfig:
         if self.topology not in TOPOLOGIES:
             raise ValueError(
                 f"topology must be one of {sorted(TOPOLOGIES)}, got {self.topology!r}"
+            )
+        # CHECKED HERE and not only by argparse: a config built in process -- a shard child,
+        # a test, a sweep -- would otherwise carry a precision the engine names cannot be
+        # resolved for and fail late as a missing file rather than early with the reason.
+        if self.precision not in PRECISIONS:
+            raise ValueError(
+                f"precision must be one of {sorted(PRECISIONS)}, got {self.precision!r}"
             )
         if self.shards < 0:
             raise ValueError(f"shards must be >= 0, got {self.shards}")
@@ -492,6 +505,10 @@ class BenchConfig:
             "buffer_capacity": self.buffer_capacity,
             "pipeline_workers": self.pipeline_workers,
             "resolution": self.resolution,
+            # SURVIVES THE PROCESS HOP: `shards.py` writes this dict and each child rebuilds
+            # from it, so a field missing here is its default in every shard. Harmless today
+            # only because the resolved engine paths travel beside it.
+            "precision": self.precision,
             "source": self.source,
             "rtsp_port": self.rtsp_port,
             "topology": self.topology,

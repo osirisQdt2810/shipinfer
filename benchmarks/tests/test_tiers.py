@@ -268,6 +268,26 @@ class TestTheProfileReadsOneWindow:
 
         assert named.det_engine == _Path("/tmp/some.engine")
 
+    def test_the_precision_survives_the_process_hop(self) -> None:
+        """`shards.py` writes `as_dict()` and each child rebuilds from it, so a field missing
+        there comes back as its default in every shard."""
+        from benchmarks.harness.config import BenchConfig
+
+        rebuilt = BenchConfig.from_dict(BenchConfig(precision="fp16").as_dict())
+
+        assert rebuilt.precision == "fp16"
+
+    def test_a_precision_the_bench_cannot_load_is_refused_at_construction(self) -> None:
+        """Not only by argparse: a config built in process -- a shard child, a sweep, a test --
+        would otherwise fail late as a missing engine file rather than early with the reason.
+        `int8` is the case that matters, because the BUILDER offers it and the bench cannot."""
+        import pytest as _pytest
+
+        from benchmarks.harness.config import BenchConfig
+
+        with _pytest.raises(ValueError, match="precision must be one of"):
+            BenchConfig(precision="int8")
+
     def test_every_label_is_summed_when_the_label_is_not_the_question(self) -> None:
         """`read_total`, which the reassembly window needs: it is observed per camera like
         everything else on that plane, and compared against a C++ figure that is ONE

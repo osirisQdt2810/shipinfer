@@ -46,6 +46,12 @@ config/secrets.yaml
 .artifacts/
 logs/
 *.log
+# The harness's own output, wherever it is pointed. `out_dir` defaults to `.artifacts/bench`
+# and is a flag, so a run pointed at the repo root used to leave `buffers.jsonl` beside the
+# source -- untracked output that one `git add -A` turns into committed reference data nobody
+# maintains. Named rather than `*.jsonl`, because the parity GOLDENS are `.jsonl` and are
+# meant to be in the tree.
+buffers.jsonl
 profile_*.nsys-rep
 *.qdrep
 *.sqlite

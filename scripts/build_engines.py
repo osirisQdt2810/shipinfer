@@ -197,6 +197,10 @@ def _calibration_batches(target: Target, files: list[Path]) -> Iterator[Any]:
             continue
         yield image_ops.letterbox_batch(pending, (height, width), params, pad_value=114).tensor
         pending = []
+    # A SHORT FINAL BATCH IS FINE: `CalibrationBatchFeeder.next_batch` pads it "by REPEATING
+    # ITS OWN ROWS rather than with zeros", because a batch of zeros "drags the activation
+    # histograms towards zero exactly where the entropy criterion is choosing a clipping
+    # threshold". 14 frames at batch 8 is [8, 6], and the 6 becomes 8 real images.
     if pending:
         yield image_ops.letterbox_batch(pending, (height, width), params, pad_value=114).tensor
 
@@ -243,6 +247,10 @@ def _feeder(target: Target) -> Any:
         # value is in [0, 1]. A batch that arrives in 0-255 raises here instead of building a
         # plausible engine whose activations all live in the bottom half-percent of the range.
         value_range=(0.0, 1.0),
+        # A CEILING FROM THE FILE COUNT, which is more batches than an undecodable frame
+        # will produce -- `_calibration_batches` skips whatever `cv2.imread` refuses. That is
+        # the right direction: `limit` stops the feeder EARLY, so over-stating it costs
+        # nothing and under-stating it would silently calibrate on less than the corpus.
         limit=(len(files) + CALIBRATION_BATCH - 1) // CALIBRATION_BATCH,
     )
     print(
