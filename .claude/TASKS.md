@@ -1876,6 +1876,23 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE HERE because the C++ plane is the one the measurement was taken on, and a
       Python A/B needs its own before/after at the design load to claim anything.
 
+- [ ] **THE-BENCH-REPORTS-NO-LATENCY-AT-ALL · the gap the knob measurement exposed (10 Sep).**
+      `cli/bench` prints 18 counters and NOT ONE latency figure. `grep -nE "p50|p99|latency|
+      percentile" .artifacts/cpp/k1_a_on.log` is empty; the only proxy is
+      `collector_timeouts`, which is why `DOES-THE-KNOB-MOVE-C1?` could say "no evidence of a
+      penalty" and nothing stronger -- and why the default is not being flipped on a result of
+      3.41x -> 7.17x.
+      THAT IS A GAP IN THE PROJECT'S OWN TERMS, not just in one A/B: CLAUDE.md's sizing section
+      says the bottleneck "is not raw throughput, it is (a) load balance and (b) END-TO-END
+      LATENCY", and the data plane has never reported (b). `InstanceStats::ewma_latency_us`
+      holds a per-instance figure the bench does not print, and an EWMA is not a percentile.
+      WHAT IT NEEDS: a per-event end-to-end duration (frame read -> event complete) summarised
+      as p50/p95/p99 plus a max, printed like the other counters so `run_cpp_bench.sh`'s
+      alternation can carry it. The collector already stamps every event, so the arrival time
+      is the question rather than the plumbing.
+      TWO PLANES: this is a per-frame seam, so the Python plane owes the same figure and the
+      parity harness the same assertion -- open its ledger item with the PR rather than after.
+      THEN the default question is answerable with evidence instead of a proxy.
 - [~] **THE-GENERATOR-TREE-IS-REMEMBERED-NOT-PROVEN · #207 round 2's five notes (10 Sep).**
       UNBLOCKED: the nine runs are done, so the instrument can be edited again. The PR waits
       on #208 merging, because a PR is opened one at a time.
