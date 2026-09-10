@@ -59,8 +59,14 @@ class Target:
     onnx: Path
     #: The flat path the benchmark's `BenchConfig` resolves to.
     engine: Path
-    #: The model repository directory whose backend loads the same plan, if any.
-    version_dir: Path | None
+    # doc: long why this is a tuple and not one directory
+    #: Every repository version directory whose backend loads this plan. A TUPLE because one
+    #: target can feed several models: `reid` feeds `person_embedder` AND `ship_embedder`, and
+    #: while it was `None` neither got a plan -- so `--force` printed success, installed
+    #: nothing, and the bench's byte-identity guard refused every run while naming that command
+    #: as the remedy. The operator ran it, the guard failed identically, and the loop had no
+    #: exit but a manual `cp`. Empty still means "flat engine only".
+    version_dirs: tuple[Path, ...] = ()
     #: ``(height, width)`` this engine is fed, and whether it is fed WHOLE frames. INT8
     #: calibration needs both: the extent to preprocess to, and which of the two transforms
     #: the pipeline applies -- a letterboxed frame for a detector, a crop for an embedder.
@@ -78,19 +84,20 @@ TARGETS = (
         "ship_detector",
         MODELS / "yolo26n.onnx",
         MODELS / "yolo26n_fp32.engine",
-        REPOSITORY / "ship_detector" / "1",
+        (REPOSITORY / "ship_detector" / "1",),
     ),
     Target(
         "ship_segmenter",
         MODELS / "yolo26n-seg.onnx",
         MODELS / "yolo26n-seg_fp32.engine",
-        REPOSITORY / "ship_segmenter" / "1",
+        (REPOSITORY / "ship_segmenter" / "1",),
     ),
     Target(
         "reid",
         MODELS / "reid_r50.onnx",
         MODELS / "reid_r50_fp32.engine",
-        None,
+        # BOTH embedders, which is the fanout that made `--force` true for them.
+        (REPOSITORY / "person_embedder" / "1", REPOSITORY / "ship_embedder" / "1"),
         fed=(256, 128),
         whole_frame=False,
     ),
@@ -334,7 +341,7 @@ def _artefact_name(version_dir: Path, engine: Path) -> str:
 
     THE MODEL NAME COMES FROM THE PATH, `<repository>/<name>/<version>`, and not from
     `Target.name` -- those are not the same thing. `reid` is one target that feeds TWO
-    repository models and has no `version_dir` at all, so a name-keyed lookup would be right
+    repository models, so its own name matches neither and a name-keyed lookup would be right
     for two of the three targets by luck.
 
     Read through `ModelRepository` because that is the reader that already knows; a second
@@ -367,17 +374,19 @@ def _install(target: Target, engine: Path) -> None:
     ONNX, and the benchmark's identity check had nothing to compare — so the two sides ran
     different engines and the guard passed.
     """
-    if target.version_dir is None:
-        return
-    destination = target.version_dir / _artefact_name(target.version_dir, engine)
-    if destination.is_file() and destination.read_bytes() == engine.read_bytes():
-        return
-    target.version_dir.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(engine.read_bytes())
-    # `relative_to` RAISES for a path outside the repository rather than returning the
-    # absolute one, so printing where the file went could be the thing that fails.
-    shown = destination.relative_to(REPO) if destination.is_relative_to(REPO) else destination
-    print(f"{'':<16}  -> {shown}")
+    blob = engine.read_bytes()
+    for version_dir in target.version_dirs:
+        destination = version_dir / _artefact_name(version_dir, engine)
+        if destination.is_file() and destination.read_bytes() == blob:
+            continue
+        version_dir.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(blob)
+        # `relative_to` RAISES for a path outside the repository rather than returning the
+        # absolute one, so printing where the file went could be the thing that fails.
+        shown = (
+            destination.relative_to(REPO) if destination.is_relative_to(REPO) else destination
+        )
+        print(f"{'':<16}  -> {shown}")
 
 
 def main(argv: list[str] | None = None) -> int:

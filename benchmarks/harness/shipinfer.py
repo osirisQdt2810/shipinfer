@@ -424,7 +424,7 @@ def run_shipinfer(
     configure(os.environ.get("SHIPINFER_BENCH_LOG", "WARNING"), force=True)
 
     config = config.resolved()
-    config.require_inputs()
+    config.require_inputs("shipinfer")
     out = out_dir or config.out_dir / "shipinfer"
     out.mkdir(parents=True, exist_ok=True)
     log = out / "buffers.jsonl"
