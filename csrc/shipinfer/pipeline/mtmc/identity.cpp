@@ -66,6 +66,12 @@ namespace shipinfer::mtmc {
         return found == members_.end() ? std::vector<TrackKey>{} : found->second;
     }
 
+    const std::vector<TrackKey>& GlobalIdAssigner::member_list(int64_t global_id) const {
+        static const std::vector<TrackKey> none;
+        const auto found = members_.find(global_id);
+        return found == members_.end() ? none : found->second;
+    }
+
     int64_t GlobalIdAssigner::owner_of(const TrackKey& key) const {
         const auto found = owner_.find(key);
         return found == owner_.end() ? -1 : found->second;
@@ -104,30 +110,25 @@ namespace shipinfer::mtmc {
 
     std::vector<std::vector<size_t>> GlobalIdAssigner::ordered_groups(
         const std::vector<int>& labels) const {
-        std::map<int, size_t> counts;
-        std::map<int, size_t> first;
-        std::vector<int> order;
-        for (size_t index = 0; index < labels.size(); ++index) {
-            const int label = labels[index];
-            if (counts.find(label) == counts.end()) {
-                first[label] = index;
-                order.push_back(label);
-            }
-            ++counts[label];
-        }
-        // Largest first, ties by FIRST APPEARANCE and not by label value: a stable sort over
-        // `order`, which is already in first-appearance order, gives both at once.
-        std::stable_sort(order.begin(), order.end(),
-                         [&](int left, int right) { return counts[left] > counts[right]; });
+        // ONE PASS. `grouped` comes out in first-appearance order because a label appends a
+        // group the first time it is seen, so the sort below needs no separate `first` table
+        // -- and nothing re-scans `labels` per distinct label, which at ~750 tracks an
+        // instant of mostly singleton clusters walked the whole vector ~750 times.
+        std::map<int, size_t> where;
         std::vector<std::vector<size_t>> grouped;
-        grouped.reserve(order.size());
-        for (const int label : order) {
-            std::vector<size_t> indices;
-            for (size_t index = 0; index < labels.size(); ++index) {
-                if (labels[index] == label) indices.push_back(index);
-            }
-            grouped.push_back(std::move(indices));
+        for (size_t index = 0; index < labels.size(); ++index) {
+            const auto [at, fresh] = where.emplace(labels[index], grouped.size());
+            if (fresh) grouped.emplace_back();
+            grouped[at->second].push_back(index);
         }
+        // Largest first, ties by FIRST APPEARANCE and not by label value. A STABLE sort over
+        // groups that are already in first-appearance order gives both at once -- and `sort`
+        // would not: libstdc++ is incidentally stable only below its insertion-sort
+        // threshold, which `wide_tie_keeps_first_appearance` is deliberately wider than.
+        std::stable_sort(grouped.begin(), grouped.end(),
+                         [](const std::vector<size_t>& left, const std::vector<size_t>& right) {
+                             return left.size() > right.size();
+                         });
         return grouped;
     }
 
@@ -138,9 +139,18 @@ namespace shipinfer::mtmc {
         double total = 0.0;
         double best = -1.0;
         for (const std::vector<float>* other : others) {
+            if (other->size() != feature.size()) {
+                // The reference gets numpy's ValueError here; truncating to the shorter
+                // prefix answers a number that is not a cosine, because `observe` normalised
+                // the FULL vector on both sides. One embedder per identity space is a
+                // load-time fact, so a second width is a misconfiguration to name and refuse.
+                throw InferenceError("cross-camera identity compares embeddings of " +
+                                     std::to_string(feature.size()) + " and " +
+                                     std::to_string(other->size()) +
+                                     " dimensions; one identity space is fed by one embedder");
+            }
             double dot = 0.0;
-            const size_t width = std::min(feature.size(), other->size());
-            for (size_t i = 0; i < width; ++i) {
+            for (size_t i = 0; i < feature.size(); ++i) {
                 dot += static_cast<double>(feature[i]) * (*other)[i];
             }
             total += dot;
@@ -240,7 +250,9 @@ namespace shipinfer::mtmc {
         int best_age = -1;
         for (const int64_t global_id : candidates) {
             int age = 0;
-            for (const TrackKey& member : members(global_id)) age = std::max(age, hits(member));
+            for (const TrackKey& member : member_list(global_id)) {
+                age = std::max(age, hits(member));
+            }
             if (age > best_age) {
                 best_id = global_id;
                 best_age = age;
@@ -258,7 +270,7 @@ namespace shipinfer::mtmc {
         // angles and the mean punishes an identity for holding a bad angle -- the normal state
         // of a large group.
         std::vector<const std::vector<float>*> rest;
-        for (const TrackKey& member : members(owner)) {
+        for (const TrackKey& member : member_list(owner)) {
             if (member == key) continue;
             const auto feature = features_.find(member);
             if (feature != features_.end()) rest.push_back(&feature->second);
@@ -448,7 +460,7 @@ namespace shipinfer::mtmc {
             }
         }
         for (const auto& [key, global_id] : owner_) {
-            if (!contains(members(global_id), key)) {
+            if (!contains(member_list(global_id), key)) {
                 throw InferenceError(key.str() + " claims global id " +
                                      std::to_string(global_id) + ", which does not list it");
             }

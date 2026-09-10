@@ -352,6 +352,54 @@ namespace {
         check(true, "and no half-evicted identity is left behind");
     }
 
+    // doc: long the defect is the reference's, and the port reproducing it is the point
+    void two_challengers_from_one_camera_BOTH_land_and_the_reference_does_the_same() {
+        // #219's review found this and called it the port's. It is not: the REFERENCE answers
+        // identically, and its own `validate` throws the same sentence, so the port is
+        // faithful and the algorithm is wrong on both planes.
+        //
+        // WHY: the contest re-reads the incumbent from `members_` each iteration, and a
+        // winner is added while the loser leaves only in the deferred loop -- so a second
+        // challenger from the same camera contests the ALREADY-DISPLACED incumbent, wins on
+        // the same evidence, and is adopted too. Fixing it here alone would make the port
+        // answer differently from the reference it is held to, which is the one thing the
+        // parity harness exists to prevent, so it is
+        // `MTMC-ONE-CAMERA-TWICE-IN-A-CONTESTED-CLUSTER` and it starts upstream.
+        //
+        // Measured, `PYTHONPATH=3rdparty/shipvision`, same two instants:
+        //   identity 0 members: cam1#1 cam2#1 cam0#2 cam0#3
+        //   THREW TrackingError: global id 0 holds two tracks from one camera
+        GlobalIdAssigner::Options relaxed = options();
+        relaxed.validate_every_step = false;  // production's default, and how it stays silent
+        GlobalIdAssigner assigner(relaxed);
+        assigner.assign({look("cam0", 1, 0, 1), look("cam1", 1, 1, 0), look("cam2", 1, 1, 0)},
+                        {0, 0, 0});
+
+        assigner.assign({look("cam0", 1, 0, 1), look("cam1", 1, 1, 0), look("cam2", 1, 1, 0),
+                         look("cam0", 2, 1, 0), look("cam0", 3, 1, 0)},
+                        {1, 0, 0, 0, 0});
+
+        const int64_t target = assigner.owner_of(key("cam1", 1));
+        const std::vector<TrackKey> holding = assigner.members(target);
+        int from_cam0 = 0;
+        for (const TrackKey& member : holding) {
+            if (member.camera_id == "cam0") ++from_cam0;
+        }
+        check(from_cam0 == 2,
+              "PINNED, not endorsed: two cam0 tracks land in one identity, exactly as the "
+              "reference does. When the upstream fix lands this check flips to == 1 and the "
+              "golden is re-emitted -- both planes, one commit");
+        bool threw = false;
+        try {
+            assigner.validate();
+        } catch (const InferenceError&) {
+            threw = true;
+        }
+        check(threw,
+              "and this state is DETECTABLE: `validate()` names it, which is why the parity "
+              "gate and `drive_identity.py` both run with validation on");
+    }
+
     void reset_forgets_the_identities_and_not_the_id_space() {
         GlobalIdAssigner assigner(options());
         assigner.assign({look("cam0", 1, 1, 0)}, {0});
@@ -388,6 +436,7 @@ int main() {
     eviction_runs_on_an_instant_with_no_tracks_at_all();
     the_track_bound_evicts_the_least_recently_seen();
     the_identity_bound_evicts_a_whole_identity();
+    two_challengers_from_one_camera_BOTH_land_and_the_reference_does_the_same();
     reset_forgets_the_identities_and_not_the_id_space();
     std::printf("%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;

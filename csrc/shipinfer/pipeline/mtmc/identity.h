@@ -116,6 +116,11 @@ namespace shipinfer::mtmc {
         IdentitySizes sizes() const;
         std::vector<int64_t> global_ids() const;
         std::vector<TrackKey> members(int64_t global_id) const;
+        //: The member list ITSELF, for the paths that only read it. `members()` above copies
+        //: because it is the public accessor and two callers mutate the identity while
+        //: walking it; the contest and the checks do not, and a copy per candidate per group
+        //: is an allocation on the assign path.
+        const std::vector<TrackKey>& member_list(int64_t global_id) const;
         //: The identity holding `key`, or -1. -1 rather than an optional because every caller
         //: here compares against a real id and `-1` is not one.
         int64_t owner_of(const TrackKey& key) const;
