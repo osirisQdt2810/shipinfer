@@ -263,9 +263,15 @@ BLOCKING_SYNC_ENV = "SHIPINFER_CUDA_BLOCKING_SYNC"
 
 
 def blocking_sync_requested(environ: Mapping[str, str] | None = None) -> bool:
-    """Whether the operator asked for a blocking synchronise: set, non-empty, and not ``0``."""
+    """Whether to use a blocking synchronise. ON unless refused with ``0``.
+
+    Empty reads as "not asked" and therefore as the default, which is ON: `docker run -e VAR`
+    with VAR unset passes it through EMPTY, so treating empty as a refusal would disable this
+    on every containerised run. `core/env.h::env_flag_unless_refused` is the same rule, and
+    `tests/runtime/test_blocking_sync.py` ties the two.
+    """
     value = (os.environ if environ is None else environ).get(BLOCKING_SYNC_ENV)
-    return value is not None and value != "" and value != "0"
+    return value is None or value == "" or value != "0"
 
 
 # doc: long the flag, the ctypes route, and what the C++ plane measured
