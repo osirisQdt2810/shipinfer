@@ -22,11 +22,33 @@ import json
 import os
 import signal
 import sys
+import tempfile
 import threading
 import time
+from collections.abc import Container
 from pathlib import Path
 
 TICKS_PER_SECOND = os.sysconf("SC_CLK_TCK")
+
+#: Where a load generator inside the bench's own process tree says so, one pid per line. The
+#: wrapper creates the path and exports it; `scripts/rtsp_serve.py` declares itself into it.
+GENERATOR_PIDFILE_ENV = "SHIPINFER_HOST_CPU_PIDFILE"
+
+
+def declare_generator(pid: int | None = None) -> bool:
+    """Say that a process generates load rather than serving it. False if nobody is asking.
+
+    Called BY the generator, not by whoever spawned it: the RTSP servers run inside the bench
+    container (the rootless daemon has no NAT), so they are children of the bench and their
+    CPU is already inside `wait4`'s rusage. Self-declaration also means a generator started
+    some other way is discounted without a second wiring.
+    """
+    path = os.environ.get(GENERATOR_PIDFILE_ENV)
+    if not path:
+        return False
+    with Path(path).open("a", encoding="utf-8") as handle:
+        handle.write(f"{os.getpid() if pid is None else pid}\n")
+    return True
 
 
 def ticks_from_stat(line: str) -> float:
@@ -77,19 +99,22 @@ def thread_cpu(pid: int) -> dict[int, tuple[str, float]]:
     return out
 
 
-def process_tree(pid: int) -> list[int]:
+def process_tree(pid: int, skip: Container[int] = frozenset()) -> list[int]:
     """``pid`` and every descendant, from `/proc/<pid>/task/<tid>/children`.
 
     The default topology spawns one shard PROCESS per GPU (`--topology fleet`), so a sampler
     reading only the parent's task directory attributes a few percent of a run whose
     `accounted_pct` then reads as a broken instrument rather than as a missing tree walk.
-    Breadth-first over `children`, which lists a task's *immediate* children only.
+    Depth-first over `children`, which lists a task's *immediate* children only.
+
+    ``skip`` is neither returned nor descended into: a load generator the bench spawned is
+    inside this tree and is not the bench.
     """
     seen: list[int] = []
     pending = [pid]
     while pending:
         current = pending.pop()
-        if current in seen:
+        if current in seen or current in skip:
             continue
         seen.append(current)
         try:
@@ -128,13 +153,25 @@ class ThreadSampler:
     count; that multiplies the /proc reads per tick, which is what the interval is for.
     """
 
-    def __init__(self, pid: int, interval_s: float = 0.2) -> None:
+    def __init__(
+        self, pid: int, interval_s: float = 0.2, generators: Path | None = None
+    ) -> None:
         self._pid = pid
         self._interval_s = interval_s
+        self._generators_path = generators
         self._stop = threading.Event()
-        #: The HIGHEST reading per tid, because a thread's CPU only ever grows and a tid that
-        #: has exited must keep the CPU it used rather than falling out of the total.
-        self._seen: dict[int, tuple[str, float]] = {}
+        #: tid -> (owning pid, name, HIGHEST cpu seen). Highest, because a thread's CPU only
+        #: ever grows and a tid that has exited must keep the CPU it used. The pid is kept so
+        #: a process declared a generator LATER can have its threads forgotten.
+        self._seen: dict[int, tuple[int, str, float]] = {}
+        #: Threads whose tid was reused, as (pid, tid, name, cpu). A LOWER reading than the
+        #: one stored is a new thread on a recycled id, not a counter going backwards.
+        self._retired: list[tuple[int, int, str, float]] = []
+        #: Generators already accounted for, so a new declaration is noticed exactly once.
+        self._declared: frozenset[int] = frozenset()
+        #: Lifetime CPU of each generator the bench spawned, sampled while it is still alive
+        #: -- it dies with the bench, so there is no reading it afterwards.
+        self._generator_cpu: dict[int, float] = {}
         self._thread = threading.Thread(target=self._run, name="host-cpu-sampler", daemon=True)
 
     def start(self) -> None:
@@ -156,19 +193,62 @@ class ThreadSampler:
         while not self._stop.wait(self._interval_s):
             self._sample()
 
+    def _generator_pids(self) -> frozenset[int]:
+        """The pids the bench has declared to be load generators, so far.
+
+        Re-read every tick rather than once: the servers are started after the spawn, and a
+        run that adds one later is the same case as a run that starts with two.
+        """
+        if self._generators_path is None:
+            return frozenset()
+        try:
+            text = self._generators_path.read_text(encoding="utf-8")
+        except OSError:
+            return frozenset()
+        # A partial last line is a write in flight, not a corrupt file.
+        return frozenset(int(word) for word in text.split() if word.isdigit())
+
     def _sample(self) -> None:
+        generators = self._generator_pids()
+        if generators - self._declared:
+            # A generator is declared only once its pid EXISTS, so a tick can precede the
+            # declaration and leave its threads in the table. Forget them when it arrives.
+            self._forget(generators)
+            self._declared = generators
+        for pid in generators:
+            cpu = cpu_seconds(pid)
+            if cpu is not None:
+                self._generator_cpu[pid] = max(self._generator_cpu.get(pid, 0.0), cpu)
         # Every process in the tree, because a tid is unique host-wide and a shard child's
-        # model threads are the ones this instrument exists to name.
-        for pid in process_tree(self._pid):
+        # model threads are the ones this instrument exists to name -- but not a generator's,
+        # which is inside the tree and is not the bench.
+        for pid in process_tree(self._pid, skip=generators):
             for tid, (name, cpu) in thread_cpu(pid).items():
                 previous = self._seen.get(tid)
-                if previous is None or cpu >= previous[1]:
-                    self._seen[tid] = (name, cpu)
+                if previous is None or cpu >= previous[2]:
+                    self._seen[tid] = (pid, name, cpu)
+                else:
+                    self._retired.append((previous[0], tid, previous[1], previous[2]))
+                    self._seen[tid] = (pid, name, cpu)
+
+    def _forget(self, pids: frozenset[int]) -> None:
+        """Drop every thread owned by one of ``pids``, live or retired."""
+        self._seen = {tid: row for tid, row in self._seen.items() if row[0] not in pids}
+        self._retired = [row for row in self._retired if row[0] not in pids]
+
+    def generator_cpu(self) -> dict[int, float]:
+        """Per-pid lifetime CPU of the generators the bench spawned."""
+        return dict(self._generator_cpu)
+
+    def _rows(self) -> list[tuple[int, str, float]]:
+        """Every thread seen, live and retired, as ``(tid, name, cpu_s)``."""
+        live = [(tid, name, cpu) for tid, (_pid, name, cpu) in self._seen.items()]
+        return live + [(tid, name, cpu) for _pid, tid, name, cpu in self._retired]
 
     def by_class(self) -> dict[str, dict[str, float]]:
         """Per class: how much CPU, and how many threads carried it."""
         totals: dict[str, dict[str, float]] = {}
-        for name, cpu in self._seen.values():
+        for _tid, name, cpu in self._rows():
             entry = totals.setdefault(thread_class(name), {"cpu_s": 0.0, "threads": 0})
             entry["cpu_s"] += cpu
             entry["threads"] += 1
@@ -188,13 +268,11 @@ class ThreadSampler:
         jitterbuffer threads share one `comm` -- so a dict dropped every duplicate but the
         LAST, the smallest of a collided set, and read as "few and cheap".
         """
-        ranked = sorted(self._seen.items(), key=lambda item: -item[1][1])[:count]
-        return [
-            {"tid": tid, "name": name, "cpu_s": round(cpu, 2)} for tid, (name, cpu) in ranked
-        ]
+        ranked = sorted(self._rows(), key=lambda row: -row[2])[:count]
+        return [{"tid": tid, "name": name, "cpu_s": round(cpu, 2)} for tid, name, cpu in ranked]
 
     def total(self) -> float:
-        return sum(cpu for _name, cpu in self._seen.values())
+        return sum(cpu for _tid, _name, cpu in self._rows())
 
 
 def window(before: dict[int, float | None], after: dict[int, float | None]) -> dict[str, float]:
@@ -235,6 +313,15 @@ def _relay_signals_to(child: list[int]) -> list[tuple[int, object]]:
     ]
 
 
+def _generator_pidfile(out: Path | None) -> Path:
+    """An empty drop-box for generator pids, beside the accounting or in the temp dir."""
+    directory = out.parent if out is not None else Path(tempfile.gettempdir())
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"host-cpu-generators-{os.getpid()}.pids"
+    path.write_text("", encoding="utf-8")
+    return path
+
+
 def report(
     command_cpu_s: float,
     generators: dict[str, float],
@@ -258,6 +345,18 @@ def report(
         "generator_cores_busy": (round(generator_cpu_s / wall_s, 2) if wall_s > 0 else 0.0),
     }
     if threads is not None:
+        spawned = threads.generator_cpu()
+        # SUBTRACTED, unlike `--pid`. An external generator is a separate process tree and is
+        # absent from `wait4`'s rusage; one the bench SPAWNED is a reaped child, so it is
+        # already inside `command_cpu_s`. Naming it without discounting it would leave the
+        # RTSP arm's ~17% generator penalty inside a figure read as the bench's own.
+        spawned_cpu_s = sum(spawned.values())
+        accounting["spawned_generators"] = {
+            str(pid): round(value, 2) for pid, value in sorted(spawned.items())
+        }
+        accounting["spawned_generator_cpu_s"] = round(spawned_cpu_s, 2)
+        bench_cpu_s = max(0.0, command_cpu_s - spawned_cpu_s)
+        accounting["bench_cpu_s"] = round(bench_cpu_s, 2)
         sampled = threads.total()
         accounting["threads"] = threads.by_class()
         accounting["threads_top"] = threads.top()
@@ -267,7 +366,7 @@ def report(
         # spends its CPU in threads too short-lived for this to see.
         accounting["threads_cpu_s"] = round(sampled, 2)
         accounting["accounted_pct"] = (
-            round(100.0 * sampled / command_cpu_s, 1) if command_cpu_s > 0 else 0.0
+            round(100.0 * sampled / bench_cpu_s, 1) if bench_cpu_s > 0 else 0.0
         )
     return accounting
 
@@ -294,7 +393,8 @@ def main(argv: list[str] | None = None) -> int:
         help="how often to sample the threads. The instrument costs ~4 small /proc reads per "
         "thread per second, and the host it measures is the one this is arguing is tight, so "
         "a long run should ask for less: 0.5 at 70 s still catches every thread that lives "
-        "for the window.",
+        "for the window. ZERO turns the sampling off, which also gives up the spawned-"
+        "generator discount -- both need a reading taken while the run is alive.",
     )
     parser.add_argument("--out", type=Path, help="also write the accounting here as JSON")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="-- then the command")
@@ -306,6 +406,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     before = {pid: cpu_seconds(pid) for pid in args.pid}
+    sampling = args.threads and args.threads_interval > 0
+    # Created before the spawn and exported to the child, so a bench that starts a load
+    # generator has somewhere to say so. Truncated rather than appended: a stale file from a
+    # previous run would discount pids this run never spawned.
+    pidfile = _generator_pidfile(args.out) if sampling else None
+    environ = dict(os.environ)
+    if pidfile is not None:
+        environ[GENERATOR_PIDFILE_ENV] = str(pidfile)
     started = time.monotonic()
     child: list[int] = []
     sampler: ThreadSampler | None = None
@@ -313,11 +421,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # `posix_spawnp` rather than `subprocess`: `os.wait4` is the only stdlib call that
         # hands back a child's rusage, and `Popen` would then reap the same pid twice.
-        child.append(os.posix_spawnp(command[0], command, os.environ))
+        child.append(os.posix_spawnp(command[0], command, environ))
         # After the spawn and before the wait: the sampler needs a pid, and every thread this
         # exists to measure outlives its first tick.
-        if args.threads:
-            sampler = ThreadSampler(child[0], interval_s=args.threads_interval)
+        if sampling:
+            sampler = ThreadSampler(
+                child[0], interval_s=args.threads_interval, generators=pidfile
+            )
             sampler.start()
         _, status, usage = os.wait4(child[0], 0)
     finally:
@@ -325,6 +435,9 @@ def main(argv: list[str] | None = None) -> int:
             sampler.stop()
         for number, previous in restore:
             signal.signal(number, previous)
+        # After `stop`, which took the last reading: the totals live in the sampler, not here.
+        if pidfile is not None:
+            pidfile.unlink(missing_ok=True)
     wall_s = time.monotonic() - started
     after = {pid: cpu_seconds(pid) for pid in args.pid}
 

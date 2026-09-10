@@ -33,6 +33,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from benchmarks.harness.config import BenchConfig
+from scripts.host_cpu import declare_generator
 
 __all__ = ["serving", "ship_port"]
 
@@ -125,6 +126,9 @@ def serving(config: BenchConfig, *, timeout_s: float = 60.0) -> Iterator[None]:
                     stderr=subprocess.STDOUT,
                     text=True,
                 )
+            # A generator inside the bench's own tree, so the host-CPU wrapper can discount
+            # it: these servers are children of the bench and are already in its rusage.
+            declare_generator(process.pid)
             started.append((content, port, process, log_path))
         deadline = time.monotonic() + timeout_s
         pending = list(started)

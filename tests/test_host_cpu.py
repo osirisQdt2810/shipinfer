@@ -286,10 +286,12 @@ class TestWhichThreadsSpentIt:
         and it lied in the direction of "those threads are few and cheap".
         """
         sampler = host_cpu.ThreadSampler(os.getpid(), interval_s=0.01)
+        # `(owning pid, name, cpu)`: the pid is kept so a process declared a load generator
+        # after the first tick can have its threads forgotten.
         sampler._seen = {
-            11: ("rtpjitterbuffer", 0.9),
-            12: ("rtpjitterbuffer", 0.5),
-            13: ("rtpjitterbuffer", 0.1),
+            11: (os.getpid(), "rtpjitterbuffer", 0.9),
+            12: (os.getpid(), "rtpjitterbuffer", 0.5),
+            13: (os.getpid(), "rtpjitterbuffer", 0.1),
         }
 
         top = sampler.top()
@@ -302,7 +304,7 @@ class TestWhichThreadsSpentIt:
         """A tid that vanishes between ticks must not fall out of the total: the highest
         reading per tid is kept, because a thread's CPU only ever grows."""
         sampler = host_cpu.ThreadSampler(os.getpid(), interval_s=0.01)
-        sampler._seen = {7: ("cam-a", 1.5), 8: ("cam-b", 0.5)}
+        sampler._seen = {7: (os.getpid(), "cam-a", 1.5), 8: (os.getpid(), "cam-b", 0.5)}
 
         assert sampler.total() == 2.0
         assert sampler.by_class()["cam"] == {"cpu_s": 2.0, "threads": 2}
@@ -400,6 +402,239 @@ class TestAShardedRunsChildrenCountToo:
         finally:
             child.wait()
         assert host_cpu.process_tree(2**22) == [2**22]
+
+
+#: A bench that starts a load generator: spawn it, declare its pid in the drop-box the
+#: wrapper exported, then burn some CPU of its own so the two are told apart by more than zero.
+_WITH_GENERATOR = """
+import os, subprocess, sys, time
+
+generator = subprocess.Popen([sys.executable, '-c', {inner!r}])
+with open(os.environ['SHIPINFER_HOST_CPU_PIDFILE'], 'a') as handle:
+    handle.write(str(generator.pid) + chr(10))
+end = time.thread_time() + {own}
+while time.thread_time() < end:
+    pass
+generator.wait()
+"""
+
+
+class TestAGeneratorTheBenchSpawnedIsNotTheBench:
+    """The RTSP arm starts its two `rtsp_serve.py` servers INSIDE the bench container, because
+    the rootless daemon has no NAT. So they are children of the bench and their CPU is already
+    in `wait4`'s rusage -- unlike a `--pid` generator, which is a separate tree. #204's tree
+    walk started sampling them; this is the discount that keeps the figure honest.
+    """
+
+    _PLAN = (("gen-0", 0.4), ("gen-1", 0.4))
+
+    def _run(self, host_cpu: ModuleType, tmp_path: Path) -> dict:
+        out = tmp_path / "cpu.json"
+        code = host_cpu.main(
+            [
+                "--threads",
+                "--threads-interval",
+                "0.02",
+                "--out",
+                str(out),
+                "--",
+                sys.executable,
+                "-c",
+                _WITH_GENERATOR.format(
+                    inner=_THREADS.format(plan=repr(self._PLAN)), own=SPIN_S
+                ),
+            ]
+        )
+        assert code == 0
+        return json.loads(out.read_text(encoding="utf-8"))
+
+    def test_its_threads_are_not_in_the_breakdown(
+        self, host_cpu: ModuleType, tmp_path: Path
+    ) -> None:
+        """Declared AFTER its first tick, which is the real sequence -- the pid does not exist
+        until the spawn returns -- so this also pins that a late declaration is retroactive."""
+        accounting = self._run(host_cpu, tmp_path)
+
+        assert "gen" not in accounting["threads"], accounting["threads"]
+        assert all(not row["name"].startswith("gen-") for row in accounting["threads_top"])
+
+    def test_its_cpu_is_named_and_taken_out_of_the_denominator(
+        self, host_cpu: ModuleType, tmp_path: Path
+    ) -> None:
+        accounting = self._run(host_cpu, tmp_path)
+
+        assert accounting["spawned_generators"], accounting
+        assert accounting["spawned_generator_cpu_s"] > 0.3, accounting
+        assert accounting["bench_cpu_s"] == pytest.approx(
+            accounting["command_cpu_s"] - accounting["spawned_generator_cpu_s"], abs=0.02
+        ), accounting
+
+    def test_the_accounted_share_is_measured_against_the_bench(
+        self, host_cpu: ModuleType, tmp_path: Path
+    ) -> None:
+        """The whole point of subtracting: divide by the tree total and a correct breakdown
+        reads as a broken instrument, which is how #204's 3.3% was mistaken for one."""
+        accounting = self._run(host_cpu, tmp_path)
+
+        by_bench = 100.0 * accounting["threads_cpu_s"] / accounting["bench_cpu_s"]
+        by_tree = 100.0 * accounting["threads_cpu_s"] / accounting["command_cpu_s"]
+        # `rel`, not `abs`: the JSON fields are rounded to two places and these totals are
+        # fractions of a second, so recomputing from them cannot land on the exact figure.
+        assert accounting["accounted_pct"] == pytest.approx(by_bench, rel=0.02), accounting
+        assert abs(accounting["accounted_pct"] - by_bench) < abs(
+            accounting["accounted_pct"] - by_tree
+        ), f"divided by the tree total, not the bench's: {accounting}"
+        assert accounting["accounted_pct"] > 50, accounting
+
+    def test_no_generator_leaves_the_fields_empty_rather_than_absent(
+        self, host_cpu: ModuleType, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "cpu.json"
+        code = host_cpu.main(
+            [
+                "--threads",
+                "--threads-interval",
+                "0.02",
+                "--out",
+                str(out),
+                "--",
+                sys.executable,
+                "-c",
+                _SPIN.format(seconds=SPIN_S),
+            ]
+        )
+        assert code == 0
+
+        accounting = json.loads(out.read_text(encoding="utf-8"))
+        assert accounting["spawned_generators"] == {}
+        assert accounting["spawned_generator_cpu_s"] == 0.0
+        assert accounting["bench_cpu_s"] == accounting["command_cpu_s"]
+
+    def test_the_drop_box_does_not_outlive_the_run(
+        self, host_cpu: ModuleType, tmp_path: Path
+    ) -> None:
+        """A stale file would discount pids a later run never spawned."""
+        self._run(host_cpu, tmp_path)
+
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["cpu.json"]
+
+    def test_a_generator_declared_after_the_first_tick_is_purged(
+        self, host_cpu: ModuleType, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The real sequence, made deterministic. The RTSP servers take seconds to accept a
+        connection and the wrapper ticks every 500 ms, so several samples land before the pid
+        is ever written -- and whatever they recorded has to leave the table when it is.
+        """
+        box = tmp_path / "generators.pids"
+        box.write_text("", encoding="utf-8")
+        tree = {os.getpid(): {1: ("pipe-0", 1.0)}, 100: {2: ("gen-0", 5.0)}}
+        monkeypatch.setattr(
+            host_cpu,
+            "process_tree",
+            lambda pid, skip=frozenset(): [p for p in tree if p not in skip],
+        )
+        monkeypatch.setattr(host_cpu, "thread_cpu", lambda pid: tree[pid])
+        monkeypatch.setattr(host_cpu, "cpu_seconds", lambda pid: 5.0)
+        sampler = host_cpu.ThreadSampler(os.getpid(), interval_s=10.0, generators=box)
+
+        sampler._sample()
+        assert "gen" in sampler.by_class(), "the pre-condition: undeclared, so it is sampled"
+
+        box.write_text("100\n", encoding="utf-8")
+        sampler._sample()
+
+        assert "gen" not in sampler.by_class(), sampler.by_class()
+        assert sampler.generator_cpu() == {100: 5.0}
+        assert sampler.total() == pytest.approx(1.0)
+
+    def test_declaring_is_a_no_op_when_nobody_is_measuring(
+        self, host_cpu: ModuleType, monkeypatch
+    ) -> None:
+        """A bench run without the wrapper must not need to know it is not being measured."""
+        monkeypatch.delenv(host_cpu.GENERATOR_PIDFILE_ENV, raising=False)
+
+        assert host_cpu.declare_generator(123) is False
+
+    def test_declaring_appends_rather_than_replacing(
+        self, host_cpu: ModuleType, tmp_path, monkeypatch
+    ) -> None:
+        """Two servers, one drop-box: the second must not erase the first."""
+        box = tmp_path / "generators.pids"
+        box.write_text("", encoding="utf-8")
+        monkeypatch.setenv(host_cpu.GENERATOR_PIDFILE_ENV, str(box))
+
+        assert host_cpu.declare_generator(11) is True
+        assert host_cpu.declare_generator(22) is True
+
+        assert box.read_text(encoding="utf-8").split() == ["11", "22"]
+
+    def test_the_harness_declares_each_server_it_starts(self) -> None:
+        """The link a unit test cannot reach: the declaration has to sit inside the loop that
+        starts the servers, or only the last of the two is discounted."""
+        text = (ROOT / "benchmarks" / "harness" / "rtsp.py").read_text(encoding="utf-8")
+        loop = text.split("for content, port, streams, directory in _servers(config):")[1]
+
+        assert "declare_generator(process.pid)" in loop.split("deadline =")[0]
+
+
+class TestTheSamplerCanBeTurnedOff:
+    def test_a_zero_interval_reports_no_thread_breakdown(
+        self, host_cpu: ModuleType, tmp_path: Path
+    ) -> None:
+        """The instrument costs /proc reads on the host it exists to argue is tight, so the
+        design-load run needs a way out -- and the way out gives up the discount with it."""
+        out = tmp_path / "cpu.json"
+        code = host_cpu.main(
+            [
+                "--threads",
+                "--threads-interval",
+                "0",
+                "--out",
+                str(out),
+                "--",
+                sys.executable,
+                "-c",
+                _SPIN.format(seconds=SPIN_S),
+            ]
+        )
+        assert code == 0
+
+        accounting = json.loads(out.read_text(encoding="utf-8"))
+        assert "threads" not in accounting, accounting
+        assert accounting["command_cpu_s"] > 0
+
+    def test_the_wrapper_takes_the_interval_from_the_environment(self) -> None:
+        text = (ROOT / "deploy" / "rootless" / "bench.sh").read_text(encoding="utf-8")
+
+        assert '"${SHIPINFER_BENCH_HOST_CPU_INTERVAL:-0.5}"' in text
+        assert (
+            "-e SHIPINFER_BENCH_HOST_CPU_INTERVAL" in text
+        ), "and it has to reach the container"
+
+
+class TestARecycledTidLosesNeitherThread:
+    """`_seen` is keyed by tid and keeps the highest reading, so a reused id used to drop
+    whichever thread read lower -- the new one. The tree walk widened the window: a tid is
+    unique host-wide, but across a whole shard fleet there are far more of them.
+    """
+
+    def test_both_threads_keep_their_cpu(self, host_cpu: ModuleType, monkeypatch) -> None:
+        readings = [
+            {7: ("pipe-0", 1.0)},
+            {7: ("pipe-0", 2.0)},
+            {7: ("cam-a", 0.5)},  # same tid, new thread: the counter cannot go backwards
+            {7: ("cam-a", 0.9)},
+        ]
+        monkeypatch.setattr(host_cpu, "process_tree", lambda pid, skip=frozenset(): [pid])
+        sampler = host_cpu.ThreadSampler(os.getpid(), interval_s=10.0)
+        for reading in readings:
+            monkeypatch.setattr(host_cpu, "thread_cpu", lambda _pid, r=reading: r)
+            sampler._sample()
+
+        assert sampler.total() == pytest.approx(2.9)
+        assert sampler.by_class()["pipe"]["cpu_s"] == pytest.approx(2.0)
+        assert sampler.by_class()["cam"]["cpu_s"] == pytest.approx(0.9)
+        assert [row["name"] for row in sampler.top()] == ["pipe-0", "cam-a"]
 
 
 class TestBothArmsAreActuallyWiredToIt:

@@ -125,6 +125,7 @@ exec docker run --rm --pid=host "${GPU_DEVICES[@]}" --shm-size=2g \
   -e PYTHONDONTWRITEBYTECODE=1 \
   -e SHIPINFER_IN_CONTAINER=1 \
   -e SHIPINFER_CUDA_BLOCKING_SYNC \
+  -e SHIPINFER_BENCH_HOST_CPU_INTERVAL \
   -e SHIPINFER_GST_DECODER="${SHIPINFER_GST_DECODER:-}" \
   -e SHIPINFER_INGEST_HWACCEL="${SHIPINFER_INGEST_HWACCEL:-1}" \
   -e SHIPINFER_INGEST_BACKEND="${SHIPINFER_INGEST_BACKEND:-gstreamer}" \
@@ -148,6 +149,7 @@ exec docker run --rm --pid=host "${GPU_DEVICES[@]}" --shm-size=2g \
     python -c "import pydantic" 2>/dev/null || \
       pip install -q --root-user-action=ignore --no-index --find-links=/wheels \
         pydantic pydantic-settings typer pyyaml >/dev/null 2>&1 || true
-    exec python /work/scripts/host_cpu.py --threads --threads-interval 0.5 -- \
+    exec python /work/scripts/host_cpu.py --threads \
+      --threads-interval "${SHIPINFER_BENCH_HOST_CPU_INTERVAL:-0.5}" -- \
       python "${SHIPINFER_BENCH_SCRIPT:-benchmarks/run_bench.py}" "$@"
   ' bash "$@"

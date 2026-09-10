@@ -424,6 +424,9 @@ class TestTheRtspServerIsRefusedRatherThanToleratedWhenItFails:
         from benchmarks.harness import rtsp
 
         class _Alive:
+            # `pid`, because `rtsp.serving` declares each server it starts to the
+            # host-CPU wrapper: a `Popen` double without one is not one.
+            pid = 4201
             returncode = None
             stdout = None
 
@@ -456,6 +459,7 @@ class TestTheRtspServerIsRefusedRatherThanToleratedWhenItFails:
         from benchmarks.harness import rtsp
 
         class _Dead:
+            pid = 4202
             returncode = 1
             stdout = io.StringIO("gst_parse_launch: no element rtph264pay")
 
@@ -495,6 +499,7 @@ class TestTheRtspServerIsRefusedRatherThanToleratedWhenItFails:
         stopped: list[str] = []
 
         class _Server:
+            pid = 4203
             returncode = None
             stdout = None
 
@@ -527,6 +532,7 @@ class TestTheRtspServerIsRefusedRatherThanToleratedWhenItFails:
         stopped: list[str] = []
 
         class _Stubborn:
+            pid = 4204
             returncode = None
             stdout = None
             _terminated = False
@@ -566,6 +572,7 @@ class TestTheRtspServerIsRefusedRatherThanToleratedWhenItFails:
         started: list[list[str]] = []
 
         class _Server:
+            pid = 4205
             returncode = None
             stdout = None
 
@@ -608,6 +615,7 @@ class TestTheRtspServerIsRefusedRatherThanToleratedWhenItFails:
         from benchmarks.harness import rtsp
 
         class _Dead:
+            pid = 4206
             returncode = 1
             stdout = io.StringIO("Address already in use")
 
@@ -730,6 +738,7 @@ class TestTheServerLogIsAFileNotAPipe:
         handed: list[object] = []
 
         class _Server:
+            pid = 4207
             returncode = None
             stdout = None
 
