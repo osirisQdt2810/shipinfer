@@ -7,7 +7,7 @@ line names the ledger item that holds the detail, and the exact action.
 
 | # | Action | Item |
 |---|---|---|
-| 1 | **Answer which comparison the >=5x is against** — four measured ratios: 0.60x events, 1.87x pixels, 7.22x rows, and rows per host CPU-second, which is now TWO numbers one env var apart: **~3.4x as shipped (target NOT met) and 7.17x with `SHIPINFER_CUDA_BLOCKING_SYNC=1` (target MET)**, nine runs, three passes, control reproducing the earlier sitting (10 Sep). **Saying nothing accepts my default: the like-for-like ratio, and the knob left off, so NOT MET.** | `C1-WHAT-IS-THE-5x-AGAINST?`, `DOES-THE-KNOB-MOVE-C1?` |
+| 1 | **ANSWERED 10 Sep (V164): the metric is FPS — images processed per second — the target is 5x the baseline, and it runs on FOUR GPUs, not five.** Events/rows/CPU-second are ruled out ("tuyệt đối không"). Both arms need re-taking on four GPUs as img/s; every figure so far is five-GPU and event-based. | `C1-WHAT-IS-THE-5x-AGAINST?`, `FPS-ON-FOUR-GPUS` |
 | 0 | **Nothing — resolved itself.** A vendor apt repo served a bad index for ~30 min on 9 Sep and `main` went red on a repository this project never installs from; it cleared, and #194 and #196 merged on a re-run. #195 hardens against the next one and carries `automerge`. | `CI-A-VENDOR-REPO-BLOCKS-EVERY-MERGE` |
 | 2 | **DONE 10 Sep — you merged it** (`a9867e3`). The C++ tracking chain is mine again. | `CSRC-GRAPH-HAS-NO-TRACKING`, `V146b` |
 | 3 | **DONE 10 Sep — you merged it** (`b645dbd`). `V124a-PHASE3` is unblocked. | `V124b`, `V124a-PHASE3` |
@@ -2700,7 +2700,27 @@ hook down, for when the operator asked to see something before it is executed.
       is not a convenience here, it is the only method that works, and `compare()`'s CPU column
       would have nothing to fill both halves of in one run.
 
-- [!] **C1-WHAT-IS-THE-5x-AGAINST? · OPERATOR, and it is one question with three measured
+- [ ] **FPS-ON-FOUR-GPUS · the measurement V164 asks for, and the only headline that counts.**
+      METRIC: images processed per second. NOT events/s, NOT rows, NOT rows per host CPU-second
+      -- the operator ruled those out by name. FOUR GPUs. TARGET 5x the baseline.
+      WHAT HAS TO BE RE-TAKEN: every C1 figure is five-GPU and most are event-based. Both arms
+      on four GPUs, interleaved pairs, img/s each side:
+        - baseline: `bench.sh --systems baseline --gpus <four>` already reports img/s (960.2
+          SATURATED on five, so expect ~770 on four).
+        - ours: the C++ plane's own img/s. `frames_accepted / steady_s` is the honest reading --
+          `events_emitted` is what the operator refused, and one event is one frame here so the
+          two are numerically close, but the NAME matters and the figure must be built from
+          frames rather than events.
+      THE BAR, stated before measuring: 5 x ~770 = ~3 850 img/s on four GPUs, against a design
+      load of 1 000 img/s total. So it is not "serve the fleet" but "retire ~4x the fleet's rate
+      on 80% of the GPUs". Measure and report; the argument is not mine to re-make (V156 already
+      overruled it once).
+      AND `RESULTS.md` HAS TO MOVE WITH IT: its four-ratio table, its verdict and its "what is
+      not in any number" section are all built on the ratios V164 rules out. The page keeps them
+      as what they are -- resource ratios -- and states img/s on four GPUs as THE answer.
+- [x] **C1-WHAT-IS-THE-5x-AGAINST? · ANSWERED BY THE OPERATOR 10 Sep (V164): FPS,
+      5x, four GPUs. Everything below is the chronology of a question that is now
+      settled, and its ratios are NOT the answer.** ORIGINAL: one question with three measured
       answers. THE CURRENT NUMBERS ARE HERE; everything below this block is the chronology of
       how they were arrived at, and its early figures are SUPERSEDED by these.**
       Both arms on the SAME five GPUs (0/1/3/4/6), 50x20x70 s, 8 Sep, box busy with two other
