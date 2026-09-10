@@ -2700,6 +2700,45 @@ hook down, for when the operator asked to see something before it is executed.
       is not a convenience here, it is the only method that works, and `compare()`'s CPU column
       would have nothing to fill both halves of in one run.
 
+- [~] **V165-WHOLE-PIPELINE-4500 · THE TARGET IS NOW ABSOLUTE AND IT IS THE WHOLE CHAIN.**
+      4 500 img/s from `decode -> ... -> mtmc track`, not a multiple of anything -- so the
+      offer-bound baseline stops being the denominator. The operator also asked the right
+      question about my numbers, and the answer is a COUNT rather than an excuse.
+      **WHY DETECT-ONLY IS 4 000+ AND THE FULL CHAIN IS 695: THE CHAIN RUNS 11.74 MODEL
+      INVOCATIONS PER IMAGE, NOT 4.** Measured from `full_x1b.log` (fp16, 4 GPUs, 50x20x40 s,
+      27 792 frames), `per_device_rows` summed over devices divided by frames:
+      | model | rows | rows/frame | input | device% | us/row |
+      |---|---|---|---|---|---|
+      | ship_detector | 27 792 | **1.00** | 640x640 | 562.6 | 8 097 |
+      | ship_segmenter | 40 819 | **1.47** | 640x640 CROP | 385.8 | 3 781 |
+      | ship_embedder | 40 819 | 1.47 | 256x128 | 189.8 | 1 860 |
+      | person_embedder | 216 775 | **7.80** | 256x128 | 500.5 | 924 |
+      | TOTAL | 326 205 | **11.74** | | 1 638.7 | |
+      So detect is indeed the heaviest PER INVOCATION and it runs ONCE per image, while the
+      other three run 10.74 times between them. In engine input pixels: detect-only feeds
+      409 600 px per image, the chain feeds 2.47 x 640x640 + 9.27 x 256x128 = 1 315 471 px --
+      **3.2x**. Throughput is 5.8x lower, so ~1.8x is not engine input: the crop kernels, the
+      scatter, reassembly, and SEVEN instances per device against detect-only's four.
+      **AND `us/row` PROVES `per_device_busy_pct` IS NOT AN ADDITIVE SHARE.** The same detector
+      engine costs 2 400 us/row in the detect-only run and 8 097 us/row here -- 3.4x for
+      identical work -- because `compute_us` times the `execute` CALL, which under contention
+      includes waiting for the device. Reading those percentages as a budget overstates
+      every stage.
+      **WHAT `replay` IS, since it was asked:** a video source that reads a folder of JPEGs
+      from disk, decodes them ONCE into pinned host memory (`ReplayLibrary`, at most once per
+      process) and then serves them to the pipeline at `--fps`, looping. So it is a synthetic
+      camera whose frames start in HOST memory and are uploaded per frame -- which is exactly
+      the trip V156's `gstreamer rtsp -> nv12 -> all on VRAM` route removes. Every number in
+      this session is `--source replay`, so the operator's instinct is right: it is not the
+      deployment's path, and the resolution sweep above (3x throughput swing with engine time
+      flat) is that upload showing up.
+      NEXT, in order: (1) the same chain on `--source nvdec` at the peak instance count with
+      blocking sync on, which is the only arm that tests the VRAM premise; (2) a stage
+      ablation, because 11.74 invocations is a CHAIN design number and not a hardware one --
+      the segmenter's 1.47 crops at 640x640 is the Python plane's whole-frame segmentation
+      done per row (`SEGMENT-NO-CLASSES-ASYMMETRY`), and 4 500 img/s at 11.74 invocations is
+      52 700 invocations/s, which four A5000s do not do.
+
 - [~] **FPS-ON-FOUR-GPUS · MEASURED 10 Sep. The absolute numbers hold; every RATIO in this
       item was wrong because the baseline is OFFER-BOUND and does no inference (0-8% GPU,
       9 815 img/s on ONE gpu against 9 953 on four). Instrument open as #216; the page's
