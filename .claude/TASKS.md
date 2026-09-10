@@ -2764,11 +2764,30 @@ hook down, for when the operator asked to see something before it is executed.
       normalisation and BATCHING ACROSS FRAMES -- one launch for B frames instead of B. So
       linking it is a swap of one GPU kernel for a better-batched GPU kernel, not a CPU->GPU
       move, and its upside is launch overhead rather than the memory traffic I implied.
-      REMAINING LEVERS for the last 1.45x: INT8 first (fp16 alone gave 1.23x on the full
-      chain, and it cuts the engine time that `per_device_busy_pct` actually measures), then
-      the batched kernels, and the question of where the other third of each instance's life
-      goes -- which is a measurement, not a guess: raise `--det-instances` per device and see
-      whether img/s moves.
+      **AND THE MEASUREMENT THAT SETTLED IT: INSTANCES PER DEVICE IS WORTH ~1.25x AND THE
+      REPOSITORY IS SET TWO BELOW THE PEAK.** Detect-only, fp16, GPUs 2/3/4/6, 50x100x40 s,
+      50 000 frames offered, only the plan's `instances` line changed (the flag does not win
+      when `--repository` is given -- `bench_models.cpp`: "only reached when no repository was
+      given"), img/s = accepted/40:
+      | instances/device | runs | img/s (mean) | spread | device engine-time |
+      |---|---|---|---|---|
+      | 2 (today's config) | 2 | **3 189** | 3 063-3 316 | ~131-140% of 200% |
+      | 3 | 3 | **3 635** | 3 324-3 867 | ~170-179% of 300% |
+      | 4 | 3 | **3 992** | 3 527-4 236 | ~240% of 400% |
+      | 5 | 1 | 3 493 | -- | ~330% of 500% |
+      | 6 | 1 | 2 871 | -- | ~424% of 600% |
+      | 8 | 1 | 2 174 | -- | ~617% of 800% |
+      The peak is 3-4 and the collapse past 5 is steep; `nvidia-smi` sampled during the
+      4-instance run reads **87-100% on all four devices**, so at the peak the device really is
+      the limit. Note what the counter does NOT say: engine-time per device rises with every
+      instance while throughput does not, because concurrent `execute` calls on one device
+      interleave and each takes longer -- which is why the 131% figure never meant saturation.
+      SO 4.0-4.2k img/s DETECT-ONLY on four GPUs = **4.2-4.4x** the fp16 baseline's 959.6,
+      from a config value. Spread is +/-9% within a setting (the page's noise floor is ~15%),
+      so 2-vs-4 at 25% is larger than the spread but the individual runs are quoted above.
+      REMAINING LEVERS: INT8 (fp16 alone gave 1.23x on the full chain, and it cuts the engine
+      time the peak is now made of), the batched letterbox, and re-taking the FULL chain's
+      number with the instance counts at their peaks rather than at 2/2/2/1.
       **THE QUESTION THIS PUTS TO THE OPERATOR, and it is theirs rather than mine:** 5x on the
       FOUR-MODEL chain, or 5x on work comparable to the baseline's one model? The metric is
       settled (V164, images/s) -- what is not settled is what the chain must compute while
