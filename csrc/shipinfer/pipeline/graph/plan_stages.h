@@ -61,6 +61,18 @@ namespace shipinfer {
         std::optional<MaskAreaSpec> fold;
     };
 
+    //: The tracker's slot, when the plan declares one this plane can run. `output` is the
+    //: `ObjectBatch` name its ids arrive under, derived by `output_of` like every other
+    //: stage's so the plan's `field track_id <slot>` line finds them.
+    struct TrackStageSpec {
+        std::string slot;
+        std::string output;
+        //: The chain's `impl:`, which is the registry key -- `tracking/registry.h`. The
+        //: algorithm inside an impl (`params: algorithm: bytetrack`) is that lane's own
+        //: business and the plan does not carry it.
+        std::string impl;
+    };
+
     struct PlanStages {
         std::string detect_slot;
         std::string detect_model;
@@ -68,6 +80,9 @@ namespace shipinfer {
         std::vector<CropSpec> crops;
         //: The per-object stages, in the plan's order.
         std::vector<ObjectStageSpec> objects;
+        //: Absent when the plan declares no runnable tracker, which is every plan before
+        //: 10 Sep and every chain that omits the slot.
+        std::optional<TrackStageSpec> track;
         std::vector<std::string> stage_names;
         pipeline::events::ClassLabels labels;
         pipeline::events::FieldMap fields;

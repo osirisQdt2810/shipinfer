@@ -169,6 +169,10 @@ class TestWhatTheChainResolvesTo:
         assert plan.fields == {
             "embedding": ("embed_person", "embed_ship"),
             "mask_area_px": ("segment",),
+            # A tracker fills a row's `track_id`, so it is a field-filling kind like the other
+            # two -- which is also what makes "two trackers over one camera's rows" a LOAD
+            # refusal rather than a per-frame one.
+            "track_id": ("track",),
         }
 
     def test_edges_carry_the_cap_the_loader_negotiated(

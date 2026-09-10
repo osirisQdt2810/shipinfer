@@ -1238,8 +1238,8 @@ class TestTheDonorAtAFanIn:
         elements:
           decode: {impl: replay}
           detect: {impl: pool, model: ship_detector}
-          tap:    {impl: shipvision, kind: track, after: detect}
-          join:   {impl: shipvision, kind: track, after: [detect, tap]}
+          tap:    {impl: shipvision, kind: track, after: detect, params: {classes: [person]}}
+          join:   {impl: shipvision, kind: track, after: [detect, tap], params: {classes: [ship]}}
           output: {impl: none}
         """
 

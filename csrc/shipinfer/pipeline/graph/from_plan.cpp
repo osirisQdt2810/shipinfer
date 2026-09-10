@@ -1,5 +1,7 @@
 #include "shipinfer/pipeline/graph/from_plan.h"
 
+#include "shipinfer/pipeline/tracking/registry.h"
+
 namespace shipinfer {
 
     std::set<std::string> loaded_names(const ModelMap& models) {
@@ -30,6 +32,16 @@ namespace shipinfer {
             dag.add(std::make_unique<ObjectStage>(object.slot, *models.at(object.model),
                                                   object.source, object.output, timeout,
                                                   std::move(combine)));
+        }
+        // LAST, and after the croppers for the reason the chain gives itself (`after:
+        // [embed_ship, embed_person]`): the ids are scattered onto the same rows their vectors
+        // are, and a tracker that ran first would be tracking boxes nothing had embedded.
+        //
+        // BY NAME, and this file includes no tracker header: `tracking/registry.h` explains
+        // that including one would drag an external lane into the closure of the whole graph
+        // plane -- measured, as a binary that would not link at all.
+        if (planned.track) {
+            dag.add(tracking::create_track_stage(planned.track->impl, *planned.track));
         }
         return dag;
     }

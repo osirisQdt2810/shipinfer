@@ -269,8 +269,14 @@ namespace {
         out << "], \"unsupported\": [";
         for (size_t i = 0; i < unsupported.size(); ++i)
             out << (i ? ", " : "") << "\"" << unsupported[i] << "\"";
-        out << "], \"note\": \"C++ data plane; tracking and fused kernels are NOT in this "
-               "measurement\"}}";
+        // DERIVED, and it used to be a constant. "tracking ... NOT in this measurement" was
+        // true for as long as this plane had no tracking stage, and a static claim is exactly
+        // the kind that keeps being printed after it stops being true. `stages` holds what ran,
+        // so the note now reports it.
+        const bool tracked = std::find(stages.begin(), stages.end(), "track") != stages.end();
+        out << "], \"note\": \"C++ data plane; fused kernels are NOT in this measurement";
+        if (!tracked) out << ", and neither is tracking";
+        out << "\"}}";
         return out.str();
     }
 
