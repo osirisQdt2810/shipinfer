@@ -2700,6 +2700,15 @@ hook down, for when the operator asked to see something before it is executed.
       is not a convenience here, it is the only method that works, and `compare()`'s CPU column
       would have nothing to fill both halves of in one run.
 
+- [ ] MTMC-IDENTITY-PARITY-IS-NOT-COMMITTED · the C++ `GlobalIdAssigner` was verified against
+      `shipvision.mtmc.identity` over twelve scenarios and the answers were byte-identical, but
+      the harness that proved it is a scratch driver plus a JSON scenario file, not a committed
+      golden. It belongs beside the plan golden: a `--kind identity` in
+      `scripts/emit_parity_golden.py`, the scenarios under `benchmarks/parity/scenarios/`, the
+      reference's answer under `benchmarks/parity/golden/`, and a C++ test that replays it --
+      which is what stops the port drifting the first time either side is edited. A verified
+      port whose verification is not in the tree is a verified port for exactly one afternoon.
+
 - [ ] BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE · scope the engine existence and digest checks to the
       models a run actually loads. Found by #216's first review round. `require_inputs`
       (`benchmarks/harness/config.py`) demands BOTH `yolo26n_<prec>.engine` and
@@ -3333,8 +3342,23 @@ hook down, for when the operator asked to see something before it is executed.
           accesses holding the mutex, and a 40-line control program in the same
           `condition_variable::wait_for` shape reproduces them, so they are the toolchain's
           modelling rather than this code.
-        * **3b -- the stateful tracker twin**: global-id assignment over the existing (n, n)
-          passes, lane-side. Not started.
+        * **3b -- the stateful tracker twin. BUILT AND VERIFIED AGAINST THE REFERENCE** on the
+          same branch: `csrc/shipinfer/pipeline/mtmc/identity.{h,cpp}` (`GlobalIdAssigner`, a
+          port of `shipvision/mtmc/identity.py`) + `csrc/tests/test_mtmc_identity.cpp`, 44
+          checks, ASan/UBSan clean, offline tier. **TWELVE SCENARIOS THROUGH BOTH
+          IMPLEMENTATIONS PRODUCE BYTE-IDENTICAL ID MAPS AND ISSUE COUNTS** -- not just my own
+          expectations: largest-cluster-first with ties by first appearance, oldest-confirmed
+          wins a contested continuation, a stale camera slot yielding to a live track, an
+          in-cluster incumbent DRAWING against a challenger (it is part of the overlap it is
+          measured against, so it scores its own similarity to itself), a challenger in
+          ANOTHER cluster winning the slot, and both eviction bounds. One test I had to
+          redesign rather than fix the code: my first "challenger wins" case could not be won
+          for exactly that draw reason, and the reference agrees -- it is two tests now.
+          STILL OWED HERE: the parity check is reproducible but NOT COMMITTED -- it ran as a
+          scratch driver against `shipvision.mtmc.identity` plus a JSON scenario file. It
+          belongs in `benchmarks/parity/` as a `--kind identity` golden the way the plan
+          golden is, and that is the next increment
+          (`MTMC-IDENTITY-PARITY-IS-NOT-COMMITTED`).
         * **3c -- `MtmcStage` + the plan's `mtmc` node**, gluing 3a and 3b into the graph.
       UNTIL 3c LANDS, "decode -> mtmc track" cannot be measured on the C++ plane at all, which
       is what V165/V167's target is defined over -- so this is on the critical path for the
