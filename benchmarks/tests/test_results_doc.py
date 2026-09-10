@@ -80,7 +80,7 @@ def test_the_page_says_off_by_default_only_while_it_is() -> None:
     setters = [
         path
         for path in sorted((REPO_ROOT / "csrc").rglob("*"))
-        if path.suffix in {".h", ".cpp", ".cu"}
+        if path.suffix in {".h", ".hpp", ".cuh", ".cpp", ".cu"}
         and "SetDeviceFlags" in path.read_text(encoding="utf-8")
         and path.name != "platform.h"
     ]
