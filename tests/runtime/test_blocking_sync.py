@@ -14,6 +14,7 @@ is asserted here is that the knob is inert unless asked for and applied BEFORE t
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ import pytest
 from shipinfer.runtime import device as device_module
 from shipinfer.runtime.device import (
     BLOCKING_SYNC_ENV,
+    blocking_sync_asked_for,
     blocking_sync_requested,
     prefer_blocking_sync,
 )
@@ -42,6 +44,32 @@ class TestTheKnobIsReadTheSameWayOnBothPlanes:
         environ = {} if value is None else {BLOCKING_SYNC_ENV: value}
 
         assert blocking_sync_requested(environ) is wanted
+
+    @pytest.mark.parametrize(
+        ("value", "asked"),
+        [(None, False), ("", False), ("0", False), ("1", True), ("yes", True)],
+    )
+    def test_only_a_named_value_counts_as_asking_for_it(
+        self, value: str | None, asked: bool
+    ) -> None:
+        """The narrow reading, and the two differ on exactly the rows that matter: unset and
+        empty are ON (the default) and are NOT an ask. `benchmarks/harness/shipinfer.py` holds
+        an arm to the flag having applied, and only an arm that named the variable can be --
+        `--sweep` past its first rung gets 216 on every device and is not a failed request.
+        """
+        environ = {} if value is None else {BLOCKING_SYNC_ENV: value}
+
+        assert blocking_sync_asked_for(environ) is asked
+
+    def test_the_two_readings_differ_only_where_nobody_said_anything(self) -> None:
+        """Both are false on `0` and both true on `1`; the whole distinction is the silent
+        rows. Stated as one assertion because a port of either rule alone would still pass
+        its own table."""
+        for value in ({}, {BLOCKING_SYNC_ENV: ""}):
+            assert blocking_sync_requested(value) is True
+            assert blocking_sync_asked_for(value) is False
+        for value in ({BLOCKING_SYNC_ENV: "0"}, {BLOCKING_SYNC_ENV: "1"}):
+            assert blocking_sync_requested(value) is blocking_sync_asked_for(value)
 
     def test_the_env_var_is_the_one_the_cpp_plane_reads(self) -> None:
         """One knob for two planes, so an operator sets one thing -- and both read it with the
@@ -82,6 +110,22 @@ class TestItIsInertUnlessAskedFor:
         monkeypatch.delenv(BLOCKING_SYNC_ENV, raising=False)
 
         assert blocking_sync_requested() is True
+
+    def test_the_offline_tier_refuses_it_for_every_test(self, pytestconfig) -> None:
+        """`tests/conftest.py` sets the variable to `0` for a run that selected no device
+        tier, so no test can flip a device-wide scheduling flag on the box it runs on.
+
+        Blanking `CUDA_VISIBLE_DEVICES` -- the tier's other guard -- does not cover it: a
+        fixture that FAKES `device_count` has a non-empty `_visible` whatever the environment
+        says, and that is the shape `test_platform.py` uses. A test that means to exercise
+        the knob sets the variable itself, and `monkeypatch` puts this back after it.
+        """
+        from tests.conftest import device_tier_requested
+
+        if device_tier_requested(pytestconfig.getoption("markexpr") or ""):
+            pytest.skip("a device-tier run keeps the knob's real default")
+
+        assert os.environ.get(BLOCKING_SYNC_ENV) == "0"
 
     def test_an_empty_device_list_calls_nothing(self, monkeypatch) -> None:
         """A CPU-only host asks for no devices, and the helper must not reach for libcudart to

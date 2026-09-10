@@ -4,8 +4,8 @@
 // Measured (`THE-INSTANCE-THREADS-SPIN-ON-cudaStreamSynchronize`): with it on, the
 // model-instance threads' host CPU HALVES -- 632 -> 279 CPU-s over two interleaved pairs at
 // the design load -- and events rise ~15%, because the spin was starving the pipeline
-// workers. It is off by default because it trades wake-up latency for host CPU, and the host
-// is only the wall at this load.
+// workers. It is ON BY DEFAULT since that A/B was repeated at a fifth of the load and p99 fell
+// 70% there too, so the wake-up latency it trades away costs nothing measured; `=0` refuses it.
 //
 // Offline: g++ alone, no CUDA, no TensorRT, no device. Only the ENV PARSE is testable here --
 // the flag itself needs a driver, and the A/B that justifies it is in the ledger.
@@ -41,9 +41,10 @@ namespace {
     }
 
     void unset_means_off_for_the_plain_rule() {
-        // `env_flag` is the ON-ONLY rule and stays that way: every other knob reads it, and a
-        // knob nobody set must not turn on. The blocking-sync knob no longer uses it -- see
-        // the default-on cases below.
+        // `env_flag` is the ON-ONLY rule and stays that way: a knob nobody set must not turn
+        // on, and that is the right default for the NEXT knob. It has no caller left in
+        // `csrc/` now that the blocking-sync one reads `env_flag_unless_refused` -- kept as
+        // the general rule, and pinned here so the two cannot be confused for each other.
         with_env(nullptr, false, "unset -> off");
     }
 
