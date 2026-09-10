@@ -1930,8 +1930,20 @@ hook down, for when the operator asked to see something before it is executed.
       SO THE DEFAULT QUESTION IS NOW ANSWERABLE, and the answer the evidence supports is ON:
       -40% host CPU, +25% rows, 3.41x -> 7.17x on C1's like-for-like ratio, fewer drops in
       every pass, and latency lower at p50/p95/p99. That is a separate PR after this one.
-- [~] **THE-GENERATOR-TREE-IS-REMEMBERED-NOT-PROVEN · PR #209 IN REVIEW (10 Sep), and it
-      carries #208's notes 1 and 3 too -- the same failure shape twice.**
+- [x] **THE-GENERATOR-TREE-IS-REMEMBERED-NOT-PROVEN · MERGED as #209 (10 Sep), with #208's
+      notes 1 and 3 and round 1's own blocking point.**
+      ROUND 1 WAS A CLAIM ABOUT THE KERNEL AND TWO REVIEWS DISAGREED ABOUT IT, so I measured:
+      three threads, a 0.6 s child reaped by a NON-leader, read while all three were alive ->
+      `cutime=50` on every row. #207 round 2's "the leader's row gets it all, non-leaders
+      zero" was wrong; every thread's row carries it, so the consequence scales with the
+      thread count. Measure, do not pick between two reviewers.
+      AND THE SUGGESTED ONE-LINE FIX DID NOT COVER WHAT IT WAS FOR: `assert total == 1.0`
+      leaves the retired half of `_forget` unreached -- deleting that half still passed all
+      44. `test_a_retired_row_is_purged_with_its_process` reaches it (a recycled tid retired
+      at a lower reading, then purged with its process) and fails exactly one of 45.
+      #209's OWN NIT, worth doing: the csrc walk filters `.h/.cpp/.cu`, so a future `.cuh`
+      or `.hpp` would slip past the very guard the PR exists to harden.
+
       A GUARD THAT PASSES ON THE DRIFT IT GUARDS, in two places: reinstating the growth
       guard on top of `_generator_tree` passed all 43 tests, and #208's `off by default`
       guard split on the env-gate marker so a second call ADDED BEFORE it stayed green.
