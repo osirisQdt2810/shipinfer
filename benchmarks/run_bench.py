@@ -548,6 +548,23 @@ def _print_device_table(
             print(f"  {'  (busy)':<18} {spread}")
 
 
+def _print_reassembly(result: Any) -> None:
+    """The reassembly window, beside the C++ arm's three lines and in the same units.
+
+    Printed and not only returned: without it the Python arm's report carried no latency at
+    all, so the like-for-like comparison this figure exists for needed a debugger.
+    """
+    cell = getattr(result, "steady_reassembly", None)
+    if cell is None or not cell.count:
+        return
+    window = "whole run" if result.steady_is_whole_run else "steady"
+    print(
+        f"\nreassembly ({window}, {cell.count} frames): "
+        f"p50 {cell.quantile(0.5):.0f} us  p95 {cell.quantile(0.95):.0f} us  "
+        f"p99 {cell.quantile(0.99):.0f} us"
+    )
+
+
 def measure_shipinfer_in_full(
     cfg: BenchConfig,
     out_dir: Path,
@@ -597,6 +614,7 @@ def measure_shipinfer_in_full(
         ["\nper-device execution (the balancing evidence):"],
         shipinfer.device_tables(result),
     )
+    _print_reassembly(result)
     offered = shipinfer.offered_rates(cfg, result)
     capacity = shipinfer.per_module_capacity(cfg, instances=result.instances)
     return run, ours, result, offered, capacity

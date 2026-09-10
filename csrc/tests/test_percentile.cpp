@@ -47,10 +47,11 @@ namespace {
         check(percentile(one, 1.0) == 42, "n=1 p100");
     }
 
-    void the_ranks_are_nearest_rank_over_1_to_100() {
-        // Nearest-rank over 1..100: rank = round(p * 99), and the value is rank + 1.
+    void the_ranks_are_the_rounded_rank_over_1_to_100() {
+        // rank = round(p * 99) over 1..100, so the value is rank + 1. NOT classic nearest-rank,
+        // which would give 50 for p50; the header says which convention and why.
         auto samples = one_to(100);
-        check(percentile(samples, 0.50) == 51, "p50 of 1..100 is 51");
+        check(percentile(samples, 0.50) == 51, "p50 of 1..100 is 51, not 50");
         samples = one_to(100);
         check(percentile(samples, 0.95) == 95, "p95 of 1..100 is 95");
         samples = one_to(100);
@@ -105,7 +106,7 @@ namespace {
 int main() {
     an_empty_sample_reads_zero();
     one_sample_is_every_percentile();
-    the_ranks_are_nearest_rank_over_1_to_100();
+    the_ranks_are_the_rounded_rank_over_1_to_100();
     the_order_of_the_input_does_not_matter();
     a_fraction_past_the_end_cannot_index_past_it();
     one_outlier_in_a_hundred_is_the_max_and_not_the_p99();

@@ -279,7 +279,10 @@ namespace {
     /// judged on. Named `reassembly_us` and not `latency_us`: the clock starts when the
     /// collector OPENS the frame (`Pending::opened_ns`), which is after detect was dispatched,
     /// so this is the window this plane controls and not the whole path a frame takes.
-    void report_latency(std::vector<uint32_t>& samples) {
+    /// TAKES THE LOCK ITSELF: the one call site is on the drain path where nothing is still
+    /// pushing, and that is exactly the safety that stops holding the day this moves.
+    void report_latency(std::mutex& guard, std::vector<uint32_t>& samples) {
+        const std::lock_guard<std::mutex> held(guard);
         std::cout << "reassembly_us_samples " << samples.size() << "\n";
         std::cout << "reassembly_us_p50 " << percentile(samples, 0.50) << "\n";
         std::cout << "reassembly_us_p95 " << percentile(samples, 0.95) << "\n";
@@ -882,7 +885,7 @@ int main(int argc, char** argv) {
         }
         std::cout << "events_complete " << complete.load() << "\n";
         std::cout << "events_incomplete " << (emitted.load() - complete.load()) << "\n";
-        report_latency(latency_us);
+        report_latency(latency_lock, latency_us);
         // Reported unconditionally, zero included: a number that appears only when it is
         // non-zero is a number a reader does not know to look for.
         std::cout << "events_unwritable " << unwritable.load() << "\n";

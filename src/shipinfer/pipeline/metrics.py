@@ -93,6 +93,7 @@ class PipelineMetrics:
     build_failures: Counter = field(init=False)
 
     frame_latency_us: Histogram = field(init=False)
+    reassembly_us: Histogram = field(init=False)
     stage_latency_us: Histogram = field(init=False)
     objects_per_frame: Histogram = field(init=False)
 
@@ -171,6 +172,15 @@ class PipelineMetrics:
         self.stage_latency_us = r.histogram(
             "shipinfer_pipeline_stage_latency_us",
             "Submit to result for one stage, microseconds.",
+            _STAGE_BUCKETS_US,
+        )
+        #: The STAGE edges, not the end-to-end ones: this window runs tens to hundreds of
+        #: milliseconds, where `_E2E_BUCKETS_US` steps by 2-2.5x and a reported p50 says only
+        #: "somewhere in 50-100 ms" -- the argument that comment already makes for stages.
+        self.reassembly_us = r.histogram(
+            "shipinfer_pipeline_reassembly_us",
+            "Collector-open to frame-finished, microseconds. The C++ plane's "
+            "`reassembly_us_*` measures the same window, exactly rather than bucketed.",
             _STAGE_BUCKETS_US,
         )
         self.objects_per_frame = r.histogram(
