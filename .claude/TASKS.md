@@ -1886,10 +1886,22 @@ hook down, for when the operator asked to see something before it is executed.
       says the bottleneck "is not raw throughput, it is (a) load balance and (b) END-TO-END
       LATENCY", and the data plane has never reported (b). `InstanceStats::ewma_latency_us`
       holds a per-instance figure the bench does not print, and an EWMA is not a percentile.
-      WHAT IT NEEDS: a per-event end-to-end duration (frame read -> event complete) summarised
-      as p50/p95/p99 plus a max, printed like the other counters so `run_cpp_bench.sh`'s
-      alternation can carry it. The collector already stamps every event, so the arrival time
-      is the question rather than the plumbing.
+      **AND THE NUMBER IS ALREADY COMPUTED, which makes this small.** `reassembly/collector.cpp:133`
+      sets `result.waited_us = (at - frame.opened_ns) / 1000` on every `FrameResult`, and
+      `Pending::opened_ns` is stamped at `:39`. So the per-frame duration reaches the emit
+      callback on every finished event and NOBODY SUMMARISES IT. What is missing is a summary
+      and a print, not a measurement:
+        - accumulate `waited_us` per finished event -- a `std::vector<uint32_t>` and
+          `nth_element` is exact and costs 160 KB at 40k events, so no histogram machinery and
+          no bucket-boundary argument;
+        - the emit callback runs on worker threads, so it needs the same discipline the
+          counters already use in `cli/bench.cpp` (check whether they are atomics or locked);
+        - print `latency_us_p50/p95/p99/max` beside the counters and add the names to
+          `run_cpp_bench.sh`'s summary alternation, which is anchored on counter names.
+      IT IS THE REASSEMBLY WINDOW, not the whole path: `opened_ns` is when the collector opened
+      the frame, after detect was dispatched. Say so with the number rather than calling it
+      end-to-end -- a true one needs a read timestamp carried on `FrameState`, which has none
+      (`pipeline/graph/state.h:72`).
       TWO PLANES: this is a per-frame seam, so the Python plane owes the same figure and the
       parity harness the same assertion -- open its ledger item with the PR rather than after.
       THEN the default question is answerable with evidence instead of a proxy.
