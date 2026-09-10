@@ -1876,6 +1876,21 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE HERE because the C++ plane is the one the measurement was taken on, and a
       Python A/B needs its own before/after at the design load to claim anything.
 
+- [ ] **BOTH-PLANES-SHOULD-REPORT-THE-SAME-LATENCY-WINDOW · the parity item the C++ latency
+      PR opens (V88/V89, 10 Sep).** After it, the two planes report DIFFERENT windows:
+        Python: `frame_latency_us` -- "capture to emission ... the number the deployment is
+                judged on" (`pipeline/metrics.py:166-169`), plus `stage_latency_us`, and the
+                harness already reads the latter into the run's JSON.
+        C++:    `reassembly_us_*` -- collector-open to frame-finish, because `FrameState`
+                (`pipeline/graph/state.h:72`) carries no capture stamp.
+      SO NEITHER PLANE CAN BE COMPARED TO THE OTHER ON LATENCY, which is the seam the sync rule
+      is about. Two halves, and they are independent:
+      (a) the C++ plane needs a capture stamp on `FrameState` to report capture-to-emission --
+          the figure the Python plane calls the one the deployment is judged on;
+      (b) the Python plane computes the same `waited_us` at `reassembly/collector.py:214` and
+          records it into NO metric, so it owes `reassembly_us` for the like-for-like half.
+      (b) IS THE CHEAP ONE and gives the parity harness something to assert; (a) is the one the
+      operator's latency requirement actually names.
 - [~] **THE-BENCH-REPORTS-NO-LATENCY-AT-ALL · the gap the knob measurement exposed (10 Sep).**
       `cli/bench` prints 18 counters and NOT ONE latency figure. `grep -nE "p50|p99|latency|
       percentile" .artifacts/cpp/k1_a_on.log` is empty; the only proxy is
