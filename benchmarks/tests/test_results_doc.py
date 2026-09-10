@@ -79,17 +79,22 @@ def test_the_knob_the_page_credits_is_the_one_the_binary_reads() -> None:
     page = RESULTS.read_text(encoding="utf-8")
     bench = (REPO_ROOT / "csrc" / "shipinfer" / "cli" / "bench.cpp").read_text(encoding="utf-8")
 
-    assert "SHIPINFER_CUDA_BLOCKING_SYNC=1" in page
-    assert 'env_flag("SHIPINFER_CUDA_BLOCKING_SYNC")' in bench
+    assert "SHIPINFER_CUDA_BLOCKING_SYNC=0" in page
+    assert 'env_flag_unless_refused("SHIPINFER_CUDA_BLOCKING_SYNC")' in bench
 
 
-def test_the_page_says_off_by_default_only_while_it_is() -> None:
+def test_the_page_says_on_by_default_only_while_it_is() -> None:
     """Both figures on the page are labelled by which side of the default they are on, so a
-    default that flips silently makes the verdict say the opposite of what it means."""
+    default that flips silently makes the verdict say the opposite of what it means.
+
+    THIS TEST IS WHY THE PAGE MOVED. It was written in #208 with "off by default" and it
+    failed the moment the default flipped, which is exactly what it was for -- the page and the
+    code cannot drift apart on which figure is "as shipped".
+    """
     page = RESULTS.read_text(encoding="utf-8")
     bench = (REPO_ROOT / "csrc" / "shipinfer" / "cli" / "bench.cpp").read_text(encoding="utf-8")
 
-    assert "**off by default**" in page
+    assert "**on by default**" in page
     # The COUNT first, and over the WHOLE of `csrc/`: splitting on the gate marker inspects
     # only what follows it, and counting inside one file would miss the flag moving out of
     # `bench.cpp` -- `gpuSetDeviceFlags` is a `platform.h` alias any unit can reach.
@@ -103,12 +108,12 @@ def test_the_page_says_off_by_default_only_while_it_is() -> None:
     assert setters == [REPO_ROOT / "csrc" / "shipinfer" / "cli" / "bench.cpp"], setters
     assert bench.count("SetDeviceFlags") == 1, (
         "more than one place sets a device flag, so the env gate is no longer the only way in "
-        "and the page's `~3.4x default` figure describes something that does not ship"
+        "and the page's `3.4x with =0` figure describes something unreachable"
     )
-    guarded = bench.split('env_flag("SHIPINFER_CUDA_BLOCKING_SYNC")')[1]
+    guarded = bench.split('env_flag_unless_refused("SHIPINFER_CUDA_BLOCKING_SYNC")')[1]
     assert (
         "gpuSetDeviceFlags(gpuDeviceScheduleBlockingSync)" in guarded.split("std::printf")[0]
     ), (
-        "the flag is set outside the env gate, so it is no longer off by default and the "
-        "page's `~3.4x default` figure describes a configuration that no longer ships"
+        "the flag is set outside the env gate, so `=0` no longer refuses it and the page's "
+        "`3.4x with =0` figure describes a configuration that cannot be reached"
     )

@@ -28,6 +28,7 @@ __all__ = [
     "BLOCKING_SYNC_ENV",
     "DeviceManager",
     "bind_thread",
+    "blocking_sync_asked_for",
     "blocking_sync_requested",
     "current_device",
     "prefer_blocking_sync",
@@ -256,14 +257,33 @@ def bind_thread(device: Device) -> None:
     _THREAD_DEVICE.device = device
 
 
-#: The knob both planes read. `csrc/shipinfer/core/env.h` has the same three rules, and the
-#: reason for the third is `docker run -e VAR`: an unset host variable is forwarded as EMPTY,
-#: so empty has to mean "not asked for" or every container run flips a scheduling flag.
+#: The knob both planes read, in TWO readings: on unless refused (`blocking_sync_requested`,
+#: and `core/env.h::env_flag_unless_refused`) and asked for by name (`blocking_sync_asked_for`).
+#: `docker run -e VAR` forwards an unset host variable as EMPTY, so empty means "not asked" --
+#: which is now the DEFAULT, i.e. on. Only an explicit ask is owed proof that it applied.
 BLOCKING_SYNC_ENV = "SHIPINFER_CUDA_BLOCKING_SYNC"
 
 
 def blocking_sync_requested(environ: Mapping[str, str] | None = None) -> bool:
-    """Whether the operator asked for a blocking synchronise: set, non-empty, and not ``0``."""
+    """Whether to use a blocking synchronise. ON unless refused with ``0``.
+
+    Empty reads as "not asked" and therefore as the default, which is ON: `docker run -e VAR`
+    with VAR unset passes it through EMPTY, so treating empty as a refusal would disable this
+    on every containerised run. `core/env.h::env_flag_unless_refused` is the same rule, and
+    `tests/runtime/test_blocking_sync.py` ties the two.
+    """
+    value = (os.environ if environ is None else environ).get(BLOCKING_SYNC_ENV)
+    return value is None or value == "" or value != "0"
+
+
+def blocking_sync_asked_for(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether the operator asked for the flag BY NAME: set, non-empty, and not ``0``.
+
+    The narrow reading, and the one an A/B arm is held to. `blocking_sync_requested` decides
+    what the server DOES; this decides who owes proof that it applied, because "no device
+    took the flag" is a failed request when somebody asked for it and an ordinary skip -- a
+    second manager in one process, an image with no libcudart, a ROCm host -- when nobody did.
+    """
     value = (os.environ if environ is None else environ).get(BLOCKING_SYNC_ENV)
     return value is not None and value != "" and value != "0"
 
@@ -312,7 +332,8 @@ def prefer_blocking_sync(devices: Iterable[int]) -> tuple[int, ...]:
             continue
     if libcudart is None:
         _LOG.warning(
-            "%s asked for, but libcudart is not loadable here (tried %s)",
+            "blocking synchronise (%s) not applied: libcudart is not loadable here "
+            "(tried %s)",
             BLOCKING_SYNC_ENV,
             [name for name in candidates if name],
         )
@@ -325,7 +346,10 @@ def prefer_blocking_sync(devices: Iterable[int]) -> tuple[int, ...]:
         libcudart.cudaGetDevice.restype = ctypes.c_int
         libcudart.cudaGetDevice.argtypes = [ctypes.POINTER(ctypes.c_int)]
     except AttributeError:  # pragma: no cover - a libcudart without the symbols
-        _LOG.warning("%s asked for, but libcudart has no cudaSetDeviceFlags", BLOCKING_SYNC_ENV)
+        _LOG.warning(
+            "blocking synchronise (%s) not applied: libcudart has no cudaSetDeviceFlags",
+            BLOCKING_SYNC_ENV,
+        )
         return ()
 
     # doc: long why the current device is put back, and what it costs not to
@@ -350,10 +374,10 @@ def prefer_blocking_sync(devices: Iterable[int]) -> tuple[int, ...]:
             else:
                 _LOG.warning(
                     "device %d already has a context, so its synchronise keeps spinning "
-                    "(cudaSetDeviceFlags returned %d); ask for %s before the first CUDA call",
+                    "(cudaSetDeviceFlags returned %d); the flag lands only before that "
+                    "device's first CUDA call, which a second manager in one process is past",
                     index,
                     status,
-                    BLOCKING_SYNC_ENV,
                 )
     finally:
         if previous.value >= 0:

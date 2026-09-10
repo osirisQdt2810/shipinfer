@@ -14,6 +14,7 @@ is asserted here is that the knob is inert unless asked for and applied BEFORE t
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ import pytest
 from shipinfer.runtime import device as device_module
 from shipinfer.runtime.device import (
     BLOCKING_SYNC_ENV,
+    blocking_sync_asked_for,
     blocking_sync_requested,
     prefer_blocking_sync,
 )
@@ -30,21 +32,59 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class TestTheKnobIsReadTheSameWayOnBothPlanes:
     @pytest.mark.parametrize(
+        ("value", "wanted"),
+        [(None, True), ("", True), ("0", False), ("1", True), ("yes", True)],
+    )
+    def test_only_a_zero_refuses_it(self, value: str | None, wanted: bool) -> None:
+        """ON UNLESS REFUSED, since the two-load measurement: `0` turns it off and nothing else
+        does. Empty is the one worth stating and the reason this is not `not env_flag`:
+        `docker run -e VAR` forwards an unset host variable as EMPTY, so an empty value has to
+        take the DEFAULT -- which is now on -- or every containerised run would disable it.
+        """
+        environ = {} if value is None else {BLOCKING_SYNC_ENV: value}
+
+        assert blocking_sync_requested(environ) is wanted
+
+    @pytest.mark.parametrize(
         ("value", "asked"),
         [(None, False), ("", False), ("0", False), ("1", True), ("yes", True)],
     )
-    def test_the_three_rules(self, value: str | None, asked: bool) -> None:
-        """Empty is the one worth stating: `docker run -e VAR` forwards an unset host variable
-        as EMPTY, so empty has to mean "not asked for" or every container run flips it."""
+    def test_only_a_named_value_counts_as_asking_for_it(
+        self, value: str | None, asked: bool
+    ) -> None:
+        """The narrow reading, and the two differ on exactly the rows that matter: unset and
+        empty are ON (the default) and are NOT an ask. `benchmarks/harness/shipinfer.py` holds
+        an arm to the flag having applied, and only an arm that named the variable can be --
+        `--sweep` past its first rung gets 216 on every device and is not a failed request.
+        """
         environ = {} if value is None else {BLOCKING_SYNC_ENV: value}
 
-        assert blocking_sync_requested(environ) is asked
+        assert blocking_sync_asked_for(environ) is asked
+
+    def test_the_two_readings_differ_only_where_nobody_said_anything(self) -> None:
+        """Both are false on `0` and both true on `1`; the whole distinction is the silent
+        rows. Stated as one assertion because a port of either rule alone would still pass
+        its own table."""
+        for value in ({}, {BLOCKING_SYNC_ENV: ""}):
+            assert blocking_sync_requested(value) is True
+            assert blocking_sync_asked_for(value) is False
+        for value in ({BLOCKING_SYNC_ENV: "0"}, {BLOCKING_SYNC_ENV: "1"}):
+            assert blocking_sync_requested(value) is blocking_sync_asked_for(value)
 
     def test_the_env_var_is_the_one_the_cpp_plane_reads(self) -> None:
-        """One knob for two planes, so an operator sets one thing."""
-        header = (ROOT / "csrc" / "shipinfer" / "cli" / "bench.cpp").read_text(encoding="utf-8")
+        """One knob for two planes, so an operator sets one thing -- and both read it with the
+        DEFAULT-ON rule, which is a different function from `env_flag`."""
+        bench = (ROOT / "csrc" / "shipinfer" / "cli" / "bench.cpp").read_text(encoding="utf-8")
+        env_header = (ROOT / "csrc" / "shipinfer" / "core" / "env.h").read_text(
+            encoding="utf-8"
+        )
 
-        assert f'env_flag("{BLOCKING_SYNC_ENV}")' in header
+        assert f'env_flag_unless_refused("{BLOCKING_SYNC_ENV}")' in bench
+        assert "inline bool env_flag_unless_refused" in env_header
+        assert f'env_flag("{BLOCKING_SYNC_ENV}")' not in bench, (
+            "the plain `env_flag` is the ON-only rule, so reading the knob with it would put "
+            "the default back to off on this plane alone"
+        )
 
     def test_the_flag_value_matches_the_cpp_planes_symbol(self) -> None:
         """`ctypes` has no header to read `cudaDeviceScheduleBlockingSync` from, so this plane
@@ -59,11 +99,33 @@ class TestTheKnobIsReadTheSameWayOnBothPlanes:
 
 
 class TestItIsInertUnlessAskedFor:
-    def test_no_device_is_touched_when_nothing_asks(self, monkeypatch) -> None:
-        """The default has to be the behaviour every existing measurement was taken under."""
-        monkeypatch.delenv(BLOCKING_SYNC_ENV, raising=False)
+    def test_a_zero_is_the_only_way_to_turn_it_off(self, monkeypatch) -> None:
+        """The refusal has to be reachable, because every measurement before 10 Sep was taken
+        with the knob OFF and reproducing one needs a way back."""
+        monkeypatch.setenv(BLOCKING_SYNC_ENV, "0")
 
         assert blocking_sync_requested() is False
+
+    def test_an_unset_variable_now_means_on(self, monkeypatch) -> None:
+        monkeypatch.delenv(BLOCKING_SYNC_ENV, raising=False)
+
+        assert blocking_sync_requested() is True
+
+    def test_the_offline_tier_refuses_it_for_every_test(self, pytestconfig) -> None:
+        """`tests/conftest.py` sets the variable to `0` for a run that selected no device
+        tier, so no test can flip a device-wide scheduling flag on the box it runs on.
+
+        Blanking `CUDA_VISIBLE_DEVICES` -- the tier's other guard -- does not cover it: a
+        fixture that FAKES `device_count` has a non-empty `_visible` whatever the environment
+        says, and that is the shape `test_platform.py` uses. A test that means to exercise
+        the knob sets the variable itself, and `monkeypatch` puts this back after it.
+        """
+        from tests.conftest import device_tier_requested
+
+        if device_tier_requested(pytestconfig.getoption("markexpr") or ""):
+            pytest.skip("a device-tier run keeps the knob's real default")
+
+        assert os.environ.get(BLOCKING_SYNC_ENV) == "0"
 
     def test_an_empty_device_list_calls_nothing(self, monkeypatch) -> None:
         """A CPU-only host asks for no devices, and the helper must not reach for libcudart to
@@ -155,11 +217,12 @@ class TestItIsAppliedBeforeAnyDeviceHasAContext:
         assert order[0] == "flag(0, 1)", order
         assert order[1:] == ["memory_info(0)", "memory_info(1)"], order
 
-    def test_nothing_is_applied_when_the_knob_is_unset(self, monkeypatch) -> None:
-        """The default path must not reach for libcudart at all -- ADR-001: this constructor
-        runs on a machine with no driver."""
+    def test_nothing_is_applied_when_the_knob_is_refused(self, monkeypatch) -> None:
+        """A refused knob must not reach for libcudart at all. The DEFAULT path now does --
+        ADR-001 still holds because `prefer_blocking_sync` treats a missing library as a
+        warning and no devices, which `test_a_missing_libcudart_is_a_warning` pins."""
         reached: list[str] = []
-        monkeypatch.delenv(BLOCKING_SYNC_ENV, raising=False)
+        monkeypatch.setenv(BLOCKING_SYNC_ENV, "0")
         monkeypatch.setattr(
             device_module, "prefer_blocking_sync", lambda devices: reached.append("flag") or ()
         )
@@ -178,7 +241,7 @@ class TestItIsAppliedBeforeAnyDeviceHasAContext:
         two planes are meant to be the same seam, and a wart on one is a wart on both.
         """
         bench = (ROOT / "csrc" / "shipinfer" / "cli" / "bench.cpp").read_text(encoding="utf-8")
-        guarded = bench.split('env_flag("SHIPINFER_CUDA_BLOCKING_SYNC")')[1]
+        guarded = bench.split('env_flag_unless_refused("SHIPINFER_CUDA_BLOCKING_SYNC")')[1]
         walk = guarded.split("std::printf")[0]
 
         assert "gpuGetDevice(&previous)" in walk, walk
@@ -217,11 +280,11 @@ class TestTheManagerRemembersWhatTookTheFlag:
 
         assert self._manager(monkeypatch, ()).blocking_sync == ()
 
-    def test_unasked_is_empty_and_never_calls_the_driver(self, monkeypatch) -> None:
-        monkeypatch.delenv(BLOCKING_SYNC_ENV, raising=False)
+    def test_refused_is_empty_and_never_calls_the_driver(self, monkeypatch) -> None:
+        monkeypatch.setenv(BLOCKING_SYNC_ENV, "0")
 
         def refuse(devices: object) -> tuple[int, ...]:
-            raise AssertionError("the default path must not reach for libcudart")
+            raise AssertionError("a refused knob must not reach for libcudart")
 
         monkeypatch.setattr(device_module, "device_count", lambda: 1)
         monkeypatch.setattr(device_module, "memory_info", lambda index: (1, 2))
