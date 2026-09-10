@@ -2779,8 +2779,31 @@ hook down, for when the operator asked to see something before it is executed.
       devices -- and 16 GPUs at 4x the devices is ~1 700 img/s of THIS chain, still short, so
       the chain has to get cheaper too. That is a design conversation, and the levers are
       priced above.
-      NEXT: (1) price the segmenter's WHOLE-FRAME variant, which is the plane divergence and
-      the biggest single cost (5.5x for 1.47 invocations); (2) `latency_ms` is 200 by default
+      **THE PYTHON PLANE IS NOT A VIABLE MEASUREMENT ARM AT LOAD, ON EITHER SOURCE, so the
+      end-to-end target is blocked on the C++ `mtmc` stage.** Measured 10 Sep, 4 GPUs:
+      | plane | source | offered | generator delivered | verdict |
+      |---|---|---|---|---|
+      | Python, `--topology single` | replay | 1 000 | 358.6 (36%) | refused by the offer gate |
+      | Python, `--topology fleet` (4 shards) | replay | 1 000 | 72-76 per shard (28-32%) | refused, then 5 s stage timeouts |
+      | Python, `--topology single` | **rtsp** | 4 800 | **47.5 (1%)** | refused |
+      RTSP is WORSE than replay on that plane, not better: the frames arrive off sockets but
+      the 24 GStreamer camera threads run in the same interpreter as the pipeline workers, and
+      the harness's own refusal says exactly that ("the wall is not decoding -- it is one
+      interpreter running the camera threads and the pipeline workers together", arch.md
+      section 9 '[Decode procs]').
+      SO: the plane that HAS `mtmc` cannot be fed, and the plane that can be fed HAS NO `mtmc`.
+      `CSRC-GRAPH-HAS-NO-TRACKING`'s 3b/3c are the critical path for V165/V167, and nothing
+      else measures the target.
+      CORRECTION TO MY OWN CLAIM, made to the operator and wrong: I said the Python plane
+      segments the WHOLE FRAME and that making C++ match would be a parity fix. `PoolSegment`'s
+      own docstring says the opposite -- "A crop element like the embedders SINCE
+      P6-SEGMENT-CROP, which CLOSES a cross-plane divergence. The C++ plane has always cut a
+      `ship_crops_640` set and run the segmenter on it; this one letterboxed the whole frame,
+      so `mask_area_px` was computed from different pixels". Both planes crop per ship today
+      and the C++ behaviour was the reference. Whole-frame segmentation is still the biggest
+      priced lever (5.5x for 1.47 invocations) but it is REOPENING A DECIDED PRODUCT QUESTION
+      and would change what `mask_area_px` means, not collecting a parity fix.
+      NEXT: (1) `latency_ms` is 200 by default
       and there is no jitter on loopback -- 276 of our 625 CPU-s are the RTP receive path;
       (3) the C++ plane still has no `mtmc`, so "decode -> mtmc track" cannot be measured end
       to end until PR 3 lands (the barrier half is built and green).
