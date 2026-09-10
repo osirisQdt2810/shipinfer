@@ -2937,7 +2937,24 @@ hook down, for when the operator asked to see something before it is executed.
       `core/events/schema.h` that is emitted today and always null, with
       `body_track_id_vec`/`ship_track_id_vec` already on the wire. So it is a stage plus a
       fill, not a schema change. PR 3 is `mtmc`.
-      **PR 2 IS OPEN AS #215 (10 Sep), and the design changed once under measurement.**
+      **PR 2 IS OPEN AS #215 (10 Sep), and the design changed TWICE under measurement -- each
+      time because a build line said so, not because a reviewer did.**
+      LINE 1, THE EXTERNAL LANE: putting `TrackStage` in `graph/stages.h` and including
+      `tracking/shard.h` there made `stages.o` and `from_plan.o` reach shipvision, so
+      `build_csrc.py` DROPPED them without the submodule and `bench` failed to link --
+      undefined `build_dag`, `WorkerScratch`, `loaded_names`. The whole graph plane, gone, for
+      a tracker nobody asked for.
+      LINE 2, THE CUDA LINE, and CI found it: the lane's own job builds `--offline`, g++ alone,
+      and a stage reads `FrameState`, which can hold a device surface -- "stage.cpp reaches
+      core/platform.h, so it cannot join an offline build". So a unit cannot satisfy both
+      lines, and the SEAM IS NEITHER: `Associator` takes `Detection`s and answers ints, both
+      out of `core/types.h`, which crosses neither. `TrackStage` is in `graph/stages.h` where
+      stages live; `tracking/bytetrack.cpp` is the lane's only new unit; `associator.cpp` is
+      lane-free so its refusal is what a lane-less binary answers with.
+      AND THE TESTS SPLIT THE SAME WAY, which made both better: the offline one tests the
+      tracker (including that two callers get the SAME associator -- two would be two identity
+      spaces for one camera), and the stage one tests the SCATTER against a scripted fake, so
+      `-1` is reachable on demand rather than hoping ByteTrack declines to confirm.
       MY FIRST DRAFT WOULD HAVE DELETED THE GRAPH FROM A LANE-LESS BUILD. Putting `TrackStage`
       in `graph/stages.h` and including `tracking/shard.h` there made `stages.o` and
       `from_plan.o` reach an external lane, so `build_csrc.py` DROPPED them without the
