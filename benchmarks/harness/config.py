@@ -59,9 +59,9 @@ Resolution = str
 TOPOLOGIES = ("single", "fleet", "service")
 
 #: What a BENCH RUN can ask for -- one short of ``build_engines.py``'s, which also builds
-#: ``int8``. The bench cannot: :meth:`require_inputs` demands the segmenter's plan whichever
-#: models a run loads, and the segmenter does not build at int8 here. The difference is
-#: ``BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE``'s subject, not an oversight.
+#: ``int8``. The bench cannot, and no longer because of the engine checks: our side loads
+#: ``model_repository/<name>/1/model.plan`` whatever precision it holds, so the flag would
+#: select nothing. ``BENCH-PRECISION-SELECTS-NO-PLAN`` is what earns it back.
 PRECISIONS = ("fp32", "fp16")
 
 _RESOLUTION_FOLDERS: dict[str, tuple[str, str]] = {
@@ -446,7 +446,7 @@ class BenchConfig:
                 raise FileNotFoundError(
                     f"{label} missing at {path} — produce it with `{remedy}`"
                 )
-        self.require_same_engines()
+        self.require_same_engines(system)
 
     #: Flat engine <-> repository plan. The first two are the cross-system pairing: both
     #: sides must load the SAME file or the comparison measures the engines. The embedders
@@ -460,7 +460,7 @@ class BenchConfig:
     )
 
     # doc: long the two halves this guard holds, and why four models rather than two
-    def require_same_engines(self) -> None:
+    def require_same_engines(self, system: str = "both") -> None:
         """Refuse unless each side's engine is byte-identical to the other's.
 
         Existence was all that was checked, and existence is not the property that matters.
@@ -476,6 +476,11 @@ class BenchConfig:
         moved two of four models and said nothing about the two that carry ~9 of the chain's
         ~11.7 invocations per image.
 
+        AND THE EMBEDDER PAIR IS SKIPPED FOR A BASELINE-ONLY RUN, because it has no stake in
+        it -- the baseline loads one model per image and never an embedder. Checking it there
+        would refuse a run over an artefact it does not load, which is the exact shape of the
+        defect this method's caller was fixed for, one level down.
+
         Raises:
             RuntimeError: the two sides would load different engines for a model.
         """
@@ -483,7 +488,11 @@ class BenchConfig:
         repository = resolved.model_repository
         if repository is None:
             return
+        #: Which pairs the baseline has a stake in. Anything else is our side's attribution.
+        cross_system = ("ship_detector", "ship_segmenter")
         for model, attribute in self._ENGINE_PAIRS:
+            if system == "baseline" and model not in cross_system:
+                continue
             flat = getattr(resolved, attribute)
             plan = repository / model / "1" / "model.plan"
             if flat is None or not flat.is_file():
@@ -506,11 +515,19 @@ class BenchConfig:
                 # engine from ONNX after this check has already passed, so the two sides
                 # run different plans and the one property this method claims to enforce
                 # is the one that silently does not hold.
+                # SPLIT BY WHETHER THE BASELINE LOADS IT. Telling an operator "the baseline
+                # loads reid_r50_fp32.engine" is false -- this method's own docstring says the
+                # embedders have no baseline counterpart -- and a false diagnosis is worse than
+                # a vague one when the next line is a command to run.
+                loader = (
+                    "the baseline loads " + flat.name
+                    if model in cross_system
+                    else "this run's precision names " + flat.name
+                )
                 raise RuntimeError(
-                    f"{model}: the baseline loads {flat.name} but the server has no plan at "
-                    f"{plan}. It would build its own from ONNX, and a comparison across two "
-                    f"engines measures the engines. Run "
-                    f"`python scripts/build_engines.py --force` to put one file in both."
+                    f"{model}: {loader} but the server has no plan at {plan}. It would build "
+                    f"its own from ONNX, and a run across two engines measures the engines. "
+                    f"Run `python scripts/build_engines.py --force` to put one file in both."
                 )
             if _digest(flat) != _digest(plan):
                 raise RuntimeError(

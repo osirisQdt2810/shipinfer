@@ -758,19 +758,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--precision",
         # doc: long why int8 is on the builder and NOT here
-        # NO `int8` HERE, and the builder's `--int8` is not an oversight the other way.
-        # `require_inputs` demands the segmenter's plan unconditionally, whichever models the
-        # run loads, and the segmenter DOES NOT BUILD at int8 on this hardware -- TensorRT
-        # finds no implementation for its mask-prototype head. So `--precision int8` could
-        # only ever raise, and it would name a remedy that cannot succeed. A flag that always
-        # fails is worse than an absent one; scoping the engine checks to the models a run
-        # actually loads is the fix that would earn the choice back, and it is its own change.
+        # NO `int8` HERE, and the reason is no longer the one the engine checks used to give.
+        # Those now follow the chain, so a shipinfer-only run at int8 would START -- and it
+        # would measure whatever plan is installed, because our side loads
+        # `model_repository/<name>/1/model.plan` whatever precision it holds and this flag
+        # names the FLAT file. A knob that selects nothing is worse than an absent one, so it
+        # comes back with `BENCH-PRECISION-SELECTS-NO-PLAN` and not before.
         choices=("fp32", "fp16"),
         default="fp32",
         help="which engines the BASELINE loads, and which digest `require_same_engines` then "
-        "holds our side to (`ship_detector` and `ship_segmenter`; the embedders' plans are "
-        "outside that guard). `build_engines.py --fp16` installs them, and a mismatch is "
-        "refused rather than reported as an architecture win.",
+        "holds our side to -- all four models, the embedders as a precision-attribution check "
+        "rather than a cross-system one. `build_engines.py --fp16` installs them, and a "
+        "mismatch is refused rather than reported as an architecture win.",
     )
     p.add_argument("--warmup", type=float, default=10.0, dest="warmup_s")
     p.add_argument("--batch", type=int, default=8)

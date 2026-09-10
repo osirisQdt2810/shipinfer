@@ -200,6 +200,63 @@ class TestBothSidesLoadTheSameEngine:
         with pytest.raises(RuntimeError, match="measures the engines"):
             config.require_same_engines()
 
+    def _repository_without_embedder_plans(self, tmp_path: Path, plan: bytes) -> Path:
+        """The state of the box immediately after a build, BEFORE the reid fanout existed:
+        every flat engine present, det and seg plans installed, the embedders' absent."""
+        root = self._repository(tmp_path, plan)
+        for model in ("person_embedder", "ship_embedder"):
+            (root / model / "1" / "model.plan").unlink()
+        return root
+
+    def test_a_baseline_only_run_is_not_refused_over_an_embedder_plan(
+        self, tmp_path: Path
+    ) -> None:
+        """The defect this fix is for, and it is the shape of the one the PR is named after --
+        an engine check demanding an artefact the run does not load -- one level down, in the
+        guard rather than in `require_inputs`.
+
+        The baseline loads one model per image and never an embedder, so it has no stake in
+        that pair. Refusing it there sent the operator to `build_engines.py --force`, which
+        (before the fanout) installed the reid plan nowhere: the guard failed identically and
+        the loop had no exit but a manual `cp`.
+        """
+        engine = tmp_path / "yolo26n_fp32.engine"
+        engine.write_bytes(b"PLAN-A")
+        config = replace(
+            BenchConfig(
+                det_engine=engine,
+                seg_engine=engine,
+                emb_engine=engine,
+                model_repository=self._repository_without_embedder_plans(tmp_path, b"PLAN-A"),
+            ),
+            person_frames=tmp_path,
+            ship_frames=tmp_path,
+        )
+
+        config.require_inputs("baseline")  # the pair it has no stake in is skipped
+
+        with pytest.raises(RuntimeError, match="person_embedder"):
+            config.require_inputs("shipinfer")
+
+    def test_the_absent_plan_message_does_not_claim_the_baseline_loads_an_embedder(
+        self, tmp_path: Path
+    ) -> None:
+        """A false diagnosis is worse than a vague one when the next line is a command."""
+        engine = tmp_path / "yolo26n_fp32.engine"
+        engine.write_bytes(b"PLAN-A")
+        config = BenchConfig(
+            det_engine=engine,
+            seg_engine=engine,
+            emb_engine=engine,
+            model_repository=self._repository_without_embedder_plans(tmp_path, b"PLAN-A"),
+        )
+
+        with pytest.raises(RuntimeError) as raised:
+            config.require_same_engines("shipinfer")
+
+        assert "the baseline loads" not in str(raised.value)
+        assert "this run's precision names" in str(raised.value)
+
     def test_the_embedders_are_inside_the_guard_too(self, tmp_path: Path) -> None:
         """Not a cross-system check -- the baseline runs no embedder -- but the one that says
         our side loaded the precision that was ASKED for.

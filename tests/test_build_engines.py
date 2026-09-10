@@ -120,24 +120,45 @@ class TestTheInstallWritesThatName:
         version = _repository(tmp_path, "ship_detector", "yolo26n.plan")
         engine = tmp_path / "yolo26n_fp32.engine"
         engine.write_bytes(b"a plan")
-        target = build_engines.Target("ship_detector", tmp_path / "x.onnx", engine, version)
+        target = build_engines.Target("ship_detector", tmp_path / "x.onnx", engine, (version,))
 
         build_engines._install(target, engine)
 
         assert (version / "yolo26n.plan").read_bytes() == b"a plan"
         assert not (version / "model.plan").exists(), "the name nothing would have loaded"
 
-    def test_a_target_with_no_version_dir_installs_nothing(
+    def test_a_target_with_no_version_dirs_installs_nothing(
         self, build_engines: ModuleType, tmp_path: Path
     ) -> None:
-        """`reid` builds a flat engine only, and must not reach the repository at all."""
+        """An empty tuple still means "flat engine only" and must not reach a repository."""
         engine = tmp_path / "reid_r50_fp32.engine"
         engine.write_bytes(b"a plan")
-        target = build_engines.Target("reid", tmp_path / "x.onnx", engine, None)
+        target = build_engines.Target("reid", tmp_path / "x.onnx", engine, ())
 
         build_engines._install(target, engine)
 
         assert list(tmp_path.iterdir()) == [engine]
+
+    def test_one_engine_fans_out_to_every_model_that_loads_it(
+        self, build_engines: ModuleType, tmp_path: Path
+    ) -> None:
+        """`reid` feeds BOTH embedders, and while it fed neither the bench's byte-identity
+        guard refused every run and named `build_engines.py --force` as the remedy -- which
+        printed success, installed nothing, and left the operator looping with no exit but the
+        manual `cp` in the model's own README."""
+        person = _repository(tmp_path, "person_embedder", "model.plan")
+        ship = _repository(tmp_path, "ship_embedder", "model.plan")
+        engine = tmp_path / "reid_r50_fp32.engine"
+        engine.write_bytes(b"one reid plan")
+        target = build_engines.Target("reid", tmp_path / "x.onnx", engine, (person, ship))
+
+        build_engines._install(target, engine)
+
+        assert (person / "model.plan").read_bytes() == b"one reid plan"
+        assert (ship / "model.plan").read_bytes() == b"one reid plan", (
+            "both models that load this engine get it, or the guard refuses a run the "
+            "printed remedy cannot fix"
+        )
 
     def test_an_identical_plan_already_there_is_not_rewritten(
         self, build_engines: ModuleType, tmp_path: Path
@@ -151,7 +172,7 @@ class TestTheInstallWritesThatName:
         before = (version / "yolo26n.plan").stat().st_mtime_ns
 
         build_engines._install(
-            build_engines.Target("d", tmp_path / "x.onnx", engine, version), engine
+            build_engines.Target("d", tmp_path / "x.onnx", engine, (version,)), engine
         )
 
         assert (version / "yolo26n.plan").stat().st_mtime_ns == before
@@ -165,22 +186,33 @@ class TestAgainstTheRealRepository:
         from shipinfer.repository import ModelRepository
 
         models = ModelRepository.load(REPOSITORY)
-        installable = [t for t in build_engines.TARGETS if t.version_dir is not None]
+        installable = [t for t in build_engines.TARGETS if t.version_dirs]
 
         assert installable, "the regex found no target, so this test would pass on anything"
         for target in installable:
-            name = target.version_dir.parent.name
-            assert build_engines._artefact_name(target.version_dir, target.engine) == (
+            version_dir = target.version_dirs[0]
+            name = version_dir.parent.name
+            assert build_engines._artefact_name(version_dir, target.engine) == (
                 models.entry(name).config.engine_file
             )
 
-    def test_a_target_with_no_version_dir_is_never_asked(
+    def test_every_target_installs_somewhere_and_reid_installs_twice(
         self, build_engines: ModuleType
     ) -> None:
-        """`reid` builds a flat engine only; the READMEs carry its two-step copy."""
-        flat_only = [t for t in build_engines.TARGETS if t.version_dir is None]
+        """This test asserted the OPPOSITE and its premise was the defect.
 
-        assert [t.name for t in flat_only] == ["reid"]
+        `reid` used to build a flat engine only, with the two-step copy left to a README --
+        so the bench's byte-identity guard refused every run over a plan that nothing
+        installed, and named `build_engines.py --force` as the remedy. It now feeds both
+        embedders, which is what makes that remedy true.
+        """
+        by_name = {t.name: t for t in build_engines.TARGETS}
+
+        assert all(t.version_dirs for t in build_engines.TARGETS), "none is flat-only now"
+        assert [d.parent.name for d in by_name["reid"].version_dirs] == [
+            "person_embedder",
+            "ship_embedder",
+        ]
 
 
 class TestPrecisionNamesThePlan:
