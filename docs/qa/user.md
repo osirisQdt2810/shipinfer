@@ -1089,6 +1089,27 @@ of the five operator rows are therefore closed, and the items behind them --
 The tracking one is the substantial half: `C1`'s own numbers are all measured on a chain with
 no `track` and no `mtmc`, which the results page states as its largest negative claim.
 
+### V164 · 10 Sep 2026 — không dùng events làm metric; FPS, x5, 4 GPU
+
+> không được, hiện tại tôi đang thấy bạn đang dùng events gì đó để làm metrics, tuyệt đối
+> không - dừng FPS (bao nhiêu image được xử lý trong 1 s để làm metric nhé). target: x5 so với
+> baseline, và chỉ cần chạy trên 4GPU thôi, không chạy trên 5GPU
+
+THIS ANSWERS `C1-WHAT-IS-THE-5x-AGAINST?`, which has been the one blocking question for days.
+Three rulings, all binding:
+1. **The metric is FPS -- images processed per second.** Not events/s, not rows, not rows per
+   host CPU-second. "tuyệt đối không" about the event-based ones, so the ~3.4x/7.17x headline
+   this session built is OUT as the answer, whatever else it is useful for.
+2. **The target is 5x the baseline** on that metric.
+3. **Four GPUs, not five.** Every C1 figure so far was taken on five (1/3/4/5/6), so both arms
+   need re-taking on four.
+
+WHAT THAT MEANS ARITHMETICALLY, stated before measuring rather than after: the baseline is
+~960 img/s SATURATED on five GPUs, so ~770 on four, and 5x that is ~3 850 img/s from this plane
+on four GPUs -- against a design load of 1 000 img/s total. So the target is not "serve the
+fleet"; it is "retire ~4x the fleet's own rate on 80% of the GPUs". Measuring it honestly and
+reporting the number is the job; arguing about it is not.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
