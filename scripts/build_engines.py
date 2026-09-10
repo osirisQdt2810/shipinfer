@@ -341,7 +341,7 @@ def _artefact_name(version_dir: Path, engine: Path) -> str:
 
     THE MODEL NAME COMES FROM THE PATH, `<repository>/<name>/<version>`, and not from
     `Target.name` -- those are not the same thing. `reid` is one target that feeds TWO
-    repository models and has no `version_dir` at all, so a name-keyed lookup would be right
+    repository models, so its own name matches neither and a name-keyed lookup would be right
     for two of the three targets by luck.
 
     Read through `ModelRepository` because that is the reader that already knows; a second

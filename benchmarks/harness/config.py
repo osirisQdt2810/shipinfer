@@ -70,6 +70,33 @@ _RESOLUTION_FOLDERS: dict[str, tuple[str, str]] = {
 }
 
 
+def _artefact_name(repository: Path, model: str) -> str:
+    """The file name THIS model's config asks for, the way the installer resolves it.
+
+    doc: long why the name is read and not assumed
+
+    `parameters.engine_file` is configurable and `scripts/build_engines.py` honours it, so a
+    guard that assumed `model.plan` would look for a file the installer never writes -- raise
+    "run `build_engines.py --force`", have the operator run it successfully, and fail
+    identically. That is the unfixable loop both embedder READMEs describe as the thing this
+    guard's own remedy removes, reproduced one artefact along.
+
+    Refused rather than defaulted on an unreadable repository: guessing `model.plan` here is
+    exactly the defect above, and `require_inputs` has already checked the directory exists.
+    """
+    from shipinfer.core.errors import ShipInferError
+    from shipinfer.repository import ModelRepository
+
+    try:
+        return ModelRepository.load(repository).entry(model).config.engine_file
+    except (ShipInferError, OSError) as error:
+        raise RuntimeError(
+            f"{model}: cannot read {repository} to learn which plan file it loads ({error}), "
+            f"so the two sides' engines cannot be compared. Fix "
+            f"{repository / model / 'config.yaml'} and re-run"
+        ) from None
+
+
 def _digest(path: Path) -> str:
     """SHA-256 of a file, read in chunks — a plan is 100+ MB."""
     digest = hashlib.sha256()
@@ -494,7 +521,7 @@ class BenchConfig:
             if system == "baseline" and model not in cross_system:
                 continue
             flat = getattr(resolved, attribute)
-            plan = repository / model / "1" / "model.plan"
+            plan = repository / model / "1" / _artefact_name(repository, model)
             if flat is None or not flat.is_file():
                 # OUT LOUD rather than skipped in silence: a single-system run may have no
                 # flat engine to compare against, and then nothing verifies which precision
@@ -510,15 +537,16 @@ class BenchConfig:
                     )
                 continue
             if not plan.is_file():
-                # Fails closed. Skipping an absent plan made the guard useless in exactly
-                # the case it exists for: `autobuild` then builds the server its *own*
-                # engine from ONNX after this check has already passed, so the two sides
-                # run different plans and the one property this method claims to enforce
-                # is the one that silently does not hold.
-                # SPLIT BY WHETHER THE BASELINE LOADS IT. Telling an operator "the baseline
-                # loads reid_r50_fp32.engine" is false -- this method's own docstring says the
-                # embedders have no baseline counterpart -- and a false diagnosis is worse than
-                # a vague one when the next line is a command to run.
+                # doc: long the two decisions in this refusal, both learned the hard way
+                # FAILS CLOSED. Skipping an absent plan made the guard useless in exactly the
+                # case it exists for: `autobuild` then builds the server its *own* engine from
+                # ONNX after this check has passed, so the two sides run different plans and
+                # the one property this method enforces silently does not hold.
+                #
+                # AND THE MESSAGE SPLITS BY WHETHER THE BASELINE LOADS IT. "the baseline loads
+                # reid_r50_fp32.engine" is false -- this method's own docstring says the
+                # embedders have no baseline counterpart -- and a false diagnosis is worse
+                # than a vague one when the next line is a command to run.
                 loader = (
                     "the baseline loads " + flat.name
                     if model in cross_system

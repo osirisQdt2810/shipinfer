@@ -83,8 +83,8 @@ class TestTheNameComesFromTheConfig:
     ) -> None:
         """`Target.name` and a repository model name are not the same thing.
 
-        `reid` is one build target feeding TWO repository models, and it has no `version_dir`
-        at all -- so a name-keyed lookup would be right for the other two targets by luck.
+        `reid` is one build target feeding TWO repository models, so its own name matches
+        neither -- and a name-keyed lookup would be right for the other two targets by luck.
         """
         version = _repository(tmp_path, "person_embedder", "reid_r50.plan")
 
@@ -190,11 +190,15 @@ class TestAgainstTheRealRepository:
 
         assert installable, "the regex found no target, so this test would pass on anything"
         for target in installable:
-            version_dir = target.version_dirs[0]
-            name = version_dir.parent.name
-            assert build_engines._artefact_name(version_dir, target.engine) == (
-                models.entry(name).config.engine_file
-            )
+            # EVERY directory, not the first. `reid` has two, and reading only `[0]` left
+            # `ship_embedder`'s `engine_file` unresolved by the one test whose job is catching
+            # a plan installed under a name nothing loads -- weakened exactly where the new
+            # entry was added.
+            for version_dir in target.version_dirs:
+                name = version_dir.parent.name
+                assert build_engines._artefact_name(version_dir, target.engine) == (
+                    models.entry(name).config.engine_file
+                ), name
 
     def test_every_target_installs_somewhere_and_reid_installs_twice(
         self, build_engines: ModuleType

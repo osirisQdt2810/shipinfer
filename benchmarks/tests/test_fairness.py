@@ -12,6 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import yaml
 
 from benchmarks.harness.config import MODULE_MODELS, BenchConfig, read_instances_per_gpu
 
@@ -141,14 +142,31 @@ class TestBothSidesLoadTheSameEngine:
     #: Every model the guard pairs, so the fixture cannot pass by having no plan to check.
     _PAIRED = ("ship_detector", "ship_segmenter", "person_embedder", "ship_embedder")
 
-    def _repository(self, tmp_path: Path, detector: bytes | None) -> Path:
-        """A repository holding a plan for every paired model, or for none of them."""
+    def _repository(
+        self, tmp_path: Path, detector: bytes | None, engine_file: str = "model.plan"
+    ) -> Path:
+        """A repository holding a plan for every paired model, or for none of them.
+
+        WITH A `config.yaml` EACH, because the guard resolves the plan's file name the way the
+        installer does -- through `parameters.engine_file`, which is configurable. A fixture
+        with no config could only ever exercise the assumed name.
+        """
         root = tmp_path / "model_repository"
         for model in self._PAIRED:
             version = root / model / "1"
             version.mkdir(parents=True)
+            config: dict[str, object] = {
+                "name": model,
+                "platform": "tensorrt",
+                "max_batch_size": 4,
+                "inputs": [{"name": "images", "data_type": "FP32", "dims": [3, 640, 640]}],
+                "outputs": [{"name": "output0", "data_type": "FP32", "dims": [300, 6]}],
+            }
+            if engine_file != "model.plan":
+                config["parameters"] = {"engine_file": engine_file}
+            (root / model / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
             if detector is not None:
-                (version / "model.plan").write_bytes(detector)
+                (version / engine_file).write_bytes(detector)
         return root
 
     def _config(self, tmp_path: Path, flat: bytes, plan: bytes) -> BenchConfig:
@@ -256,6 +274,29 @@ class TestBothSidesLoadTheSameEngine:
 
         assert "the baseline loads" not in str(raised.value)
         assert "this run's precision names" in str(raised.value)
+
+    def test_the_guard_looks_for_the_name_the_config_asks_for(self, tmp_path: Path) -> None:
+        """`parameters.engine_file` is configurable and the installer honours it.
+
+        A guard that assumed `model.plan` would look for a file the installer never writes,
+        raise "run `build_engines.py --force`", have the operator run it successfully, and fail
+        identically -- verbatim the unfixable loop both embedder READMEs describe as the thing
+        this guard's own remedy removes.
+        """
+        engine = tmp_path / "yolo26n_fp32.engine"
+        engine.write_bytes(b"PLAN-A")
+        named = BenchConfig(
+            det_engine=engine,
+            seg_engine=engine,
+            emb_engine=engine,
+            model_repository=self._repository(tmp_path, b"PLAN-A", "reid_r50.plan"),
+        )
+
+        named.require_same_engines()  # the plan is under the configured name, and matches
+
+        assert not (
+            tmp_path / "model_repository" / "person_embedder" / "1" / "model.plan"
+        ).exists(), "the fixture wrote the configured name, so this test could fail"
 
     def test_the_embedders_are_inside_the_guard_too(self, tmp_path: Path) -> None:
         """Not a cross-system check -- the baseline runs no embedder -- but the one that says

@@ -942,6 +942,22 @@ def main(argv: list[str] | None = None) -> int:
     runs: list[RunAnalysis] = []
     throughputs: dict[str, SystemThroughput] = {}
 
+    # doc: long why every system's inputs are settled BEFORE any of them runs
+    # BEFORE THE LOOP, and that is the whole promise `require_inputs` makes in its first line:
+    # "fail before a run rather than after 70 s of measuring nothing". Each system calls it for
+    # itself inside the loop, which was enough while both checked the same artefacts -- but the
+    # embedder pair is our side's alone, so on a box whose embedder plans are absent the
+    # BASELINE arm would measure for warmup + seconds (~80 s of GPU time) and only then would
+    # the shipinfer arm refuse, discarding it. A check that fires after the run it was supposed
+    # to precede is worse than the absent one it replaced.
+    try:
+        for system in ("baseline", "shipinfer"):
+            if system in systems:
+                cfg.require_inputs(system)
+    except (RuntimeError, ValueError, FileNotFoundError) as exc:
+        print(f"inputs: {exc}; aborting", file=sys.stderr)
+        return 1
+
     for system in ("baseline", "shipinfer"):
         if system not in systems:
             continue
@@ -952,9 +968,11 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 run, throughput = MEASURE[system](cfg, out_dir)
                 runs.extend(run if isinstance(run, list) else [run])
-        except (RuntimeError, ValueError) as exc:
+        except (RuntimeError, ValueError, FileNotFoundError) as exc:
             # `ValueError` too: `analyse` raises it when the steady window holds fewer
-            # samples than a fit needs, which is a bad configuration rather than a crash.
+            # samples than a fit needs -- a bad configuration rather than a crash. And
+            # `FileNotFoundError`, because an artefact that vanished after the pre-flight
+            # should end with the `aborting` line rather than a traceback.
             print(f"{system}: {exc}; aborting", file=sys.stderr)
             return 1
         throughputs[system] = throughput
