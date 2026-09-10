@@ -148,5 +148,6 @@ exec docker run --rm --pid=host "${GPU_DEVICES[@]}" --shm-size=2g \
     python -c "import pydantic" 2>/dev/null || \
       pip install -q --root-user-action=ignore --no-index --find-links=/wheels \
         pydantic pydantic-settings typer pyyaml >/dev/null 2>&1 || true
-    exec python "${SHIPINFER_BENCH_SCRIPT:-benchmarks/run_bench.py}" "$@"
+    exec python /work/scripts/host_cpu.py --threads --threads-interval 0.5 -- \
+      python "${SHIPINFER_BENCH_SCRIPT:-benchmarks/run_bench.py}" "$@"
   ' bash "$@"

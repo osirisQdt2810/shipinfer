@@ -350,6 +350,58 @@ class TestTheWrapperIsTransparentToTheCommand:
         assert host_cpu.main(["--pid", "1"]) == 2
 
 
+class TestAShardedRunsChildrenCountToo:
+    """`--topology fleet` -- the default runner -- is one PROCESS per GPU, so the threads this
+    instrument exists to name live in a grandchild of the wrapper. Reading only the direct
+    child's task directory reported a few percent of a run and called it `accounted_pct`.
+    """
+
+    #: The child spawns the grandchild and waits: the wrapper's own child owns no named
+    #: thread, so anything found under these names came from walking the tree.
+    _NESTED = (
+        "import subprocess, sys\n"
+        "subprocess.run([sys.executable, '-c', {inner!r}], check=True)\n"
+    )
+    _PLAN = (("shard-0", 0.4), ("shard-1", 0.4))
+
+    def test_a_grandchilds_threads_are_named_in_the_breakdown(
+        self, host_cpu: ModuleType, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "cpu.json"
+        inner = _THREADS.format(plan=repr(self._PLAN))
+        code = host_cpu.main(
+            [
+                "--threads",
+                "--threads-interval",
+                "0.02",
+                "--out",
+                str(out),
+                "--",
+                sys.executable,
+                "-c",
+                self._NESTED.format(inner=inner),
+            ]
+        )
+        assert code == 0
+
+        accounting = json.loads(out.read_text(encoding="utf-8"))
+        assert accounting["threads"].get("shard", {}).get("threads") == 2, accounting["threads"]
+        assert accounting["accounted_pct"] > 50, accounting
+
+    def test_the_walk_names_the_whole_tree_and_survives_a_dead_pid(
+        self, host_cpu: ModuleType
+    ) -> None:
+        """Two claims in one place: a grandchild is reachable, and a pid that has exited is a
+        skipped branch rather than an exception mid-sample."""
+        child = _spinner(SPIN_S)
+        try:
+            tree = host_cpu.process_tree(os.getpid())
+            assert os.getpid() in tree and child.pid in tree, tree
+        finally:
+            child.wait()
+        assert host_cpu.process_tree(2**22) == [2**22]
+
+
 class TestBothArmsAreActuallyWiredToIt:
     """The one link the tests above cannot reach, and it is the link that goes missing.
 
@@ -377,6 +429,17 @@ class TestBothArmsAreActuallyWiredToIt:
         text = self.RUNNER.read_text(encoding="utf-8")
 
         assert "host_cpu.py" in text.split('if [ "$SOURCE" = "replay" ]')[1].split("else")[0]
+
+    def test_the_python_bench_is_wrapped_as_well(self) -> None:
+        """The instrument that produced the C++ finding was on one plane only, so four
+        design-load arms of the Python A/B recorded no `host cpu:` line at all."""
+        text = (ROOT / "deploy" / "rootless" / "bench.sh").read_text(encoding="utf-8")
+
+        statement = text.split("exec python")[1]
+        assert statement.startswith(" /work/scripts/host_cpu.py --threads"), statement[:70]
+        assert (
+            "run_bench.py" in statement.split("--threads-interval")[1].split("'")[0]
+        ), "the wrapper has to be what runs the bench, not a line beside it"
 
     def test_the_number_reaches_the_summary_and_not_only_the_log(self) -> None:
         """`run_cpp_bench.sh` says this in its own words about the `chain` line: it was in

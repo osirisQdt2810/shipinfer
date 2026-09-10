@@ -351,6 +351,29 @@ def last_pipeline_metrics() -> Any:
     return _LAST_METRICS
 
 
+def _announce_blocking_sync(server: Any) -> None:
+    """Say which devices took the blocking-sync knob, and refuse an arm that got none.
+
+    Unconditional, into the run's own output, because the C++ arm prints it from
+    `cli/bench.cpp` and this plane only logged it at INFO under a `SHIPINFER_BENCH_LOG` nobody
+    sets: four design-load arms recorded zero lines about the flag two of them were named
+    after. And refused rather than warned -- a requested-but-unapplied arm is the flag-off arm
+    under another name, which is the one way an A/B misreports its own conditions.
+    """
+    from shipinfer.runtime.device import BLOCKING_SYNC_ENV, blocking_sync_requested
+
+    if not blocking_sync_requested():
+        return
+    applied = tuple(server.devices.blocking_sync)
+    print(f"blocking synchronise on device(s) {list(applied) or 'none'}", flush=True)
+    if not applied:
+        raise RuntimeError(
+            f"{BLOCKING_SYNC_ENV} was set and no visible device took the flag, so this arm "
+            f"is the flag-off arm under another name. The driver refuses "
+            f"cudaSetDeviceFlags once a device has a primary context."
+        )
+
+
 def run_shipinfer(
     config: BenchConfig,
     out_dir: Path | None = None,
@@ -401,6 +424,7 @@ def run_shipinfer(
     settings = _settings(config)
     started_at = time.monotonic()
     server = InferenceServer(settings)
+    _announce_blocking_sync(server)
     server.start(timeout_s=startup_timeout_s) if _accepts_timeout(server) else server.start()
     startup_s = time.monotonic() - started_at
 

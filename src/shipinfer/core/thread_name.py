@@ -34,7 +34,7 @@ def kernel_name(name: str) -> str:
 
 
 def instance_thread_label(name: str) -> str:
-    """The label for a model instance, whose name is ``model_ordinal_device``.
+    """The label for a model instance, whose name is ``model_ordinal_cuda:device``.
 
     THE DEVICE GOES IN THE HEAD, which inverts :func:`kernel_name`'s rule: here the head is
     the SHARED part, since `shipinfer-ship_detector_0_3` cut to fifteen is `shipinfer-ship_`
@@ -46,9 +46,13 @@ def instance_thread_label(name: str) -> str:
     """
     head, _, device = name.rpartition("_")
     model, _, ordinal = head.rpartition("_")
-    if not model or not device.isdigit() or not ordinal.isdigit():
+    # `str(Device.cuda(3))` is `cuda:3`, and that is what `engine/model.py` interpolates --
+    # so the index is the tail of the last field, not the whole field. Reading the field cost
+    # this plane every label: twenty instance threads all fell through to `mdl-<model>`.
+    index = device.rpartition(":")[2]
+    if not model or not index.isdigit() or not ordinal.isdigit():
         return kernel_name(f"mdl-{name}")
-    return kernel_name(f"m{device}.{ordinal}-{model}")
+    return kernel_name(f"m{index}.{ordinal}-{model}")
 
 
 def _resolve() -> Callable[[str], None] | None:

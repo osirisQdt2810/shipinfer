@@ -77,6 +77,34 @@ def thread_cpu(pid: int) -> dict[int, tuple[str, float]]:
     return out
 
 
+def process_tree(pid: int) -> list[int]:
+    """``pid`` and every descendant, from `/proc/<pid>/task/<tid>/children`.
+
+    The default topology spawns one shard PROCESS per GPU (`--topology fleet`), so a sampler
+    reading only the parent's task directory attributes a few percent of a run whose
+    `accounted_pct` then reads as a broken instrument rather than as a missing tree walk.
+    Breadth-first over `children`, which lists a task's *immediate* children only.
+    """
+    seen: list[int] = []
+    pending = [pid]
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.append(current)
+        try:
+            tasks = sorted(Path(f"/proc/{current}/task").iterdir())
+        except OSError:
+            continue  # the process exited between the walk and the read
+        for task in tasks:
+            try:
+                children = (task / "children").read_text(encoding="utf-8")
+            except OSError:
+                continue
+            pending.extend(int(child) for child in children.split())
+    return seen
+
+
 def thread_class(name: str) -> str:
     """The class a thread name belongs to: everything before the discriminator.
 
@@ -96,7 +124,8 @@ class ThreadSampler:
     ticks is missed entirely, so the per-class sum is a LOWER bound on the `wait4` total the
     caller already has. Printing both makes the breakdown's own trustworthiness a number
     rather than a hope -- and the interval is 200 ms because the threads this exists to
-    measure live for the whole run.
+    measure live for the whole run. Walks the process TREE, so a sharded run's children
+    count; that multiplies the /proc reads per tick, which is what the interval is for.
     """
 
     def __init__(self, pid: int, interval_s: float = 0.2) -> None:
@@ -128,10 +157,13 @@ class ThreadSampler:
             self._sample()
 
     def _sample(self) -> None:
-        for tid, (name, cpu) in thread_cpu(self._pid).items():
-            previous = self._seen.get(tid)
-            if previous is None or cpu >= previous[1]:
-                self._seen[tid] = (name, cpu)
+        # Every process in the tree, because a tid is unique host-wide and a shard child's
+        # model threads are the ones this instrument exists to name.
+        for pid in process_tree(self._pid):
+            for tid, (name, cpu) in thread_cpu(pid).items():
+                previous = self._seen.get(tid)
+                if previous is None or cpu >= previous[1]:
+                    self._seen[tid] = (name, cpu)
 
     def by_class(self) -> dict[str, dict[str, float]]:
         """Per class: how much CPU, and how many threads carried it."""

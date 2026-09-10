@@ -180,6 +180,44 @@ class TestItIsAppliedBeforeAnyDeviceHasAContext:
         assert "prefer_blocking_sync" not in pool
 
 
+class TestTheManagerRemembersWhatTookTheFlag:
+    """A flag-on arm that applied to nothing is the flag-off arm, so the bench has to be able
+    to ask. Rounds 2 and 3 of #203 were both that failure; nothing could have detected either.
+    """
+
+    def _manager(self, monkeypatch, applied: tuple[int, ...]) -> object:
+        monkeypatch.setattr(device_module, "device_count", lambda: 2)
+        monkeypatch.setattr(device_module, "memory_info", lambda index: (1, 2))
+        monkeypatch.setattr(device_module, "device_properties", lambda index: f"gpu{index}")
+        monkeypatch.setattr(device_module, "prefer_blocking_sync", lambda devices: applied)
+        return device_module.DeviceManager()
+
+    def test_it_names_the_devices_that_took_it(self, monkeypatch) -> None:
+        monkeypatch.setenv(BLOCKING_SYNC_ENV, "1")
+
+        assert self._manager(monkeypatch, (0, 1)).blocking_sync == (0, 1)
+
+    def test_asked_for_and_refused_reads_empty_rather_than_absent(self, monkeypatch) -> None:
+        """The distinction the caller cannot make for itself: the knob was requested and the
+        driver said no, which looks exactly like a flag-off run from the outside."""
+        monkeypatch.setenv(BLOCKING_SYNC_ENV, "1")
+
+        assert self._manager(monkeypatch, ()).blocking_sync == ()
+
+    def test_unasked_is_empty_and_never_calls_the_driver(self, monkeypatch) -> None:
+        monkeypatch.delenv(BLOCKING_SYNC_ENV, raising=False)
+
+        def refuse(devices: object) -> tuple[int, ...]:
+            raise AssertionError("the default path must not reach for libcudart")
+
+        monkeypatch.setattr(device_module, "device_count", lambda: 1)
+        monkeypatch.setattr(device_module, "memory_info", lambda index: (1, 2))
+        monkeypatch.setattr(device_module, "device_properties", lambda index: "gpu")
+        monkeypatch.setattr(device_module, "prefer_blocking_sync", refuse)
+
+        assert device_module.DeviceManager().blocking_sync == ()
+
+
 class _Out:
     """`cudaGetDevice`'s shape: it answers through an out-parameter, which is the third place
     the #200 prototype trap applies -- an undeclared `POINTER(c_int)` argument is where a

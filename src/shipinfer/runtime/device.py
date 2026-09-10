@@ -64,9 +64,12 @@ class DeviceManager:
         # `cudaSetDeviceFlags` once a context exists, so a call from anywhere further out
         # (`InferenceServer.start`, an instance's `start`) is a no-op that warns 216 per
         # device and leaves the threads spinning -- measured, and the reason this moved.
+        self._blocking_sync: tuple[int, ...] = ()
         if blocking_sync_requested():
-            applied = prefer_blocking_sync(self._visible)
-            _LOG.info("blocking synchronise on device(s) %s", list(applied) or "none")
+            self._blocking_sync = prefer_blocking_sync(self._visible)
+            _LOG.info(
+                "blocking synchronise on device(s) %s", list(self._blocking_sync) or "none"
+            )
         if self._settings.validate_on_start:
             self._validate()
 
@@ -106,6 +109,16 @@ class DeviceManager:
     @property
     def kind(self) -> AcceleratorKind:
         return accelerator_kind()
+
+    @property
+    def blocking_sync(self) -> tuple[int, ...]:
+        """Devices that took `cudaDeviceScheduleBlockingSync`; empty when it was not asked for.
+
+        Asked-for-and-empty is the case a caller wants: the driver refuses the flag once a
+        device has a primary context, so a flag-on arm that applied to nothing IS the flag-off
+        arm under another name (#203 rounds 2-3, both caught before any number existed).
+        """
+        return self._blocking_sync
 
     @property
     def visible_gpus(self) -> tuple[int, ...]:
