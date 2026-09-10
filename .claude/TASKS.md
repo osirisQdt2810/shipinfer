@@ -1876,8 +1876,17 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE HERE because the C++ plane is the one the measurement was taken on, and a
       Python A/B needs its own before/after at the design load to claim anything.
 
-- [~] **BOTH-PLANES-SHOULD-REPORT-THE-SAME-LATENCY-WINDOW · PR #211 IN REVIEW (10 Sep)
-      closes half (b) and #210's two nits with it. HALF (a) STAYS OPEN.**
+- [~] **BOTH-PLANES-SHOULD-REPORT-THE-SAME-LATENCY-WINDOW · half (b) MERGED as #211
+      (10 Sep) with #210's two nits. HALF (a) IS BUILT AND WAITING TO OPEN.**
+      #211 TOOK THREE ROUNDS AND EACH FOUND SOMETHING REAL. Round 1: a fabricated
+      `camera="unknown"` on a branch that cannot fire (the tag rule), a duplicated reader,
+      an `observe` above the `try` that resolves the future, and a `# doc: long` marker my
+      inserted class had stolen. Round 2 was the sharpest: **the figure never left the
+      harness** -- written into the snapshot twice a run and read ZERO times, so the arm
+      this was meant to make comparable printed no latency at all. Round 3 approved with a
+      nit worth carrying: `HistogramCell.quantile` returns the BUCKET UPPER EDGE, so the
+      printed p50 is systematically ~24% high beside the C++ plane's exact figure -- a
+      reader would read a rounding artefact as this plane being slower. RIDES WITH (a).
       (b) DONE in #211: `shipinfer_pipeline_reassembly_us` on the STAGE bucket edges (this
       window runs tens to hundreds of ms, where `_E2E_BUCKETS_US` steps 2-2.5x and a p50
       would say only "somewhere in 50-100 ms" -- the argument that file's own comment makes
