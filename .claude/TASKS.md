@@ -2700,7 +2700,16 @@ hook down, for when the operator asked to see something before it is executed.
       is not a convenience here, it is the only method that works, and `compare()`'s CPU column
       would have nothing to fill both halves of in one run.
 
-- [ ] MTMC-IDENTITY-PARITY-IS-NOT-COMMITTED · the C++ `GlobalIdAssigner` was verified against
+- [x] MTMC-IDENTITY-PARITY-IS-NOT-COMMITTED · DONE, same day. `benchmarks/parity/
+      scenarios/identity/basic.txt` is read by both planes, `golden/identity/basic.txt` is what
+      `shipvision.mtmc.identity` answered to it, `drive_identity.py` + `--kind identity` on
+      `emit_parity_golden.py` regenerate it, and `csrc/tests/test_identity_parity.cpp` replays
+      the scenarios and compares line by line (4 checks). Line-oriented and not JSON because
+      the C++ side reads it in a test binary with no JSON parser. AND THE GATE CAN FAIL, which
+      is the half worth checking: perturbing one id in the golden gives "line 2 differs /
+      reference: cam1#7=1 / port: cam1#7=0" and exit 1. It also asserts the golden carries its
+      own emitter command, because a golden nobody can regenerate is one that gets hand-edited
+      the first time it fails. ORIGINAL: the C++ `GlobalIdAssigner` was verified against
       `shipvision.mtmc.identity` over twelve scenarios and the answers were byte-identical, but
       the harness that proved it is a scratch driver plus a JSON scenario file, not a committed
       golden. It belongs beside the plan golden: a `--kind identity` in
