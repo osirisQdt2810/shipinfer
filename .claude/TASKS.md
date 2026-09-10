@@ -1904,7 +1904,21 @@ hook down, for when the operator asked to see something before it is executed.
       contains, because round 2 REFRAMED it and I updated the round-2 section without
       reconciling the list above it. The grep-the-body rule has to be re-run after every round,
       not only before the first push.
-- [~] **DOES-THE-KNOB-MOVE-C1? · RUNNING (10 Sep): nine runs, three passes, rotated.**
+- [~] **DOES-THE-KNOB-MOVE-C1? · RUNNING (10 Sep): nine runs, three passes, rotated. FIVE
+      DONE AND THE ANSWER IS LARGE.** On #190's own definition -- ours = summed
+      `per_device_rows` over `command_cpu_s`, baseline = the HARNESS's `baseline host cpu:`
+      line (`RUSAGE_CHILDREN` around the run window, which is what #190 divided by; the
+      wrapper's `command_cpu_s` covers `run_bench.py` itself and is 4.5 CPU-s larger):
+        base_a  501.9 CPU-s   83.0 rows/CPU-s     <- #190 measured 87.2 / 113.0 / 84.2
+        a_off   783.7 CPU-s  294.5   -> 3.55x     <- #190's mean was 3.94x, so the CONTROL
+        a_on    419.8 CPU-s  670.5   -> 8.08x        reproduces and the method is sound
+        b_off   624.9 CPU-s  263.7
+        b_on    428.0 CPU-s  666.7
+      THE KNOB IS 2.28x ON THIS METRIC IN PASS a AND 2.53x IN PASS b, and it moves BOTH terms:
+      CPU 783.7 -> 419.8 (-46%) and rows 230 801 -> 281 472 (+22%), which compound.
+      AND THE FLAG-ON ARM IS THE STABLE ONE: 670.5 against 666.7 (0.6% apart) while flag-off
+      swings 294.5 / 263.7 with the box's load -- which is what a spin does, since a spinning
+      wait costs whatever contention is available to lose.
       PREREQUISITE FOUND THE HARD WAY: `csrc/build/bench` in this checkout was built 9 Sep
       22:37, BEFORE #202 added the flag, so the first nvdec smoke printed no announce line
       and the arm would have been measured flag-off in both arms. And a plain
