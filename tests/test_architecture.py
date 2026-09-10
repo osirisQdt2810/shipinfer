@@ -1128,7 +1128,15 @@ class TestTheCppTiersGatePullRequests:
         shared = self._load("cpp.yml")
         # `on:` parses as the boolean True in YAML 1.1, which is why this reads it that way.
         assert "workflow_call" in (shared.get("on") or shared[True])
-        assert set(shared["jobs"]) == {"cpp-offline", "cpp-syntax", "cpp-gst-lane"}
+        # An EXACT set, so a tier deleted is caught: the gate is one line of YAML and nothing
+        # else would notice its removal. Adding a tier is therefore a deliberate edit here,
+        # which is the cost of that property and not an oversight.
+        assert set(shared["jobs"]) == {
+            "cpp-offline",
+            "cpp-syntax",
+            "cpp-gst-lane",
+            "cpp-shipvision-lane",
+        }
         for caller in ("ci.yml", "pr-pipeline.yml"):
             jobs = self._load(caller)["jobs"]
             assert "cpp" in jobs, f"{caller} does not run the C++ tiers"

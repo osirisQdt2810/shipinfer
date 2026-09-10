@@ -53,6 +53,57 @@ jobs:
             "$binary"
           done
 
+  cpp-shipvision-lane:
+    name: C++ tracking lane (the kernels submodule, no driver)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Deliberately false, then the submodule by NAME below. `submodules: recursive`
+          # also pulls `benchmarks/baseline` — a third-org SSH remote this runner cannot
+          # read — and one failing submodule aborts the whole checkout. Same reasoning, and
+          # the same two red mains, as ci.yml's kernels job (27 Aug).
+          submodules: false
+      - name: Check out the kernels only
+        # Without this the submodule directory is an empty placeholder, the lane refuses
+        # itself with its own hint, and this job would pass having built nothing — which is
+        # exactly the shape of `CSRC-BENCH-UNCOMPILED`. The count guard below is the other
+        # half of that.
+        #
+        # The rewrite is because .gitmodules records the SSH remote (the house rule for
+        # humans) and a plain runner has no deploy key; shipvision is public, so anonymous
+        # https is the right transport here.
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init --depth 1 3rdparty/shipvision
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the tracking lane with g++ alone
+        # NO nvcc AND NO -dev PACKAGE, which is the point of this job existing separately:
+        # shipvision's C++ ByteTrack is four `.cpp` files and one include path, so the
+        # correctness-critical half of tracking — one tracker per camera and the ordering
+        # guard, where a failure is an invented identity and not an error — is provable on a
+        # machine with no driver. ADR-001's promise, reaching somewhere it was not obvious.
+        run: python scripts/build_csrc.py --offline --with-external shipvision
+      - name: Run the tracking binaries
+        run: |
+          set -e
+          # By glob and then counted, for the same reason as the offline tier above: a
+          # renamed binary must not silently stop being run. `-ge 1` rather than a name,
+          # because this lane owns one test binary today and adding a second is a new file
+          # rather than an edit here.
+          binaries=()
+          for candidate in csrc/build/test_tracking_*; do
+            [[ -x "$candidate" && "$candidate" != *.o ]] && binaries+=("$candidate")
+          done
+          test "${#binaries[@]}" -ge 1 || { echo "the shipvision lane built no test_tracking_* binary; the lane refused itself or the glob is wrong"; exit 1; }
+          for binary in "${binaries[@]}"; do
+            echo "== $binary"
+            "$binary"
+          done
+
   cpp-syntax:
     name: C++ units nothing else compiles (headers only, no driver)
     runs-on: ubuntu-latest

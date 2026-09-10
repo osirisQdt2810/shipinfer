@@ -68,6 +68,14 @@ namespace shipinfer {
             {"gstreamer", {"gstreamer", "gst"}},
             {"nvdec", {"nvdec", "nvv12", "cuvid"}},
             {"opencv", {"replay", "file", "video"}},
+            // EMPTY, and the emptiness is the statement rather than an omission: the
+            // `shipvision` lane carries the per-camera tracker, not a video source, so a
+            // binary built without it is missing no `source:` name and this lookup must not
+            // claim otherwise. The row is here because the two tables have to agree -- a lane
+            // in only one of them is what `TestTheLaneTablesAgree` exists to catch -- and the
+            // test asserts this row is empty BECAUSE the lane's units register nothing, so an
+            // empty row can never hide a source somebody forgot to list.
+            {"shipvision", {}},
         };
         // Bracketed with commas at both ends so a lane name is matched whole: without it,
         // "opencv" would match a lane list containing "opencv-contrib" one day.

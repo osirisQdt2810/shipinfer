@@ -48,7 +48,10 @@ def cpp_table() -> dict[str, set[str]]:
     body = re.search(r"kTable = \{(.*?)\};", text, re.DOTALL)
     assert body is not None, f"no kTable initialiser in {LANES_HEADER}"
     table = {
-        lane: {name.strip().strip('"') for name in names.split(",")}
+        # `if name.strip()` because `{}` -- a lane that owns no video source, which
+        # `shipvision` is -- otherwise splits to one EMPTY STRING and the row compares unequal
+        # to the empty set it means. No lane had an empty row until one did.
+        lane: {name.strip().strip('"') for name in names.split(",") if name.strip()}
         for lane, names in re.findall(r'\{"([^"]+)",\s*\{([^}]*)\}\}', body.group(1))
     }
     assert table, "kTable parsed as empty; the regex and the header have diverged"
@@ -83,15 +86,23 @@ class TestTheLaneTablesAgree:
             registered: set[str] = set()
             for unit in spec.units:
                 found = registrar.findall((CSRC / unit).read_text())
-                assert found, f"no SourceRegistrar found in {unit} (lane '{lane}')"
                 for name, aliases in found:
                     registered.add(name)
                     registered |= {
                         a.strip().strip('"') for a in aliases.split(",") if a.strip()
                     }
+            # A lane need not own a video source (`shipvision` carries the tracker), and the
+            # empty row saying so is CHECKED rather than tolerated: the assertion is
+            # symmetric, so an empty row is right only when the units register nothing.
             assert cpp_table[lane] == registered, (
                 f"lane '{lane}': omitted_lanes.h lists {sorted(cpp_table[lane])}, but "
                 f"{', '.join(spec.units)} registers {sorted(registered)}"
+                + (
+                    ". An empty row is right only for a lane that registers no source at "
+                    "all; this one registers some."
+                    if registered and not cpp_table[lane]
+                    else ""
+                )
             )
 
 
@@ -276,3 +287,75 @@ class TestTheDefineSaysWhatIsMissing:
         (define,) = build_csrc.lane_defines(frozenset())
         _, _, value = define.partition("=")
         assert value.startswith('"') and value.endswith('"')
+
+
+class TestTheInTreeLaneAxis:
+    """A lane may be a submodule rather than a ``pkg-config`` package, and one is.
+
+    The axis exists because `3rdparty/shipvision` is a pinned submodule (ADR-010) with no
+    `.pc` file, and the alternative — checking a generated `.pc` into the tree to satisfy a
+    build script — is a build artefact pretending to be source. Both halves are asserted here
+    because getting one right and the other wrong is silent: an include root with no sources
+    compiles and fails at the link, and sources with no include root fail on the link line
+    having compiled cleanly (which is what happened while writing this).
+    """
+
+    def test_exactly_the_in_tree_lanes_carry_a_root_and_sources_together(
+        self, build_csrc: ModuleType
+    ) -> None:
+        for lane, spec in build_csrc.EXTERNAL.items():
+            has_root, has_sources = bool(spec.include_root), bool(spec.sources)
+            assert has_root == has_sources, (
+                f"lane '{lane}' sets only one of include_root/sources. An include root with "
+                f"no sources links against nothing; sources with no root fail on the link "
+                f"line after compiling cleanly."
+            )
+            assert not (has_root and spec.packages), (
+                f"lane '{lane}' is both in-tree and pkg-config. Pick one: the flags come "
+                f"from the filesystem or from pkg-config, and both would double the -I."
+            )
+
+    def test_an_in_tree_lanes_include_root_reaches_the_link_line(
+        self, build_csrc: ModuleType
+    ) -> None:
+        """The bug this caught: `link_flags` dropped every `-I`, so the lane's own sources
+        were compiled on the link line without their headers. Four `fatal error:`s on a link
+        whose compile step had been perfectly happy."""
+        in_tree = [n for n, s in build_csrc.EXTERNAL.items() if s.include_root]
+        if not in_tree:
+            pytest.skip("no in-tree lane to check; the axis is unused")
+        for lane in in_tree:
+            if not (ROOT / build_csrc.EXTERNAL[lane].include_root).is_dir():
+                pytest.skip(f"{lane}'s submodule is not checked out here")
+            flags = build_csrc.link_flags({lane})
+            assert any(f.startswith("-I") for f in flags), (
+                f"lane '{lane}' contributes sources to the link but no -I, so g++ compiles "
+                f"them there without their own headers"
+            )
+            assert any(
+                f.endswith(".cpp") for f in flags
+            ), f"lane '{lane}' declares sources but none reach the link line"
+
+    def test_a_missing_submodule_is_refused_by_name_with_its_hint(
+        self, build_csrc: ModuleType, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A submodule nobody checked out must read as "this lane is unavailable" — the same
+        `SystemExit` a missing `-dev` package gives, because every caller already treats that
+        as the answer. Silence here would compile the unit and fail on the header."""
+        lane = next((n for n, s in build_csrc.EXTERNAL.items() if s.include_root), None)
+        if lane is None:
+            pytest.skip("no in-tree lane to check")
+        spec = build_csrc.EXTERNAL[lane]
+        monkeypatch.setattr(
+            build_csrc,
+            "EXTERNAL",
+            {
+                **build_csrc.EXTERNAL,
+                lane: spec._replace(include_root="3rdparty/definitely-not-checked-out"),
+            },
+        )
+        monkeypatch.setattr(build_csrc, "_PKG_CONFIG_CACHE", {})
+        with pytest.raises(SystemExit) as raised:
+            build_csrc.pkg_config_flags(lane)
+        assert "definitely-not-checked-out" in str(raised.value)
+        assert "git submodule update --init" in str(raised.value), "the hint has to travel"
