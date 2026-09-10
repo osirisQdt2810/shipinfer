@@ -38,10 +38,10 @@ GENERATOR_PIDFILE_ENV = "SHIPINFER_HOST_CPU_PIDFILE"
 def declare_generator(pid: int | None = None) -> bool:
     """Say that a process generates load rather than serving it. False if nobody is asking.
 
-    Called BY the generator, not by whoever spawned it: the RTSP servers run inside the bench
-    container (the rootless daemon has no NAT), so they are children of the bench and their
-    CPU is already inside `wait4`'s rusage. Self-declaration also means a generator started
-    some other way is discounted without a second wiring.
+    Called by the SPAWNER -- `benchmarks/harness/rtsp.py` passes each `Popen.pid` -- because
+    those servers run inside the bench container (the rootless daemon has no NAT) and are
+    therefore children of the bench, already inside `wait4`'s rusage. The no-argument form
+    declares the caller, for a generator that would rather say so itself.
     """
     path = os.environ.get(GENERATOR_PIDFILE_ENV)
     if not path:
@@ -51,8 +51,8 @@ def declare_generator(pid: int | None = None) -> bool:
     return True
 
 
-def ticks_from_stat(line: str) -> float:
-    """The `utime + stime` ticks in one `/proc/<pid>/stat` line.
+def ticks_from_stat(line: str, *, with_children: bool = False) -> float:
+    """The `utime + stime` ticks in one `/proc/<pid>/stat` line, optionally plus its children'.
 
     Parsed from the LAST `)` rather than by splitting on spaces: field 2 is the executable
     name in parentheses, and it can contain both -- `python (old)` is a legal `comm`, and so
@@ -61,26 +61,41 @@ def ticks_from_stat(line: str) -> float:
     """
     fields = line[line.rindex(")") + 2 :].split()
     # `stat` field 14 is utime and 15 is stime, 1-indexed; field 3 is the first after `comm`.
-    return float(fields[11]) + float(fields[12])
+    total = float(fields[11]) + float(fields[12])
+    if with_children:
+        # 16 and 17, cutime/cstime: what this process's REAPED children used. `wait4` already
+        # charges the command that way, so a generator measured without it is measured on a
+        # different rule from the total it is subtracted from.
+        total += float(fields[13]) + float(fields[14])
+    return total
 
 
 def cpu_seconds(pid: int) -> float | None:
-    """CPU-seconds this process has used, or ``None`` if it is gone.
+    """CPU-seconds this process and its reaped children have used, or ``None`` if it is gone.
 
     ``None`` and not ``0.0``: a server that exited early used its CPU and then vanished, and
     reporting that as zero would silently discount the very cost this measures.
+
+    CHILDREN INCLUDED, because every caller is measuring a load *generator* and a generator
+    that forks is still generator cost: `scripts/rtsp_serve.py` shells out to `ffmpeg` for the
+    whole JPEG set whenever the `.h264` fixture is cold, which on a fresh tree is the largest
+    single piece of it -- and it was landing in the bench's column.
     """
     try:
         line = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except OSError:
         return None
-    return ticks_from_stat(line) / TICKS_PER_SECOND
+    return ticks_from_stat(line, with_children=True) / TICKS_PER_SECOND
 
 
 def thread_cpu(pid: int) -> dict[int, tuple[str, float]]:
     """``{tid: (name, cpu_seconds)}`` for one process, from `/proc/<pid>/task/`.
 
-    The same two fields :func:`cpu_seconds` reads, one directory deeper. `comm` separately
+    The process's OWN two fields, without `cutime`/`cstime`: the kernel maintains those only
+    for a thread group's leader, so including them here would charge every reaped child to
+    whichever thread happened to wait for it and inflate the breakdown's total.
+
+    One directory deeper than :func:`cpu_seconds`, and `comm` separately
     rather than out of `stat`: a thread name can contain a `)` and the parse below already
     keys on the LAST one, so reading the name from its own file is both simpler and exact.
     """
@@ -167,8 +182,6 @@ class ThreadSampler:
         #: Threads whose tid was reused, as (pid, tid, name, cpu). A LOWER reading than the
         #: one stored is a new thread on a recycled id, not a counter going backwards.
         self._retired: list[tuple[int, int, str, float]] = []
-        #: Generators already accounted for, so a new declaration is noticed exactly once.
-        self._declared: frozenset[int] = frozenset()
         #: Lifetime CPU of each generator the bench spawned, sampled while it is still alive
         #: -- it dies with the bench, so there is no reading it afterwards.
         self._generator_cpu: dict[int, float] = {}
@@ -210,11 +223,11 @@ class ThreadSampler:
 
     def _sample(self) -> None:
         generators = self._generator_pids()
-        if generators - self._declared:
-            # A generator is declared only once its pid EXISTS, so a tick can precede the
-            # declaration and leave its threads in the table. Forget them when it arrives.
-            self._forget(generators)
-            self._declared = generators
+        # EVERY tick, not only when the set grows. A generator is declared once its pid
+        # exists, so a tick can precede the declaration -- and `_generator_pids` answers with
+        # an empty set on `OSError`, so one unreadable tick can re-add threads a growth-only
+        # guard would then never purge again. It is a comprehension over a few hundred tids.
+        self._forget(generators)
         for pid in generators:
             cpu = cpu_seconds(pid)
             if cpu is not None:
@@ -333,6 +346,10 @@ def report(
     `cores` is here because CPU-seconds alone cannot say whether a host was saturated: 300
     CPU-seconds over 70 s is four busy cores on this 48-core box and an impossibility on a
     two-core one.
+
+    ABSENT AND EMPTY MEAN DIFFERENT THINGS. With no sampler there is no `spawned_generators`
+    key at all -- "not measured" -- while an empty one is "measured, and there were none". A
+    zero would be a claim an unsampled run cannot make, and `bench_cpu_s` with it.
     """
     generator_cpu_s = sum(value for value in generators.values() if value == value)
     accounting = {
