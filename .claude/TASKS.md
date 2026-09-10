@@ -1876,7 +1876,7 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE HERE because the C++ plane is the one the measurement was taken on, and a
       Python A/B needs its own before/after at the design load to claim anything.
 
-- [ ] **THE-BENCH-REPORTS-NO-LATENCY-AT-ALL · the gap the knob measurement exposed (10 Sep).**
+- [~] **THE-BENCH-REPORTS-NO-LATENCY-AT-ALL · the gap the knob measurement exposed (10 Sep).**
       `cli/bench` prints 18 counters and NOT ONE latency figure. `grep -nE "p50|p99|latency|
       percentile" .artifacts/cpp/k1_a_on.log` is empty; the only proxy is
       `collector_timeouts`, which is why `DOES-THE-KNOB-MOVE-C1?` could say "no evidence of a
