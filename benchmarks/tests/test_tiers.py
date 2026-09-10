@@ -242,6 +242,52 @@ class TestTheProfileReadsOneWindow:
         assert steady.quantile(0.5) >= 2000.0  # the bucket that holds 2000, not the 100s
         assert read_cell(histogram, stage="detect").mean == pytest.approx(860.0)  # whole run
 
+    def test_the_precision_knob_moves_both_sides_or_neither(self) -> None:
+        """A knob that moved only the baseline's engine would be the exact hazard
+        `require_same_engines` was written about -- "a plan built fp16 against the baseline's
+        fp32 is roughly a 2x architecture win that nothing in the harness could detect".
+
+        So this asserts the two things that make it safe: the default names carry the suffix,
+        and an explicit engine still overrides it.
+        """
+        from benchmarks.harness.config import BenchConfig
+
+        fp32 = BenchConfig().resolved()
+        fp16 = BenchConfig(precision="fp16").resolved()
+
+        assert fp32.det_engine is not None and fp32.det_engine.name == "yolo26n_fp32.engine"
+        assert fp16.det_engine is not None and fp16.det_engine.name == "yolo26n_fp16.engine"
+        assert fp16.seg_engine is not None and fp16.seg_engine.name == "yolo26n-seg_fp16.engine"
+
+    def test_an_explicit_engine_still_wins_over_the_precision(self) -> None:
+        from pathlib import Path as _Path
+
+        from benchmarks.harness.config import BenchConfig
+
+        named = BenchConfig(precision="fp16", det_engine=_Path("/tmp/some.engine")).resolved()
+
+        assert named.det_engine == _Path("/tmp/some.engine")
+
+    def test_the_precision_survives_the_process_hop(self) -> None:
+        """`shards.py` writes `as_dict()` and each child rebuilds from it, so a field missing
+        there comes back as its default in every shard."""
+        from benchmarks.harness.config import BenchConfig
+
+        rebuilt = BenchConfig.from_dict(BenchConfig(precision="fp16").as_dict())
+
+        assert rebuilt.precision == "fp16"
+
+    def test_a_precision_the_bench_cannot_load_is_refused_at_construction(self) -> None:
+        """Not only by argparse: a config built in process -- a shard child, a sweep, a test --
+        would otherwise fail late as a missing engine file rather than early with the reason.
+        `int8` is the case that matters, because the BUILDER offers it and the bench cannot."""
+        import pytest as _pytest
+
+        from benchmarks.harness.config import BenchConfig
+
+        with _pytest.raises(ValueError, match="precision must be one of"):
+            BenchConfig(precision="int8")
+
     def test_every_label_is_summed_when_the_label_is_not_the_question(self) -> None:
         """`read_total`, which the reassembly window needs: it is observed per camera like
         everything else on that plane, and compared against a C++ figure that is ONE

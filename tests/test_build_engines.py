@@ -183,6 +183,77 @@ class TestAgainstTheRealRepository:
         assert [t.name for t in flat_only] == ["reid"]
 
 
+class TestPrecisionNamesThePlan:
+    """One precision, one file name. Overwriting is how two runs compare different engines."""
+
+    def test_each_precision_gets_its_own_name(self, build_engines: ModuleType) -> None:
+        target = build_engines.TARGETS[0]
+
+        names = {
+            p: build_engines._engine_path(target, p).name for p in build_engines.PRECISIONS
+        }
+
+        assert names == {
+            "fp32": "yolo26n_fp32.engine",
+            "fp16": "yolo26n_fp16.engine",
+            "int8": "yolo26n_int8.engine",
+        }
+
+    def test_fp16_and_int8_together_is_refused_rather_than_ordered(self) -> None:
+        """Not a precedence rule. Both reads as "both", and both is what int8 already does
+        per layer, so the two spellings cannot be told apart from a mistake."""
+        done = subprocess.run(
+            [sys.executable, str(SCRIPT), "--fp16", "--int8", "--check"],
+            capture_output=True,
+            text=True,
+            env=checkout_env(),
+        )
+
+        assert done.returncode == 2, done.stdout
+        assert "ambiguous" in done.stderr
+
+
+class TestTheCalibrationSetIsBOTHSubjects:
+    """A scale chosen with no ship in it is the preprocessing trap by a different door."""
+
+    def test_the_folders_are_interleaved_and_not_concatenated(
+        self, build_engines: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        people, ships = tmp_path / "person", tmp_path / "ship"
+        for folder, count in ((people, 4), (ships, 2)):
+            folder.mkdir()
+            for index in range(count):
+                (folder / f"{index}.jpg").write_bytes(b"")
+        monkeypatch.setattr(build_engines, "CALIBRATION_DIRS", (people, ships))
+
+        files = build_engines._calibration_files()
+
+        # A truncated set still holds both: person, ship, person, ship, then the people left.
+        assert [f.parent.name for f in files] == [
+            "person",
+            "ship",
+            "person",
+            "ship",
+            "person",
+            "person",
+        ]
+
+    def test_an_embedders_crop_keeps_the_engines_aspect_ratio(
+        self, build_engines: ModuleType
+    ) -> None:
+        """A stand-in for a detection, and not a letterboxed frame: calibrating an embedder on
+        1080p with grey bars would put bars in every calibration image and none in a served
+        one."""
+        numpy = pytest.importorskip("numpy")
+        frame = numpy.zeros((1080, 1920, 3), dtype=numpy.uint8)
+
+        cropped = build_engines._centre_crop(frame, (256, 128))
+
+        height, width = cropped.shape[:2]
+        assert (height, width) == (1080, 540)
+        assert abs(width / height - 128 / 256) < 0.01
+
+
 class TestABuildIsGatedAndInspectionIsNot:
     """CLAUDE.md's list of what must run in a container names "any engine build".
 
@@ -200,11 +271,11 @@ class TestABuildIsGatedAndInspectionIsNot:
         def gate(what: str) -> None:
             seen.append(f"gate:{what}")
 
-        def report(fp16: bool) -> int:
+        def report(precision: str) -> int:
             seen.append("report")
             return 0
 
-        def build(targets: tuple[object, ...], *, fp16: bool, force: bool) -> int:
+        def build(targets: tuple[object, ...], *, precision: str, force: bool) -> int:
             seen.append("build")
             return 0
 

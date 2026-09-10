@@ -755,6 +755,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--fps", type=float, default=20.0)
     p.add_argument("--gpus", default="2,3,4,5", help="physical CUDA ordinals, comma separated")
     p.add_argument("--seconds", type=float, default=70.0)
+    p.add_argument(
+        "--precision",
+        # doc: long why int8 is on the builder and NOT here
+        # NO `int8` HERE, and the builder's `--int8` is not an oversight the other way.
+        # `require_inputs` demands the segmenter's plan unconditionally, whichever models the
+        # run loads, and the segmenter DOES NOT BUILD at int8 on this hardware -- TensorRT
+        # finds no implementation for its mask-prototype head. So `--precision int8` could
+        # only ever raise, and it would name a remedy that cannot succeed. A flag that always
+        # fails is worse than an absent one; scoping the engine checks to the models a run
+        # actually loads is the fix that would earn the choice back, and it is its own change.
+        choices=("fp32", "fp16"),
+        default="fp32",
+        help="which engines the BASELINE loads, and which digest `require_same_engines` then "
+        "holds our side to (`ship_detector` and `ship_segmenter`; the embedders' plans are "
+        "outside that guard). `build_engines.py --fp16` installs them, and a mismatch is "
+        "refused rather than reported as an architecture win.",
+    )
     p.add_argument("--warmup", type=float, default=10.0, dest="warmup_s")
     p.add_argument("--batch", type=int, default=8)
     p.add_argument(
@@ -873,6 +890,7 @@ def main(argv: list[str] | None = None) -> int:
         gpus=tuple(int(g) for g in args.gpus.split(",") if g.strip()),
         batch=args.batch,
         seconds=args.seconds,
+        precision=args.precision,
         warmup_s=args.warmup_s,
         resolution=args.resolution,
         source=args.source,

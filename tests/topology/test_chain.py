@@ -1708,6 +1708,48 @@ class TestClassesAreCheckedAgainstWhatTheDetectorEmits:
             )
 
 
+class TestTheDetectOnlyChainFile:
+    """``topology/detect_only.yaml``: one model per image, for measurement only.
+
+    It ships, so it needs the test its siblings have -- a typo in `impl:` or a caps mismatch
+    would otherwise reach a reader before it reached CI. What it is FOR is priced elsewhere
+    (the four-model chain runs 11.74 model invocations per image and this one runs 1.00), and
+    the number that comparison produces is only honest if both files load the same way.
+    """
+
+    PATH = REPO_ROOT / "topology" / "detect_only.yaml"
+
+    def test_it_loads_and_holds_one_model(self) -> None:
+        chain = Topology.from_file(self.PATH)
+
+        assert chain.name == "detect_only"
+        assert [node.name for node in chain.nodes] == ["decode", "detect", "output"]
+        assert [node.name for node in chain.sinks] == ["output"]
+
+    def test_the_detector_is_configured_exactly_as_the_four_model_chain_configures_it(
+        self,
+    ) -> None:
+        """The whole point of the file: the detector's work per frame must be the SAME.
+
+        A different threshold or a different `max_detections` here would make the ratio
+        between the two chains a measurement of the config rather than of the stages.
+        """
+        one = Topology.from_file(self.PATH).node("detect")
+        four = Topology.from_file(REPO_ROOT / "topology" / "ship_person_cpu.yaml").node(
+            "detect"
+        )
+
+        assert one.spec.model == four.spec.model == "ship_detector"
+        assert one.spec.params == four.spec.params
+
+    def test_it_carries_no_stage_the_measurement_does_not_price(self) -> None:
+        """No tracker, no mtmc, no crop consumers -- so `1 stage(s)` is what the bench reports
+        and the comparison is against a chain whose extra stages are all accounted for."""
+        names = {node.name for node in Topology.from_file(self.PATH).nodes}
+
+        assert names.isdisjoint({"segment", "embed_ship", "embed_person", "track", "mtmc"})
+
+
 class TestTheRunnableChainFile:
     """``topology/ship_person_cpu.yaml``: the sibling that loads on this host today."""
 
