@@ -1891,7 +1891,16 @@ hook down, for when the operator asked to see something before it is executed.
           records it into NO metric, so it owes `reassembly_us` for the like-for-like half.
       (b) IS THE CHEAP ONE and gives the parity harness something to assert; (a) is the one the
       operator's latency requirement actually names.
-- [~] **THE-BENCH-REPORTS-NO-LATENCY-AT-ALL · PR #210 IN REVIEW (10 Sep).**
+- [x] **THE-BENCH-REPORTS-NO-LATENCY-AT-ALL · MERGED as #210 (10 Sep).**
+      #210's THREE NITS, and two are worth doing: (1) "nearest-rank" is the wrong label --
+      the formula is `round(p*(n-1))`, numpy's `interpolation="nearest"`, which differs from
+      classic nearest-rank at p50 of 1..100 (51 against 50). Tested and fine; the WORD is
+      loose, and a reader comparing against another tool's p50 needs to know which
+      convention. (2) `report_latency` takes a bare vector and does no locking -- safe
+      because of WHERE it is called, which is the shape that stops being safe the day it
+      moves, and that file already carries a scar from exactly that. (3) `uint32_t` caps a
+      sample at ~4295 s, unreachable while `waited_us` is bounded by the reassembly
+      timeout. (1) and (2) ride with the Python plane's half.
       `cli/bench` prints 18 counters and NOT ONE latency figure. `grep -nE "p50|p99|latency|
       percentile" .artifacts/cpp/k1_a_on.log` is empty; the only proxy is
       `collector_timeouts`, which is why `DOES-THE-KNOB-MOVE-C1?` could say "no evidence of a
