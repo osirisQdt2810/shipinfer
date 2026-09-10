@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-10 — the synchronise need not spin (a knob, off by default)
+
+`TrtInstance::execute` ends in `gpuStreamSynchronize` and NEITHER plane set
+`cudaSetDeviceFlags`, so CUDA's `cudaDeviceScheduleAuto` applied -- it spins when the active
+contexts do not outnumber the cores, which is this box at five devices and 48. Found by the
+thread naming two entries below: the model-instance threads were half the host CPU, and the
+output copies were ruled out by MEASURING them (~5%, against an estimate wrong by 18x). Two
+interleaved pairs at the design load, one binary and one env var: model-instance CPU 632 -> 279
+(-56%, exactly the class the hypothesis named), total host CPU -24%, pipeline workers +32%
+because the spin was starving them, events +18.0%/+12.2%. OFF BY DEFAULT: it trades wake-up
+latency for host CPU and the host is only the wall at this load. `core/env.h` holds the parse,
+not `platform.h`, because `--offline` refuses any unit reaching that header.
+
+---
+
 ## 2026-09-09 — threads: both planes' names reach the kernel
 
 The other half of the entry below. `threading.Thread(name=...)` is a Python-level label --

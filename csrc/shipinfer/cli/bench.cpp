@@ -20,6 +20,7 @@
 #include "shipinfer/backends/tensorrt/adapter.h"
 #include "shipinfer/backends/tensorrt/engine.h"
 #include "shipinfer/core/buffers.h"
+#include "shipinfer/core/env.h"
 #include "shipinfer/core/join_on_unwind.h"
 #include "shipinfer/core/platform.h"
 #include "shipinfer/core/thread_name.h"
@@ -314,6 +315,24 @@ int main(int argc, char** argv) {
                 "Rewrite it with `python -m shipinfer plan`");
         }
         const std::vector<BenchModel> specs = bench_models(plan, engines_of(options));
+        // doc: long the flag, why it is off by default, and what the measurement was
+        // BEFORE any engine, because the driver refuses this once a device has a context.
+        //
+        // CUDA's default is `cudaDeviceScheduleAuto`, which spins when the active contexts do
+        // not outnumber the logical processors -- this box, at five devices and 48 cores. With
+        // it blocking instead, MEASURED over two interleaved pairs at the design load: the
+        // model-instance threads' host CPU HALVES (632 -> 279 CPU-s), the pipeline workers get
+        // 32% more because the spin was starving them, and events rise ~15%.
+        //
+        // OFF BY DEFAULT because it trades wake-up latency for host CPU, and the host is only
+        // the wall at this load -- at a fifth of it the trade goes the other way.
+        if (env_flag("SHIPINFER_CUDA_BLOCKING_SYNC")) {
+            for (int device : options.devices) {
+                GPU_CHECK(gpuSetDevice(device));
+                GPU_CHECK(gpuSetDeviceFlags(gpuDeviceScheduleBlockingSync));
+            }
+            std::printf("cuda: blocking sync on %zu device(s)\n", options.devices.size());
+        }
         std::cerr << "loading engines...\n";
         const auto load_start = std::chrono::steady_clock::now();
         std::map<std::string, std::unique_ptr<Model>> models;
