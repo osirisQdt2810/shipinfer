@@ -1876,8 +1876,10 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE HERE because the C++ plane is the one the measurement was taken on, and a
       Python A/B needs its own before/after at the design load to claim anything.
 
-- [ ] **THE-GENERATOR-TREE-IS-REMEMBERED-NOT-PROVEN · #207 round 2's five notes (10 Sep).**
-      MUST WAIT for `DOES-THE-KNOB-MOVE-C1?` to finish: `scripts/host_cpu.py` is the instrument
+- [~] **THE-GENERATOR-TREE-IS-REMEMBERED-NOT-PROVEN · #207 round 2's five notes (10 Sep).**
+      UNBLOCKED: the nine runs are done, so the instrument can be edited again. The PR waits
+      on #208 merging, because a PR is opened one at a time.
+      WAS WAITING for `DOES-THE-KNOB-MOVE-C1?` to finish: `scripts/host_cpu.py` is the instrument
       those nine runs are being measured with, and editing it mid-measurement changes the
       instrument between arms.
       (1) COVERAGE GAP, not a defect: reinstating the growth guard ON TOP OF `_generator_tree`
