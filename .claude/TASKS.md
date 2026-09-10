@@ -1824,6 +1824,38 @@ hook down, for when the operator asked to see something before it is executed.
       fix. (5a)/(5b) are the box, and they are why the honest Python number will be at a load
       5 GPUs can retire, reported as such, with the C++ plane's design-load run as the
       cross-plane check rather than pretending this box is the deployment.
+      **THE INSTRUMENT IS BUILT AND MERGED -- #204 (10 Sep), and it found a third defect on the
+      way.** `deploy/rootless/bench.sh` now runs the bench THROUGH `scripts/host_cpu.py
+      --threads`, the sampler walks the process TREE (the fleet topology is one shard process
+      per GPU; reading only the direct child reported **3.3%** under the name `accounted_pct`,
+      measured by reverting the walk), `DeviceManager.blocking_sync` says which devices took
+      the flag, and the harness prints that unconditionally and REFUSES an arm that asked and
+      got none. THE THIRD: `engine/model.py:284` interpolates a `Device`, so an instance is
+      `person_embedder_0_cuda:3` and `instance_thread_label` tested `"cuda:3".isdigit()` --
+      every instance thread on this plane was `mdl-<model>`, twenty in one `thread_class` row,
+      and the per-device question the function exists to answer was unanswerable here. The
+      test that should have caught it wrote `range(8)` for the device, a string the runtime
+      never builds; it uses `Device.cuda(n)` now. Demonstrated on real GPUs: `m0.0-ship_detec`,
+      `m1.2-ship_segme`, per-device classes `m0.0 m0.1 m1.2 m1.3`, `accounted_pct` 91.1%.
+      #204's NON-BLOCKING NOTES, all recorded rather than lost: (1) `process_tree`'s docstring
+      says breadth-first and `pending.pop()` is depth-first -- same set, wrong word. (2) THE
+      ONE THAT MATTERS: the Python RTSP arm starts its two `rtsp_serve.py` servers as CHILDREN
+      of the bench (`harness/rtsp.py:111`), so they are now inside the sampled tree while the
+      wrapper passes no `--pid` -- `--source rtsp` would fold generator CPU (the ~17% penalty
+      `NOT-GPU-BOUND-AT-FIVE-GPUS` measured) into a figure read as "the bench's own". The C++
+      plane discounts it (`scripts/cpp_bench_over_rtsp.sh:106`). (3) `--threads` is hardcoded
+      with no opt-out; an env knob would let a design-load run skip the /proc cost. (4) `_seen`
+      keyed by tid alone: a recycled tid keeps the stale larger value -- pre-existing, and the
+      tree walk widens the window.
+      **AND THE LOAD IS THE WALL, MEASURED THREE WAYS RATHER THAN ASSUMED (10 Sep).** The
+      offer gate needs 98% per shard and this box cannot give it at 50 cameras: 20 fps
+      delivered 86-99% (2-5 shards short per arm), and 5 fps delivered **81-96%** -- WORSE
+      proportionally, which rules out a per-image rate ceiling and points at cores. 30 cameras
+      x 5 fps still missed on two of five shards (94%). 20 cameras x 5 fps = 100 img/s over
+      five shards clears it: all five at 100%, every module SUSTAINED, `command_cpu_s` 408 over
+      52.9 s = 7.7 cores, `/proc/loadavg` 46.67 of 48. So the A/B runs there, and the number
+      will be reported as what it is: 20 img/s per GPU against the design's 62.5, on a box
+      whose other tenant holds ~30 cores.
       ALSO OWED, from round 3's non-blocking note: `bench.cpp:329-334` has the same
       unrestored-device wart, benign there (five lines into `main()`, before any device is
       chosen) but it should ride with the next change to that file.
