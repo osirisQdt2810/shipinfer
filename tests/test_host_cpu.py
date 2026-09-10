@@ -619,6 +619,50 @@ class TestAGeneratorTheBenchSpawnedIsNotTheBench:
         assert set(sampler.by_class()) == {"pipe"}, sampler.by_class()
         assert sampler.total() == pytest.approx(1.0)
 
+    def test_a_subtree_missed_on_one_tick_is_purged_on_the_next(
+        self, host_cpu: ModuleType, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Why the purge must not go back behind a grew-since-last-tick guard.
+
+        `process_tree` swallows `OSError` per pid, so a walk can miss a live grandchild and
+        answer with the generator alone. Reinstating the guard passes every other test in this
+        file: the residual difference is exactly this sequence, where the declaration set stops
+        changing and the subtree is discovered a tick later.
+        """
+        box = tmp_path / "generators.pids"
+        tree = {
+            os.getpid(): {1: ("pipe-0", 1.0)},
+            100: {2: ("gen-0", 5.0)},
+            200: {3: ("ffmpeg", 9.0)},
+        }
+        full = _fake_tree({os.getpid(): [100], 100: [200], 200: []})
+        blind = _fake_tree({os.getpid(): [100], 100: [], 200: []})
+        seen_100 = [0]
+
+        def walk(pid: int, skip: object = frozenset()) -> list[int]:
+            if pid == 100:
+                seen_100[0] += 1
+                # The first read of 100's `children` fails; the second sees 200.
+                return (blind if seen_100[0] == 1 else full)(pid, skip)
+            return full(pid, skip)
+
+        monkeypatch.setattr(host_cpu, "process_tree", walk)
+        monkeypatch.setattr(host_cpu, "thread_cpu", lambda pid: tree[pid])
+        monkeypatch.setattr(host_cpu, "cpu_seconds", lambda pid: 14.0)
+        sampler = host_cpu.ThreadSampler(os.getpid(), interval_s=10.0, generators=box)
+
+        sampler._sample()
+        assert {"gen", "ffmpeg"} <= set(sampler.by_class()), sampler.by_class()
+        box.write_text("100\n", encoding="utf-8")
+        sampler._sample()
+        assert set(sampler.by_class()) == {
+            "pipe",
+            "ffmpeg",
+        }, "the pre-condition: the walk missed 200, so only the generator itself is purged"
+        sampler._sample()
+
+        assert set(sampler.by_class()) == {"pipe"}, sampler.by_class()
+
     def test_declaring_is_a_no_op_when_nobody_is_measuring(
         self, host_cpu: ModuleType, monkeypatch
     ) -> None:
