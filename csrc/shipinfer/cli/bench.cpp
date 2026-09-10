@@ -3,6 +3,7 @@
 // It writes the same buffer-occupancy JSONL the Python driver and the baseline binary write, so
 // `benchmarks/harness/analysis.py` scores all three with one implementation. That is the whole
 // point of the file format being boring.
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -22,6 +23,7 @@
 #include "shipinfer/core/buffers.h"
 #include "shipinfer/core/env.h"
 #include "shipinfer/core/join_on_unwind.h"
+#include "shipinfer/core/percentile.h"
 #include "shipinfer/core/platform.h"
 #include "shipinfer/core/thread_name.h"
 #include "shipinfer/engine/model.h"
@@ -271,6 +273,22 @@ namespace {
         return out.str();
     }
 
+    /// The reassembly wait, as percentiles rather than a mean.
+    ///
+    /// PERCENTILES BECAUSE A MEAN HIDES THE TAIL, and the tail is what a 50-camera fleet is
+    /// judged on. Named `reassembly_us` and not `latency_us`: the clock starts when the
+    /// collector OPENS the frame (`Pending::opened_ns`), which is after detect was dispatched,
+    /// so this is the window this plane controls and not the whole path a frame takes.
+    void report_latency(std::vector<uint32_t>& samples) {
+        std::cout << "reassembly_us_samples " << samples.size() << "\n";
+        std::cout << "reassembly_us_p50 " << percentile(samples, 0.50) << "\n";
+        std::cout << "reassembly_us_p95 " << percentile(samples, 0.95) << "\n";
+        std::cout << "reassembly_us_p99 " << percentile(samples, 0.99) << "\n";
+        std::cout << "reassembly_us_max "
+                  << (samples.empty() ? 0 : *std::max_element(samples.begin(), samples.end()))
+                  << "\n";
+    }
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -418,6 +436,13 @@ int main(int argc, char** argv) {
         //: this path runs only on a refusal, which on a healthy fleet is never.
         std::mutex unwritable_lock;
         std::map<std::string, uint64_t> unwritable_by_camera;
+        //: Every finished frame's reassembly wait, so the run can report PERCENTILES. A vector
+        //: and `nth_element` rather than a histogram: reserved once, exact, and a bucket
+        //: boundary is an argument nobody then has to have. The lock is not the cost on this
+        //: path -- the same lambda builds a JSON line per event.
+        std::mutex latency_lock;
+        std::vector<uint32_t> latency_us;
+        latency_us.reserve(1 << 20);
         // Both from the plan: the class ids are the CHECKPOINT's (this detector calls a ship
         // 8) and the batch names are a stage's OUTPUT name rather than its own
         // (`graph/stages.cpp`: `out.name = output_`), so `from_plan.cpp` derives them once
@@ -426,7 +451,8 @@ int main(int argc, char** argv) {
         const pipeline::events::FieldMap& event_fields = planned.fields;
         FrameCollector collector(
             [&emitted, &complete, &event_bytes, &unwritable, &unwritable_lock,
-             &unwritable_by_camera, &labels, &event_fields, &options](FrameResult&& result) {
+             &unwritable_by_camera, &latency_lock, &latency_us, &labels, &event_fields,
+             &options](FrameResult&& result) {
                 // The null sink: the event is built -- REALLY built since P5-A; this comment
                 // used to claim it while the body only counted -- and then discarded. Same
                 // choice the Python driver makes, so neither side is measured with a sink the
@@ -474,6 +500,14 @@ int main(int argc, char** argv) {
                 // Incomplete is not a like-for-like comparison.
                 if (result.reason == FinishReason::Complete) complete.fetch_add(1);
                 emitted.fetch_add(1);
+                // Every finished frame, complete or not: a run whose tail is timeouts is
+                // exactly the run whose latency a reader needs, and dropping those samples
+                // would report the p99 of the frames that went well.
+                {
+                    std::lock_guard<std::mutex> lock(latency_lock);
+                    latency_us.push_back(
+                        static_cast<uint32_t>(std::max<int64_t>(0, result.waited_us)));
+                }
             },
             static_cast<size_t>(tuning.reassembly_capacity), tuning.reassembly_timeout_ms);
 
@@ -848,6 +882,7 @@ int main(int argc, char** argv) {
         }
         std::cout << "events_complete " << complete.load() << "\n";
         std::cout << "events_incomplete " << (emitted.load() - complete.load()) << "\n";
+        report_latency(latency_us);
         // Reported unconditionally, zero included: a number that appears only when it is
         // non-zero is a number a reader does not know to look for.
         std::cout << "events_unwritable " << unwritable.load() << "\n";
