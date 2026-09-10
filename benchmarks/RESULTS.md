@@ -147,11 +147,16 @@ frames than its own pass's knob-off arm.
   binary's stamped note is derived from that list now rather than asserting the exclusion, so it
   says "fused kernels are NOT in this measurement" and adds ", and neither is tracking" only
   when the run really had none.
-  **What that costs, measured on the pair the change makes possible** — the same chain and the
-  same source, once with the `shipvision` lane in the build and once without it, 8 cameras ×
-  10 fps × 20 s on two GPUs: 1 595 complete events tracked against 1 600 untracked, or **0.3%,
-  which is inside this box's noise at that load.** That is not a claim about the design load,
-  where the stage runs 50 times more often; it is what the pair says.
+  **What that costs, and the first answer was wrong.** The lane-in/lane-out pair at 8 cameras ×
+  10 fps × 20 s on two GPUs read 1 595 complete events tracked against 1 600 untracked, and
+  this page called it 0.3%, inside the noise floor above. It was not noise: it was a defect in
+  the stage, which let the tracker's ordering refusal fail the stage instead of publishing the
+  frame untracked, so the frame never completed. Three tracked runs lost 5, 12 and 17 events;
+  after the fix two runs completed **1 598/1 598 and 1 600/1 600**, with the reordering named
+  instead — `track_frames_untracked track 2` and `track 1`. So the stage's throughput cost at
+  that load is **not measurable here**, and one or two frames per 1 600 really are reordered by
+  the worker pool. That is not a claim about the design load, where the stage runs 50 times
+  more often.
   Every ratio above still predates the stage, so they are measured on a chain one stage shorter
   than the one that now ships — in the direction that understates us.
 - **The fused kernels.** `ldd csrc/build/bench` links no shipvision library.
