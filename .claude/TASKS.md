@@ -2729,6 +2729,28 @@ hook down, for when the operator asked to see something before it is executed.
       that is currently impossible -- window against coverage against throughput -- can be run
       and the default chosen rather than proposed.
 
+- [ ] MTMC-ONE-CAMERA-TWICE-IN-A-CONTESTED-CLUSTER · A REFERENCE DEFECT, found by #219's
+      review in the port and confirmed to be in BOTH planes. `_assign_group`'s per-camera
+      contest re-reads the incumbent from `members_` on every iteration, a winner is added by
+      `_place`, and the loser leaves only in the deferred loop -- so a second challenger from
+      the same camera contests the ALREADY-DISPLACED incumbent, wins on the same evidence, and
+      is adopted too. Both then stay: the deferred loop evicts the one incumbent.
+      MEASURED on the reference (`PYTHONPATH=3rdparty/shipvision`), the reviewer's two
+      instants: `identity 0 members: cam1#1 cam2#1 cam0#2 cam0#3`, and with
+      `validate_every_step=True` the reference throws its own "holds two tracks from one
+      camera". The C++ port answers identically, which is what the parity gate is for.
+      WHY IT IS NOT FIXED IN #219: a one-plane fix makes the port disagree with the reference
+      it is held to, and silently -- no committed scenario covers it, so every golden stays
+      green. THE ORDER: fix `shipvision/mtmc/identity.py` (contest against the CURRENT holder,
+      or defer the adds as well as the removes), bump the submodule in its own commit, port the
+      same change, re-emit `golden/identity/basic.txt`, and flip
+      `two_challengers_from_one_camera_BOTH_land_and_the_reference_does_the_same` from `== 2`
+      to `== 1` -- that test exists to make this loud rather than to endorse it.
+      IMPACT: in production `validate_every_step` is off, so nothing reports it. The state stays
+      plausible -- `member_from_camera` returns whichever member came first, forever -- so one
+      global id carries two tracks from one camera and the second is a ghost no instant can
+      displace.
+
 - [ ] WHOSE-LIBCUDART-DOES-THE-PYTHON-FLAG-SET · MEASURE whether this plane's blocking-sync
       flag reaches torch's streams at all. #214's review predicted that a second
       `DeviceManager` in one process gets `cudaErrorSetOnActiveProcess` on every device, and
