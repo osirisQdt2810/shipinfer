@@ -1791,6 +1791,36 @@ hook down, for when the operator asked to see something before it is executed.
       rate this host can generate, or run the generator as several processes." So the A/B at
       the design load needs the SHARDED generator -- which is a FLAG, `--topology fleet`
       (`run_bench.py:786`), so prerequisite (5) is solved too and the run is one command.
+      **PREREQUISITE (5) WAS NOT SOLVED, AND FOUR RUNS AT THE DESIGN LOAD PROVE IT (10 Sep).**
+      `--topology fleet --cameras 50 --fps 20 --gpus 0,1,2,3,4 --seconds 40`, four interleaved
+      arms (A, B=flag, A2, B2=flag): **every one aborted**, none produced a throughput.
+      `/tmp/fl_{A,B,A2,B2}.txt`. Three separate walls, and only the first was known:
+      (5a) THE OFFER GATE STILL BITES, per shard. Each shard generates its own 10 cameras x
+      20 fps = 200 img/s in ONE interpreter, and `check_offer` wants 98%
+      (`benchmarks/harness/shipinfer.py:83-90`). Delivered: 86/95/95/96/97/97/97/97/98/99% --
+      A had 2 shards fail, A2 had 3, **B and B2 had all five**. Sharding divided the generator
+      by five and the gate by five with it; it did not create headroom. The host is why:
+      `/proc/loadavg` read 33.67 with all my runs finished, i.e. another tenant holds ~33 of
+      48 cores.
+      (5b) FIVE GPUS CANNOT SERVE THE DESIGN LOAD, so the offer gate is not even the binding
+      one. The sizing is 16 GPUs; this box has 5 free. Run A logged `RequestTimeoutError`
+      ("did not answer within 5s") for camera after camera and closed queues with 6121-6293
+      in-flight -- and `MAX_DROP_FRACTION`/`MAX_REJECT_FRACTION` are **2%**. A run that cleared
+      the offer gate would be refused by the drop gate instead, correctly.
+      (5c) THE A/B WAS UNFALSIFIABLE AS SET UP -- and this one is a defect on our side, not the
+      box's. `grep -c 'blocking synchronise'` was **0 in all four arms, including both flag-on
+      arms**. `device.py:69` logs it at INFO and nothing in `benchmarks/` configures logging,
+      so the root logger's WARNING default swallows it. Had a run finished, neither arm would
+      have said whether the knob applied -- exactly the null result rounds 2 and 3 were about.
+      (6) AND THE INSTRUMENT THAT PRODUCED THE C++ FINDING IS NOT ON THIS PLANE.
+      `deploy/rootless/bench.sh:150` execs `run_bench.py` directly; only the C++ wrappers wrap
+      `scripts/host_cpu.py` (`scripts/run_cpp_bench.sh:82`). So `host cpu:` lines = 0 in all
+      four logs, and the model-instance-thread CPU that IS the mechanism (-56% on the C++
+      plane) has no way to be read here at all. NEXT: (5c) and (6) are one feature -- the
+      Python bench should see what the C++ bench sees -- and they are the two that are ours to
+      fix. (5a)/(5b) are the box, and they are why the honest Python number will be at a load
+      5 GPUs can retire, reported as such, with the C++ plane's design-load run as the
+      cross-plane check rather than pretending this box is the deployment.
       ALSO OWED, from round 3's non-blocking note: `bench.cpp:329-334` has the same
       unrestored-device wart, benign there (five lines into `main()`, before any device is
       chosen) but it should ride with the next change to that file.
