@@ -1153,6 +1153,24 @@ STANDING RULE THIS SETS: **quote the route and the modules that EXECUTED beside 
 figure.** A number without them invites exactly this confusion, and the run prints both
 (`chain 'x': N stage(s), not run here: ...`).
 
+### V167 — 10 Sep. BINDING: benchmark only over gstreamer RTSP from an offline video, target 3 000 FPS
+
+> TÔI CẦN BẠN đặt rule: tôi nhớ trước đã bảo bạn rồi: TÔI CẦN BẠN kể từ giờ, benchmarrk mọi
+> thứ và đưa ra kết quả, theo đường gstreamer rtsp với đầu vào là video offline, không cần
+> camera, không được dùng cách gì khác. Chỉ khi đạt được target, tôi hạ xuống là 3000FPS thì
+> mới xem là đạt được mục tiêu. NHỚ: PHẢI benchmarrk bằng gstreamer. NẾU KHÔNG CÓ VIDEO THÌ
+> HÃY TẠO VIDEO ĐI, TẠO INPUT ĐI, think out of the box đi
+
+THREE RULINGS, and the first one retires every number in this session:
+
+1. **Every benchmark goes over gstreamer RTSP, fed by an OFFLINE VIDEO FILE.** No camera is
+   needed and **no other route is allowed** -- so `--source replay` is out as a way to report
+   a result, however useful it was as an instrument. This was said before (R55/V137/V156) and
+   I kept quoting replay numbers; it is a rule now, not a preference.
+2. **The target is lowered to 3 000 FPS**, and only that counts as achieved.
+3. **If there is no video, MAKE one. Make the input.** Being blocked on missing input is not
+   an answer -- the box has 1080p frames and ffmpeg, so a video is something to produce.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
@@ -1333,6 +1351,8 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 
 | Rule | Where |
 |---|---|
+| **Benchmark ONLY over gstreamer RTSP from an offline video file** — no camera, no `replay`, no other route; if the video does not exist, create it | **V167** |
+| **The target is 3 000 FPS** for the whole pipeline (lowered from 4 500), and only that counts as achieved | **V167**, V165 |
 | **The target is 4 500 img/s for the WHOLE pipeline**, `decode -> ... -> mtmc track`, absolute rather than a multiple of the baseline | **V165** |
 | **Quote the route and the modules that EXECUTED beside any img/s figure** — `replay` (host decode + an upload per frame) and `nv12` (NVDEC into VRAM, no upload) are opposite routes, and the run prints both (`chain 'x': N stage(s), not run here: ...`) | **V166** |
 | **Decide it yourself** — do not park a design call as an operator question. `[!]` is for genuinely blocked (a dead GPU, an unbuildable image, a credential), not for a judgement you can make and defend; safety confirmations still stand | **V154** |
