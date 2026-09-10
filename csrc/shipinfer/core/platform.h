@@ -60,6 +60,8 @@ using gpuEvent_t = hipEvent_t;
     #define gpuHostRegisterDefault hipHostRegisterDefault
     #define gpuHostUnregister hipHostUnregister
     #define gpuSetDevice hipSetDevice
+    #define gpuSetDeviceFlags hipSetDeviceFlags
+    #define gpuDeviceScheduleBlockingSync hipDeviceScheduleBlockingSync
     #define gpuGetDevice hipGetDevice
     #define gpuGetDeviceCount hipGetDeviceCount
     #define gpuGetLastError hipGetLastError
@@ -99,6 +101,8 @@ using gpuEvent_t = cudaEvent_t;
     #define gpuHostRegisterDefault cudaHostRegisterDefault
     #define gpuHostUnregister cudaHostUnregister
     #define gpuSetDevice cudaSetDevice
+    #define gpuSetDeviceFlags cudaSetDeviceFlags
+    #define gpuDeviceScheduleBlockingSync cudaDeviceScheduleBlockingSync
     #define gpuGetDevice cudaGetDevice
     #define gpuGetDeviceCount cudaGetDeviceCount
     #define gpuGetLastError cudaGetLastError
@@ -106,7 +110,7 @@ using gpuEvent_t = cudaEvent_t;
 
 namespace shipinfer {
 
-    // Never called directly — `GPU_CHECK` supplies the expression text and the location.
+    /// Never called directly — `GPU_CHECK` supplies the expression text and the location.
     inline void gpu_check(gpuError_t status, const char* expression, const char* file,
                           int line) {
         if (status != gpuSuccess) {

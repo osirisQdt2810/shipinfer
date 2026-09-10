@@ -50,6 +50,7 @@ fi
 exec docker run --rm --pid=host "${GPU_DEVICES[@]}" \
   -e LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/tensorrt/lib:/usr/local/cuda-12.6/lib64${path_libs}" \
   -e SHIPINFER_IN_CONTAINER=1 \
+  -e SHIPINFER_CUDA_BLOCKING_SYNC \
   -v "$REPO:/work" \
   -v "$TRT_DIR:/tensorrt:ro" \
   "${mount_libs[@]}" \
