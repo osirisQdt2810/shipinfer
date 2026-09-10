@@ -171,6 +171,19 @@ class TestItIsAppliedBeforeAnyDeviceHasAContext:
 
         assert reached == []
 
+    def test_both_planes_put_the_callers_device_back(self) -> None:
+        """The Python plane learned this in review (#203 round 3) and the C++ plane carried the
+        same walk for a week. Source-level, because a driverless tier cannot call
+        `cudaGetDevice` -- weaker than the `finally` test above and worth having anyway: the
+        two planes are meant to be the same seam, and a wart on one is a wart on both.
+        """
+        bench = (ROOT / "csrc" / "shipinfer" / "cli" / "bench.cpp").read_text(encoding="utf-8")
+        guarded = bench.split('env_flag("SHIPINFER_CUDA_BLOCKING_SYNC")')[1]
+        walk = guarded.split("std::printf")[0]
+
+        assert "gpuGetDevice(&previous)" in walk, walk
+        assert "gpuSetDevice(previous)" in walk.split("for (int device")[1], walk
+
     def test_the_server_no_longer_knows_about_the_flag(self) -> None:
         """It moved into the device layer, and `engine/pool.py` keeping a second call site is
         how the two would drift back apart."""

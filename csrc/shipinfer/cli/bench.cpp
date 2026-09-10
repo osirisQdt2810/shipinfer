@@ -327,10 +327,17 @@ int main(int argc, char** argv) {
         // OFF BY DEFAULT because it trades wake-up latency for host CPU, and the host is only
         // the wall at this load -- at a fifth of it the trade goes the other way.
         if (env_flag("SHIPINFER_CUDA_BLOCKING_SYNC")) {
+            // The device goes back where it was: harmless HERE, since nothing below has
+            // chosen one yet, and not harmless the day this moves. That is #203 round 3 on
+            // the Python plane -- an unrestored device made an argument-less
+            // `torch.cuda.synchronize()` wait on a different GPU in the two arms.
+            int previous = 0;
+            GPU_CHECK(gpuGetDevice(&previous));
             for (int device : options.devices) {
                 GPU_CHECK(gpuSetDevice(device));
                 GPU_CHECK(gpuSetDeviceFlags(gpuDeviceScheduleBlockingSync));
             }
+            GPU_CHECK(gpuSetDevice(previous));
             std::printf("cuda: blocking sync on %zu device(s)\n", options.devices.size());
         }
         std::cerr << "loading engines...\n";
