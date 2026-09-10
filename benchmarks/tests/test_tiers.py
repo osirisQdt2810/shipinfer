@@ -294,8 +294,13 @@ class TestTheProfileReadsOneWindow:
             _print_reassembly(_Result())
         printed = out.getvalue()
 
-        assert "reassembly (steady, 3 frames)" in printed, printed
+        assert "reassembly (steady, 3 frames" in printed, printed
         assert "p50" in printed and "p95" in printed and "p99" in printed, printed
+        # The caveat has to be in the line a human reads: `quantile` returns the bucket's
+        # UPPER edge, so beside the C++ arm's exact figures an unqualified p50 reads as this
+        # plane being slower. The mean is exact and is printed with it.
+        assert "bucket upper edges" in printed, printed
+        assert "mean" in printed and "(exact)" in printed, printed
 
     def test_a_run_with_no_reassembly_samples_prints_nothing(self) -> None:
         """A zero line is worse than no line here: it would read as a fast run rather than as

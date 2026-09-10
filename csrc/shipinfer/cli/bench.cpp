@@ -273,21 +273,19 @@ namespace {
         return out.str();
     }
 
-    /// The reassembly wait, as percentiles rather than a mean.
+    /// One window's percentiles, under the caller's lock, with a `name_` prefix.
     ///
     /// PERCENTILES BECAUSE A MEAN HIDES THE TAIL, and the tail is what a 50-camera fleet is
-    /// judged on. Named `reassembly_us` and not `latency_us`: the clock starts when the
-    /// collector OPENS the frame (`Pending::opened_ns`), which is after detect was dispatched,
-    /// so this is the window this plane controls and not the whole path a frame takes.
-    /// TAKES THE LOCK ITSELF: the one call site is on the drain path where nothing is still
-    /// pushing, and that is exactly the safety that stops holding the day this moves.
-    void report_latency(std::mutex& guard, std::vector<uint32_t>& samples) {
+    /// judged on. TAKES THE LOCK ITSELF -- #210's own review note: the call sites are on the
+    /// drain path where nothing is still pushing, and that is exactly the safety that stops
+    /// holding the day one moves.
+    void report_window(const char* prefix, std::mutex& guard, std::vector<uint32_t>& samples) {
         const std::lock_guard<std::mutex> held(guard);
-        std::cout << "reassembly_us_samples " << samples.size() << "\n";
-        std::cout << "reassembly_us_p50 " << percentile(samples, 0.50) << "\n";
-        std::cout << "reassembly_us_p95 " << percentile(samples, 0.95) << "\n";
-        std::cout << "reassembly_us_p99 " << percentile(samples, 0.99) << "\n";
-        std::cout << "reassembly_us_max "
+        std::cout << prefix << "_samples " << samples.size() << "\n";
+        std::cout << prefix << "_p50 " << percentile(samples, 0.50) << "\n";
+        std::cout << prefix << "_p95 " << percentile(samples, 0.95) << "\n";
+        std::cout << prefix << "_p99 " << percentile(samples, 0.99) << "\n";
+        std::cout << prefix << "_max "
                   << (samples.empty() ? 0 : *std::max_element(samples.begin(), samples.end()))
                   << "\n";
     }
@@ -446,6 +444,12 @@ int main(int argc, char** argv) {
         std::mutex latency_lock;
         std::vector<uint32_t> latency_us;
         latency_us.reserve(1 << 20);
+        //: CAPTURE TO EMISSION -- what the Python plane calls "the number the deployment is
+        //: judged on" (`pipeline/metrics.py`). `core/events/schema.cpp` already computes it on
+        //: every event from `FrameTag::captured_ns`; nothing summarised it. Under the SAME
+        //: lock, so a finished frame costs one acquisition and not two.
+        std::vector<uint32_t> frame_us;
+        frame_us.reserve(1 << 20);
         // Both from the plan: the class ids are the CHECKPOINT's (this detector calls a ship
         // 8) and the batch names are a stage's OUTPUT name rather than its own
         // (`graph/stages.cpp`: `out.name = output_`), so `from_plan.cpp` derives them once
@@ -454,8 +458,8 @@ int main(int argc, char** argv) {
         const pipeline::events::FieldMap& event_fields = planned.fields;
         FrameCollector collector(
             [&emitted, &complete, &event_bytes, &unwritable, &unwritable_lock,
-             &unwritable_by_camera, &latency_lock, &latency_us, &labels, &event_fields,
-             &options](FrameResult&& result) {
+             &unwritable_by_camera, &latency_lock, &latency_us, &frame_us, &labels,
+             &event_fields, &options](FrameResult&& result) {
                 // The null sink: the event is built -- REALLY built since P5-A; this comment
                 // used to claim it while the body only counted -- and then discarded. Same
                 // choice the Python driver makes, so neither side is measured with a sink the
@@ -475,11 +479,17 @@ int main(int argc, char** argv) {
                 // `collector.sweep()` runs on a bare `std::thread`, where an escaping
                 // exception is `std::terminate`. Refusing to write invalid JSON stays right;
                 // what was missing was anything between that refusal and the thread.
+                //: Zero means "not stamped", which the replay path can be; the sample count
+                //: is reported so a reader can tell that from a fast run.
+                int64_t captured_to_emitted_us = 0;
                 try {
-                    const std::string line =
+                    const auto event =
                         pipeline::events::event_of(result.inputs, result.reason, result.missing,
-                                                   options.source, labels, event_fields)
-                            .to_json();
+                                                   options.source, labels, event_fields);
+                    // BEFORE `to_json`, which is the call that can refuse: a run whose events
+                    // carry a NaN would otherwise report the latency of the ones that wrote.
+                    captured_to_emitted_us = event.latency_us;
+                    const std::string line = event.to_json();
                     event_bytes.fetch_add(line.size(), std::memory_order_relaxed);
                 } catch (const std::exception& error) {
                     // Counted per camera, beside `evicted_by_camera`'s reasoning: the total
@@ -510,6 +520,9 @@ int main(int argc, char** argv) {
                     std::lock_guard<std::mutex> lock(latency_lock);
                     latency_us.push_back(
                         static_cast<uint32_t>(std::max<int64_t>(0, result.waited_us)));
+                    if (captured_to_emitted_us > 0) {
+                        frame_us.push_back(static_cast<uint32_t>(captured_to_emitted_us));
+                    }
                 }
             },
             static_cast<size_t>(tuning.reassembly_capacity), tuning.reassembly_timeout_ms);
@@ -885,7 +898,11 @@ int main(int argc, char** argv) {
         }
         std::cout << "events_complete " << complete.load() << "\n";
         std::cout << "events_incomplete " << (emitted.load() - complete.load()) << "\n";
-        report_latency(latency_lock, latency_us);
+        // TWO WINDOWS, and the names say which is which. `reassembly_us` starts when the
+        // collector opens the frame, so it is the part this plane controls; `frame_us` starts
+        // at capture, so it is the one a deployment is judged on.
+        report_window("reassembly_us", latency_lock, latency_us);
+        report_window("frame_us", latency_lock, frame_us);
         // Reported unconditionally, zero included: a number that appears only when it is
         // non-zero is a number a reader does not know to look for.
         std::cout << "events_unwritable " << unwritable.load() << "\n";
