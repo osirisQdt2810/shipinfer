@@ -1907,6 +1907,15 @@ hook down, for when the operator asked to see something before it is executed.
       p99 295 492 against 302 104 (6.6 ms). So the reassembly window is 99%+ of the end-to-end
       figure on both sources, the ingest gap shows only in the tail -- and #210's knob result
       was an END-TO-END result all along.
+      (a) IS PR #212, IN REVIEW (10 Sep): `frame_us_{samples,p50,p95,p99,max}` beside the
+      reassembly ones, `report_window(prefix, ...)` so the two cannot drift in format, the
+      sample taken BEFORE `to_json`, and the parity test now asserting BOTH windows on both
+      planes. It also had to CHANGE #211's assertion: that test grepped for the literal
+      `reassembly_us_p50`, which this PR turns into a concatenation, so the old form would
+      have gone green on a rename of the prefix -- it asserts the CALL now. #211 round 3's
+      quantile nit rode along: the printed line says "bucket upper edges" and carries the
+      exact mean, because `quantile` returns the bucket's upper edge and a true 51 ms p50
+      prints as 63 000 against `_STAGE_BUCKETS_US`.
       #211's ROUND 1 was four findings and two were sharper than they read: a fabricated
       `camera="unknown"` label on a branch that cannot fire (the tag rule), and a duplicated
       reader whose test did not cover the part that differed -- breaking the bucket accumulation
