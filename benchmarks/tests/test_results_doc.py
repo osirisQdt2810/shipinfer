@@ -55,6 +55,9 @@ def test_the_binary_stamps_its_own_disclaimer() -> None:
 
     assert "fused kernels are NOT in this measurement" in bench
     assert 'if (!tracked) out << ", and neither is tracking";' in bench
+    # FROM THE PLAN, not from a scan of `stage_names`: those are SLOT names, so a chain whose
+    # tracker is called `tap:` would run one and stamp "neither is tracking".
+    assert "!planned.tracks.empty()));" in bench
 
 
 def test_the_one_at_a_time_quote_is_the_harness_own_words() -> None:

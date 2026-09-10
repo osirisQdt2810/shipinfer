@@ -1218,6 +1218,44 @@ class TestWalkingAChain:
             sink.close()
 
 
+class TestTwoTrackersOverOneCamerasRows:
+    """`ElementKind.TRACK` joining `ROW_FIELD_KINDS` is new load-time behaviour, and it had no
+    test: a tracker scatters per row, so two of them covering one detection is two `track_id`s
+    with no answer to which is the object's.
+
+    The refusal is the same one two overlapping embedders get, and the remedy its message names
+    is disjoint `classes:` -- which is why this file's own fan-in fixtures declare them.
+    """
+
+    def test_two_trackers_covering_every_row_are_refused_at_load(self) -> None:
+        with pytest.raises(ChainStructureError, match="both fill the event's 'track_id'"):
+            load("""
+                name: two_trackers
+                elements:
+                  decode: {impl: replay}
+                  detect: {impl: pool, model: d}
+                  first:  {impl: shipvision, kind: track, after: detect}
+                  second: {impl: shipvision, kind: track, after: [detect, first]}
+                  output: {impl: none}
+                """)
+
+    def test_disjoint_selections_are_permitted(self) -> None:
+        """The remedy the refusal names, so the message is not advice nobody can take."""
+        chain = load("""
+            name: two_trackers_disjoint
+            elements:
+              decode: {impl: replay}
+              detect: {impl: pool, model: d}
+              first:  {impl: shipvision, kind: track, after: detect,
+                       params: {classes: [person]}}
+              second: {impl: shipvision, kind: track, after: [detect, first],
+                       params: {classes: [ship]}}
+              output: {impl: none}
+            """)
+
+        assert {node.name for node in chain.nodes} >= {"first", "second"}
+
+
 class TestTheDonorAtAFanIn:
     """Which predecessor donates payload and caps when two branches rejoin.
 

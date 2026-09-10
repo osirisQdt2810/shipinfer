@@ -40,10 +40,13 @@ namespace shipinfer {
         // The ASSOCIATOR by name, and the stage built here: `tracking/associator.h` explains
         // the two build lines that put the tracker in another unit -- one measured as a binary
         // that would not link, the other as a lane whose CI job is g++ alone.
-        if (planned.track) {
-            dag.add(
-                std::make_unique<TrackStage>(planned.track->slot, planned.track->output,
-                                             tracking::create_associator(planned.track->impl)));
+        for (const TrackStageSpec& track : planned.tracks) {
+            // ONE ASSOCIATOR PER SLOT, and the registry decides whether two slots share one:
+            // `bytetrack.cpp` hands out the same shard for every caller, which is right for
+            // two trackers with disjoint selections over one camera -- they are one identity
+            // space seeing different rows, not two spaces seeing the same ones.
+            dag.add(std::make_unique<TrackStage>(track.slot, track.output, track.class_id,
+                                                 tracking::create_associator(track.impl)));
         }
         return dag;
     }

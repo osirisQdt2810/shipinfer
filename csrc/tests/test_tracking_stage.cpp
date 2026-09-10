@@ -73,7 +73,7 @@ namespace {
 
     void every_confirmed_id_lands_on_its_own_detections_index() {
         auto associator = std::make_shared<ScriptedAssociator>(std::vector<int>{7, 8, 9});
-        TrackStage stage("track", "track_out", associator);
+        TrackStage stage("track", "track_out", CropSpec::kAnyClass, associator);
         auto state = frame_with("cam0", 42, {box(0), box(100), box(200)});
 
         const size_t rows = stage.run(*state).rows;
@@ -91,7 +91,7 @@ namespace {
         // The middle one matched nothing. A `-1` in the batch would arrive in an event as
         // `track_id: -1`, which is a lie a consumer cannot tell from an id.
         auto associator = std::make_shared<ScriptedAssociator>(std::vector<int>{7, -1, 9});
-        TrackStage stage("track", "track_out", associator);
+        TrackStage stage("track", "track_out", CropSpec::kAnyClass, associator);
         auto state = frame_with("cam0", 1, {box(0), box(100), box(200)});
 
         const size_t rows = stage.run(*state).rows;
@@ -106,7 +106,7 @@ namespace {
         // The sharding is per CAMERA and the ordering guard is per FRAME, so both have to
         // arrive -- a stage that passed the wrong camera would merge two views silently.
         auto associator = std::make_shared<ScriptedAssociator>(std::vector<int>{1});
-        TrackStage stage("track", "track_out", associator);
+        TrackStage stage("track", "track_out", CropSpec::kAnyClass, associator);
         auto state = frame_with("cam-seven", 99, {box(0)});
 
         stage.run(*state);
@@ -116,9 +116,50 @@ namespace {
         check(associator->seen_detections == 1, "and its detections");
     }
 
+    Detection classed(float x, int class_id) {
+        Detection det = box(x);
+        det.class_id = class_id;
+        return det;
+    }
+
+    void a_selection_tracks_only_its_own_rows() {
+        // The cross-plane finding: the Python element states `selects_rows = True` and feeds
+        // its tracker only the declared rows, so a plane that tracked every row for a
+        // `classes: [ship]` slot would emit ids the other never does AND different ids for the
+        // ships, because association and the per-camera counter saw the people too.
+        auto associator = std::make_shared<ScriptedAssociator>(std::vector<int>{5, 6});
+        TrackStage stage("track", "track_out", /*class_id=*/8, associator);
+        auto state = frame_with(
+            "cam0", 1, {classed(0, 0), classed(100, 8), classed(200, 0), classed(300, 8)});
+
+        stage.run(*state);
+        const ObjectBatch* batch = state->batch("track_out");
+
+        check(associator->seen_detections == 2,
+              "only the two class-8 rows reached the tracker");
+        check(batch != nullptr, "attached");
+        if (batch == nullptr) return;
+        // 1 and 3 are the class-8 detections' own indices, not 0 and 1.
+        check(batch->object_indices == std::vector<int>({1, 3}), "the selected rows' indices");
+    }
+
+    void a_declared_empty_selection_tracks_nothing() {
+        // `kNoClass` is negative like `kAnyClass`, so a `>= 0` test would read a declared EMPTY
+        // selection as every row -- the opposite of what it means, and the same trap
+        // `CropStage`'s comment records.
+        auto associator = std::make_shared<ScriptedAssociator>(std::vector<int>{1, 2});
+        TrackStage stage("track", "track_out", CropSpec::kNoClass, associator);
+        auto state = frame_with("cam0", 1, {classed(0, 0), classed(100, 8)});
+
+        const size_t rows = stage.run(*state).rows;
+
+        check(associator->seen_detections == 0, "no rows reached the tracker");
+        check(rows == 0, "and none came back");
+    }
+
     void a_frame_with_no_detections_attaches_an_empty_batch() {
         auto associator = std::make_shared<ScriptedAssociator>(std::vector<int>{});
-        TrackStage stage("track", "track_out", associator);
+        TrackStage stage("track", "track_out", CropSpec::kAnyClass, associator);
         auto state = frame_with("cam0", 1, {});
 
         const size_t rows = stage.run(*state).rows;
@@ -131,7 +172,7 @@ namespace {
     void more_ids_than_detections_cannot_walk_off_the_end() {
         // Not a caller this tree has; a tracker that answered long would be a crash otherwise.
         auto associator = std::make_shared<ScriptedAssociator>(std::vector<int>{1, 2, 3, 4});
-        TrackStage stage("track", "track_out", associator);
+        TrackStage stage("track", "track_out", CropSpec::kAnyClass, associator);
         auto state = frame_with("cam0", 1, {box(0)});
 
         const size_t rows = stage.run(*state).rows;
@@ -145,6 +186,8 @@ int main() {
     every_confirmed_id_lands_on_its_own_detections_index();
     an_unmatched_detection_gets_no_row_at_all();
     the_camera_and_frame_reach_the_associator();
+    a_selection_tracks_only_its_own_rows();
+    a_declared_empty_selection_tracks_nothing();
     a_frame_with_no_detections_attaches_an_empty_batch();
     more_ids_than_detections_cannot_walk_off_the_end();
     std::printf("%d checks, %d failure(s)\n", checks, failures);

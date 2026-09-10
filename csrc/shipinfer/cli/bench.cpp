@@ -217,7 +217,7 @@ namespace {
     std::string meta_json(const Options& options, const ResolvedPlan& plan,
                           const std::vector<std::string>& stages,
                           const std::vector<std::string>& unsupported,
-                          const std::vector<BenchModel>& models) {
+                          const std::vector<BenchModel>& models, bool tracked) {
         const PlanSettings& tuning = *plan.settings;
         std::ostringstream out;
         out << "{\"meta\": {\"system\": \"cpp\", \"config\": {";
@@ -270,10 +270,12 @@ namespace {
         for (size_t i = 0; i < unsupported.size(); ++i)
             out << (i ? ", " : "") << "\"" << unsupported[i] << "\"";
         // DERIVED, and it used to be a constant. "tracking ... NOT in this measurement" was
-        // true for as long as this plane had no tracking stage, and a static claim is exactly
-        // the kind that keeps being printed after it stops being true. `stages` holds what ran,
-        // so the note now reports it.
-        const bool tracked = std::find(stages.begin(), stages.end(), "track") != stages.end();
+        // true until this plane grew a tracking stage, and a static claim is the kind that
+        // keeps being printed after it stops being true.
+        //
+        // FROM THE PLAN, passed in, and NOT from `stages` -- which holds SLOT names, so a chain
+        // whose tracker is called `tap:` (as this tree's own fixtures do) would have run one
+        // and stamped "neither is tracking", relocating the same lie onto a name coincidence.
         out << "], \"note\": \"C++ data plane; fused kernels are NOT in this measurement";
         if (!tracked) out << ", and neither is tracking";
         out << "\"}}";
@@ -618,7 +620,8 @@ int main(int argc, char** argv) {
                 return row;
             },
             options.sample_interval_s,
-            meta_json(options, plan, stage_names, planned.unsupported, specs));
+            meta_json(options, plan, stage_names, planned.unsupported, specs,
+                      !planned.tracks.empty()));
 
         // -- workers ----------------------------------------------------------------------
         std::atomic<bool> stopping{false};

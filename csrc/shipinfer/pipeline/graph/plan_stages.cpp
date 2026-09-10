@@ -170,23 +170,17 @@ namespace shipinfer {
     PlanStages plan_stages(const ResolvedPlan& plan, const std::set<std::string>& loaded) {
         PlanStages built;
         const PlanNode* detect = nullptr;
-        const PlanNode* track = nullptr;
+        std::vector<const PlanNode*> trackers;
         std::vector<const PlanNode*> croppers;
         for (const PlanNode& node : plan.nodes) {
             if (!runnable(node, loaded)) {
                 built.unsupported.push_back(node.slot);
             } else if (node.kind == "track") {
-                // REFUSED like a second detector, and for a sharper reason: two trackers over
-                // one camera's detections split its objects across two identity spaces, which
-                // is the correctness constraint `pipeline/tracking/shard.h` is built around.
-                if (track != nullptr) {
-                    throw ConfigError("plan '" + plan.name +
-                                      "' has two runnable track slots ('" + track->slot +
-                                      "' and '" + node.slot +
-                                      "'); two trackers over one camera invent identities, so "
-                                      "say which in the chain");
-                }
-                track = &node;
+                // NOT refused for being a second one. Two trackers over one camera's rows is
+                // refused at LOAD by `chain.py::_check_one_filler_per_row` when their
+                // selections overlap, and permitted when they are disjoint -- so refusing here
+                // would throw on a chain the Python plane runs.
+                trackers.push_back(&node);
             } else if (node.kind == "detect") {
                 // REFUSED, not last-wins. Two detectors is a supported chain shape on the
                 // Python plane (`topology/plan.py::_labels` unions their tables), so a plan
@@ -250,13 +244,16 @@ namespace shipinfer {
         // AFTER the croppers, because a tracker consumes what the detector produced and its
         // ids are scattered onto the same rows the embedders' vectors are -- the chain says so
         // too (`after: [embed_ship, embed_person]`).
-        if (track != nullptr) {
+        for (const PlanNode* node : trackers) {
             TrackStageSpec spec;
-            spec.slot = track->slot;
-            spec.output = output_of(track->slot);
-            spec.impl = track->impl;
-            built.track = std::move(spec);
-            built.stage_names.push_back(track->slot);
+            spec.slot = node->slot;
+            spec.output = output_of(node->slot);
+            spec.impl = node->impl;
+            // `class_of`, the same reader the croppers use: no `classes:` is every row, a
+            // declared empty selection is no rows, and a named one is that class's id.
+            spec.class_id = class_of(plan, *node);
+            built.tracks.push_back(std::move(spec));
+            built.stage_names.push_back(node->slot);
         }
         // An `ObjectBatch` is keyed by a stage's OUTPUT name and not its own (`stages.cpp`:
         // `out.name = output_`), and looking one up by the stage name found nothing on every

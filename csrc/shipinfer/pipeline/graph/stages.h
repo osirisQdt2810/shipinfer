@@ -137,13 +137,19 @@ namespace shipinfer {
     // correctness constraint -- and it is an interface, not a tracker: `tracking/associator.h`
     // explains the two build lines that forbid this unit from including one.
     //
+    // IT PICKS THE ROWS IT TRACKS, on `CropSpec`'s convention, because the Python element does
+    // (`elements/track.py`: `selects_rows = True`, "exactly as a crop element picks the rows it
+    // embeds"). A plane that tracked every row for a `classes: [ship]` slot would emit ids the
+    // other never does AND different ids for the ships, since association and the per-camera
+    // counter would have seen the people too.
+    //
     // A DETECTION THE TRACKER DID NOT CONFIRM gets no row, which leaves its `track_id` null
     // rather than `-1`. That is what the Python plane emits for the same case, and the chain
     // file's own comment says why it happens: a detection between the publish threshold and
     // the tracker's own only ever CONTINUES a track.
     class TrackStage : public Stage {
       public:
-        TrackStage(std::string name, std::string output,
+        TrackStage(std::string name, std::string output, int class_id,
                    std::shared_ptr<tracking::Associator> associator);
 
       protected:
@@ -151,6 +157,7 @@ namespace shipinfer {
 
       private:
         std::string output_;
+        int class_id_;
         std::shared_ptr<tracking::Associator> associator_;
     };
 

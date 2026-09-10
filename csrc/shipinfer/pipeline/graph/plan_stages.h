@@ -67,10 +67,16 @@ namespace shipinfer {
     struct TrackStageSpec {
         std::string slot;
         std::string output;
-        //: The chain's `impl:`, which is the registry key -- `tracking/registry.h`. The
+        //: The chain's `impl:`, which is the registry key -- `tracking/associator.h`. The
         //: algorithm inside an impl (`params: algorithm: bytetrack`) is that lane's own
         //: business and the plan does not carry it.
         std::string impl;
+        //: WHICH ROWS THIS TRACKER SEES, on `CropSpec`'s convention and for the same reason:
+        //: the Python element states `selects_rows = True` and feeds its tracker only the
+        //: declared rows, so a plane that tracked every row would emit ids the other never
+        //: does AND different ids for the rows they share -- association and the per-camera
+        //: counter would have seen boxes the other tracker never got.
+        int class_id = CropSpec::kAnyClass;
     };
 
     struct PlanStages {
@@ -80,9 +86,10 @@ namespace shipinfer {
         std::vector<CropSpec> crops;
         //: The per-object stages, in the plan's order.
         std::vector<ObjectStageSpec> objects;
-        //: Absent when the plan declares no runnable tracker, which is every plan before
-        //: 10 Sep and every chain that omits the slot.
-        std::optional<TrackStageSpec> track;
+        //: SEVERAL, because the chain permits it: `_check_one_filler_per_row` refuses two
+        //: trackers whose selections overlap and allows two that are disjoint, so a plane that
+        //: refused the second outright would throw on a chain the other plane loads.
+        std::vector<TrackStageSpec> tracks;
         std::vector<std::string> stage_names;
         pipeline::events::ClassLabels labels;
         pipeline::events::FieldMap fields;

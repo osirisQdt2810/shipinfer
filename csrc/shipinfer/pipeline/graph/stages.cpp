@@ -247,27 +247,39 @@ namespace shipinfer {
           output_(std::move(output)),
           combine_(std::move(combine)) {}
 
-    TrackStage::TrackStage(std::string name, std::string output,
+    TrackStage::TrackStage(std::string name, std::string output, int class_id,
                            std::shared_ptr<tracking::Associator> associator)
         // CONSUMES the detections and NEEDS them: there is nothing to associate on a frame the
         // detector produced no boxes for, and `needs` keeps the stage out of that frame's plan
         // rather than running it on an empty vector.
         : Stage(std::move(name), {DETECTIONS}, {DETECTIONS}, {output}),
           output_(std::move(output)),
+          class_id_(class_id),
           associator_(std::move(associator)) {}
 
     size_t TrackStage::do_run(FrameState& state) {
-        const std::vector<Detection>& detections = state.detections();
+        // THE SELECTED ROWS ONLY, and they are copied because the associator's answer is
+        // parallel to what it was GIVEN -- a filtered vector keeps `selected[i]`'s own
+        // `index`, so the ids still land on the detector's indices.
+        //
+        // `!= kAnyClass` and not `>= 0`, the same reading `CropStage` makes: `kNoClass` is
+        // negative too, so `>= 0` would treat a declared EMPTY selection as every row -- the
+        // opposite of what it means.
+        std::vector<Detection> selected;
+        for (const Detection& det : state.detections()) {
+            if (class_id_ != CropSpec::kAnyClass && det.class_id != class_id_) continue;
+            selected.push_back(det);
+        }
         ObjectBatch batch;
         batch.name = output_;
         batch.width = 1;
         const std::vector<int> ids =
-            associator_->ids(state.tag().camera_id, state.tag().frame_id, detections);
-        for (size_t row = 0; row < ids.size() && row < detections.size(); ++row) {
+            associator_->ids(state.tag().camera_id, state.tag().frame_id, selected);
+        for (size_t row = 0; row < ids.size() && row < selected.size(); ++row) {
             // A row per CONFIRMED id only. `-1` is "matched no track", and an absent row is how
             // `events/records.cpp` leaves `track_id` null for that object.
             if (ids[row] < 0) continue;
-            batch.object_indices.push_back(detections[row].index);
+            batch.object_indices.push_back(selected[row].index);
             // FLOAT, because `ObjectBatch::data` is one: exact for ids below 2^24, and a
             // monotonic per-camera counter reaches that after ~16.7M tracks. The Python plane
             // carries the same ids as `int64`, so the two planes differ THERE and the ledger
