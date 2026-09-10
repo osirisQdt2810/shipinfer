@@ -1110,6 +1110,26 @@ on four GPUs -- against a design load of 1 000 img/s total. So the target is not
 fleet"; it is "retire ~4x the fleet's own rate on 80% of the GPUs". Measuring it honestly and
 reporting the number is the job; arguing about it is not.
 
+### V165 — 10 Sep. The target is 4 500 img/s for the WHOLE pipeline, and three questions about my numbers
+
+> note: target ở đây là toàn bộ pipeline của hệ thống đạt 4500 img/s, tức là toàn bộ đi từ việc
+> decode->mtmc track phải đạt được 4500 img/s. có 1 điều tôi chưa hiểu của bạn, bạn nói chỉ
+> detect đã được 4400img/s, mà detect là 1 trong những phần nặng nhất của pipeline này. Nếu 1
+> pipeline đủ tốt, xử lý hầu hết đều trên VRAM, dữ liệu không phải xuống host, thì pipeline cũng
+> phải đạt được 1 lượng img/s đủ lớn chứ, sao ở đây chỉ có 500img/s? tôi chả hiểu bạn đang đo
+> cái gì cả. và tôi chưa hiểu replay ý bạn là sao
+
+WHAT THIS SETTLES, and it settles the question I had put to the operator:
+
+1. **The target is ABSOLUTE: 4 500 img/s.** Not a multiple of anything, so the offer-bound
+   baseline stops being the denominator and stops mattering to the target.
+2. **It is the WHOLE pipeline**, `decode -> ... -> mtmc track`, not one model and not the
+   four-model chain without its ends. Detect-only at 4 200-4 700 is therefore an instrument
+   reading, not the deliverable.
+3. **Three things I owe an answer to**, and they are all fair: why detect alone reaches 4 400
+   while the whole chain is ~700 when detect is the heaviest single model; why a pipeline that
+   keeps its data on VRAM is not much faster than that; and what `replay` even is.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
