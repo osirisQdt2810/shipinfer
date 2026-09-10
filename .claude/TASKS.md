@@ -1876,6 +1876,22 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE HERE because the C++ plane is the one the measurement was taken on, and a
       Python A/B needs its own before/after at the design load to claim anything.
 
+- [~] **DOES-THE-KNOB-HURT-AT-A-FIFTH-OF-THE-LOAD? · the one regime its own comment names,
+      and now measurable (10 Sep).** `cli/bench.cpp` says the blocking-sync knob is off by
+      default "because it trades wake-up latency for host CPU, and the host is only the wall at
+      this load -- at a fifth of it the trade goes the other way". That sentence has never been
+      measured; it was reasoning. At the DESIGN load the trade does not appear at all: -40% host
+      CPU, +25% rows, 3.41x -> 7.17x on C1's like-for-like ratio, latency DOWN 10-25% at
+      p50/p95/p99, fewer drops in every pass. So the only argument left for the default is a
+      regime nobody has run.
+      IT IS RUNNABLE NOW because #210-#213 gave both planes both latency windows -- the figure
+      the caveat is about. Shape: same five GPUs and same 50 cameras, `--fps 4` (a fifth of 20,
+      so the fleet shape is unchanged and only the rate scales), `--source nvdec`, off/on
+      interleaved twice, reading `frame_us_*`, `reassembly_us_*` and `command_cpu_s`.
+      THEN THE DEFAULT IS A DECISION WITH EVIDENCE IN BOTH REGIMES rather than in one. If the
+      caveat holds, the default stays and the knob gets a documented load threshold; if it does
+      not, the flip is a PR -- opened WITHOUT `automerge`, because changing a default changes
+      every future measurement's baseline and that is the operator's call to merge.
 - [x] **BOTH-PLANES-SHOULD-REPORT-THE-SAME-LATENCY-WINDOW · DONE: #211 (b), #212 (a),
       #213 the gap #212's review found (10 Sep). Both planes report both windows.**
       THREE RIDERS from #213's review, for whenever those files are next touched -- all
