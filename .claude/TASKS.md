@@ -11,7 +11,7 @@ line names the ledger item that holds the detail, and the exact action.
 | 0 | **Nothing — resolved itself.** A vendor apt repo served a bad index for ~30 min on 9 Sep and `main` went red on a repository this project never installs from; it cleared, and #194 and #196 merged on a re-run. #195 hardens against the next one and carries `automerge`. | `CI-A-VENDOR-REPO-BLOCKS-EVERY-MERGE` |
 | 2 | **DONE 10 Sep — you merged it** (`a9867e3`). The C++ tracking chain is mine again. | `CSRC-GRAPH-HAS-NO-TRACKING`, `V146b` |
 | 3 | **DONE 10 Sep — you merged it** (`b645dbd`). `V124a-PHASE3` is unblocked. | `V124b`, `V124a-PHASE3` |
-| 6 | **Merge #214, or say no** — it flips the blocking-sync knob to ON by default. Opened WITHOUT `automerge` on purpose: a default change moves every future measurement's baseline, so the evidence is mine and the merge is yours. Measured at the design load (host CPU -40%, rows +25%, 3.41x -> 7.17x on the like-for-like ratio) and at a fifth of it (host CPU -44%/-55%, p99 **-72%/-70%**, zero drops). `SHIPINFER_CUDA_BLOCKING_SYNC=0` is the way back. | `DOES-THE-KNOB-HURT-AT-A-FIFTH-OF-THE-LOAD?` |
+| 6 | **Merge #214, or say no** — it flips the blocking-sync knob to ON by default. Opened WITHOUT `automerge` on purpose: a default change moves every future measurement's baseline, so the evidence is mine and the merge is yours. Measured at the design load (host CPU -40%, rows +25%, 3.41x -> 7.17x on the like-for-like ratio) and at a fifth of it (host CPU -44%/-55%, p99 **-72%/-70%**, zero drops). `SHIPINFER_CUDA_BLOCKING_SYNC=0` is the way back. **Round 1 came back BLOCKING (2) and is FIXED at `47a9cbe`** -- a default-on knob had turned the A/B's integrity check into a run-aborting guard, and six offline tests reached the real driver through a fixture that fabricates a device count. | `DOES-THE-KNOB-HURT-AT-A-FIFTH-OF-THE-LOAD?`, `WHOSE-LIBCUDART-DOES-THE-PYTHON-FLAG-SET` |
 | 4 | **Pull `nvcr.io/nvidia/deepstream` (~6 GB)** onto this box, or say no — the fourth topology's running half needs it; the design half is done. | `T4` |
 | 5 | **shipvision has no LICENSE file at all**, and **where does the NV12 work live?** (the claimed 1021 uncommitted lines are in no checkout I can see). | `SV-LICENSE`, `C9` |
 
@@ -2729,6 +2729,21 @@ hook down, for when the operator asked to see something before it is executed.
       that is currently impossible -- window against coverage against throughput -- can be run
       and the default chosen rather than proposed.
 
+- [ ] WHOSE-LIBCUDART-DOES-THE-PYTHON-FLAG-SET · MEASURE whether this plane's blocking-sync
+      flag reaches torch's streams at all. #214's review predicted that a second
+      `DeviceManager` in one process gets `cudaErrorSetOnActiveProcess` on every device, and
+      it did NOT: on GPU 2, default path, `validate_on_start=True` so the first manager takes
+      a primary context, the second took the flag again (`took=[0]` both rungs). The likely
+      reason is two CUDA RUNTIME INSTANCES -- `prefer_blocking_sync` goes through `ctypes` into
+      the loader's `libcudart`, torch uses its own copy under `torch/lib/` -- in which case the
+      flag is being set on a runtime nothing in this plane synchronises through, and the
+      Python default flipped on the C++ plane's evidence plus symmetry. The C++ measurement
+      stands (one binary, one runtime). THE TEST: an interleaved pair on the Python plane at a
+      fixed load with the knob on and off, host CPU per thread group as the discriminator --
+      `scripts/host_cpu.py` already reports it. If the flag does nothing here, either load
+      libcudart the way torch does (`torch/lib/libcudart.so.12`) or read the flag through
+      torch and drop the ctypes route.
+
 - [ ] BENCH-PRECISION-SELECTS-NO-PLAN · `--precision` names the BASELINE's flat engines and
       nothing else. Our side loads `model_repository/<name>/1/model.plan` whatever precision it
       holds, so on a `--systems shipinfer` run the flag changes nothing except which file the
@@ -2740,8 +2755,23 @@ hook down, for when the operator asked to see something before it is executed.
       back to the bench's `--precision` choices, because it would be a knob that lies. Found
       while fixing `BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE`, and named by #216's review round 2.
 
-- [~] BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE · OPEN AS #218, round 1 fixed and pushed
-      (`79ac5eb`). ONE BLOCKING, and it was THIS PR's OWN DEFECT ONE LEVEL DOWN: an engine
+- [x] BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE · **MERGED as #218 (squash `1054479`, 10 Sep),
+      APPROVE on round 3 after two BLOCKING rounds.** Round 2's five findings, and the first is a
+      promise this PR itself broke: scoping the embedder pair to shipinfer-only moved the
+      guard BEHIND ~80 s of measurement, because each system calls the check for itself
+      inside the measurement loop and the baseline runs first -- so `require_inputs`'s own
+      first line ("fail before a run rather than after 70 s of measuring nothing") stopped
+      being true of the check that states it. One pre-flight loop over the selected systems
+      now runs above the loop, and `FileNotFoundError` joins the `except` tuple. Then: the
+      body described four of the nine changed files (rewritten from `git diff --name-only`);
+      the guard hardcoded `model.plan` while the installer honours `parameters.engine_file`,
+      which is the same unfixable-remedy loop one artefact along, so the name is resolved
+      through `ModelRepository` and an unreadable repository is REFUSED rather than guessed;
+      the fanout's own test read `version_dirs[0]`, leaving `ship_embedder` unchecked by the
+      one test whose job is catching a plan installed under a name nothing loads; and two
+      docstrings said `reid` "has no `version_dir` at all" when it has two. 4 202 offline
+      green, 428 in the touched suites, `pre-commit` clean, rebased (it had been reverting 93
+      lines of this file). Round 1 fixed and pushed (`79ac5eb`). ONE BLOCKING, and it was THIS PR's OWN DEFECT ONE LEVEL DOWN: an engine
       check demanding an artefact the run does not load, in `require_same_engines` rather than
       `require_inputs`. `--systems baseline` was refused because `person_embedder` had no plan,
       with a message claiming "the baseline loads reid_r50_fp32.engine" -- which the same
