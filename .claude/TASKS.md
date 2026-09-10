@@ -2804,8 +2804,52 @@ hook down, for when the operator asked to see something before it is executed.
       ~7x less compute per image than this hardware does -- INT8 is worth maybe 1.5-2x of
       that, not 7x. On four A5000s, 5x on the four-model chain is not a scheduling result and
       not a precision result; it is either fewer models per image or ~28 GPUs.
-      REMAINING LEVERS: INT8 (fp16 alone gave 1.23x on the full chain, and it cuts the engine
-      time both peaks are made of) and the batched letterbox.
+      **AND THEN THE DENOMINATOR TURNED OUT TO BE WRONG, WHICH INVALIDATES EVERY RATIO
+      ABOVE.** `RESULTS.md` says of the baseline: "at saturation it is bound by its engines.
+      So it is a CAPACITY, not a floor." IT IS NOT. Measured 10 Sep, `--systems baseline
+      --precision fp16`, 40 s each:
+      | offered | GPUs | baseline sustained | retired |
+      |---|---|---|---|
+      | 1 000 | 5 | 960.2 (the page's number) | 96% |
+      | 5 000 | 4 | 4 936.6 | 99% |
+      | 10 000 | 4 | 9 952.9 | 99.5% |
+      | 10 000 | **1** | **9 815.5** | 98% |
+      It retires ~99% of WHATEVER IT IS OFFERED, and one GPU serves 98.6% of what four do.
+      `nvidia-smi` sampled through a run reporting 9 931.7 img/s reads **0-8% utilization and
+      861 MiB** on all four devices -- the engines are loaded (which is what
+      `require_same_engines` checks) and essentially nothing runs on them. Our detect-only arm
+      at 4 038-4 716 img/s runs those same devices at 87-100%.
+      SO "960 img/s" WAS THE BASELINE'S OFFER, NOT ITS CAPACITY, and the page's own evidence
+      for the opposite -- "insensitive to which five GPUs it gets, 959.8 against 960.2" -- is
+      the SIGNATURE of an offer-bound system rather than proof of an engine-bound one. Every
+      ratio in this item (0.58x, 0.70x, 3.46x, 4.4x, 4.9x) divides by that offer.
+      **WHAT IS STILL TRUE, AND IT IS ALL OF THE ABSOLUTE NUMBERS.** Four GPUs, 50x100x40 s,
+      detect-only, 5 000 img/s offered, images/s = accepted/40, one variable at a time:
+      | arm | img/s | vs the arm above |
+      |---|---|---|
+      | fp16, 2 instances, spin sync (the shipped config) | 3 189 | -- |
+      | fp16, 4 instances, spin sync | 3 992 | **1.25x** (instances) |
+      | fp16, 4 instances, BLOCKING sync | 4 038 | 1.01x here, 1.19x on the int8 pair |
+      | int8, 4 instances, blocking sync | **4 716** | **1.17x** (precision) |
+      The knob's own pair, same engine and load: **4 632 / 3 897 = 1.19x**, with host CPU
+      189 -> 605 CPU-s and the `pipe` threads 26 -> 413 -- 94% of that thread group's CPU was
+      SPIN. That is #214's case restated on a second workload.
+      **AND THE SOURCE RESOLUTION MATTERS MORE THAN EITHER**, same engine and instances:
+      1 300x865 -> 4 934 img/s, 1 920x1 080 -> 4 166, 3 840x2 160 -> 1 617, with engine busy
+      FLAT at ~222-234% throughout. So the per-frame cost that moves is proportional to SOURCE
+      pixels while engine time is not -- the frame's trip to the device, which is exactly what
+      V156's `nv12 -> all on VRAM` route removes and what `runtime/ops.h` already says ("at
+      1000 frames a second a 1080p BGR temporary is 6 MB of pure waste per frame").
+      INT8 ENGINES: the detector builds (5.6 MB against fp16's 8.3 and fp32's 12) and the
+      SEGMENTER DOES NOT -- "Error Code 10: Could not find any implementation for node
+      /model.23/proto/cv3/conv/Conv + PWN(...)" with INT8+FP16 both set. Calibration is
+      through the pipeline's own numpy letterbox (`IMAGE_OPS.create("numpy")`,
+      `NormalizeParams()`, pad 114, value_range (0,1)) so the scales match the served
+      transform -- but the whole corpus on this box is **15 frames**, which is enough to
+      measure speed and NOT enough to claim the accuracy cost is small.
+      CAVEAT ON EVERY NUMBER HERE: the box had another tenant throughout (load 32-56 over 48
+      cores, GPUs 1 and 7 held by someone else's training job), and the harness printed its own
+      "BUSY ... treat the ratio as indicative only" warning.
       **THE QUESTION THIS PUTS TO THE OPERATOR, and it is theirs rather than mine:** 5x on the
       FOUR-MODEL chain, or 5x on work comparable to the baseline's one model? The metric is
       settled (V164, images/s) -- what is not settled is what the chain must compute while
