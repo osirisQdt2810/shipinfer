@@ -56,7 +56,7 @@ one row — so the counter is counting rows and not re-reporting requests.
 | frames end to end | **0.60×** | The softest. A CPU-bound stage moves it, and both runs were on a box at 25/48 cores. |
 | pixels into a model | **1.87×** | An **area** proxy, not work: it treats a 640×640 detector row and a 256×128 crop as 12.5:1 and ignores that their FLOPs per pixel differ too. |
 | rows into a model | **7.22×** | Counts a crop and a frame alike, and 12.7 of our rows per request are crops. |
-| rows per host CPU-second | **~3.94×** | The only one with a **like-for-like denominator** — the same kernel counter on both arms. A **floor** (see below). |
+| rows per host CPU-second | **~3.4× default, 7.2× with the knob** | The only one with a **like-for-like denominator** — the same kernel counter on both arms. A **floor** (see below). The two figures are one env var apart; see below. |
 
 Corroborated on a second five-GPU set: 7.7× rows and 2.03× pixels on GPUs 2/3/6. Same
 ordering, same conclusion, so the spread between the weightings is a property of the workload
@@ -86,6 +86,42 @@ GPUs, which is where the 313.6-against-82.5 rows-per-CPU-second figure comes fro
 | ShipInfer | 3.19 ms per row |
 | baseline | 12.12 ms per image |
 
+## The one knob that moves it, and it roughly doubles the ratio
+
+`SHIPINFER_CUDA_BLOCKING_SYNC=1` asks the driver for `cudaDeviceScheduleBlockingSync` instead
+of the `cudaDeviceScheduleAuto` default, which **spins** while a synchronise waits when the
+number of contexts is at or below the core count. It is **off by default**. Nine runs, three
+passes, arm order rotated between passes so a drift inside a pass cannot look like the knob —
+50 cameras × 20 fps × 40 s, `--source nvdec`, GPUs 1/3/4/5/6, all nine `exit=0`:
+
+| pass | baseline | ours, knob off | ours, knob on | off ratio | on ratio | the knob |
+|---|---|---|---|---|---|---|
+| a | 83.0 | 294.5 | 670.5 | 3.55× | 8.08× | 2.28× |
+| b | 97.3 | 263.7 | 666.7 | 2.71× | 6.85× | 2.53× |
+| c | 99.6 | 396.3 | 656.6 | 3.98× | 6.59× | 1.66× |
+| **mean** | | | | **3.41×** | **7.17×** | **2.15×** |
+
+Rows per host CPU-second in every column. **The control reproduces the sitting above** —
+flag-off means 3.41× (2.71–3.98) against the 3.94× (3.36–4.36) measured a day earlier, and its
+baseline column lands at 83.0/97.3/99.6 against that sitting's 87.2/113.0/84.2 — which is what
+makes the flag-on column readable rather than a number from nowhere.
+
+**It moves both terms and they compound**: host CPU 704.2 → 422.6 CPU-s (−40%) and rows
+224 871 → 280 848 (+25%).
+
+**The flag-on arm is the stable one, and that is the most telling figure here.** Its CPU
+spread is 2% (419.8/428.0/419.9) against the flag-off arm's 23%, its rows 3% against 51%, and
+its accepted frames 4% (22 753–23 745) against 51% (13 691–23 264). A spinning wait costs
+whatever contention there is to lose, so the default arm is partly a measurement of the box's
+other tenants while the knob-on arm is a measurement of the work.
+
+**The latency half of the trade does not appear — and one pass inverts, which is how it has to
+be said.** `cli/bench` prints no percentiles, but it counts `collector_timeouts`, a stage that
+did not answer in time: 67/148/26 with the knob off against 10/76/72 with it on. Lower on
+average, and pass c goes the other way, so at n=3 this supports "no evidence of a penalty",
+not "the latency improves". What is unambiguous is shedding: **every** knob-on arm drops fewer
+frames than its own pass's knob-off arm.
+
 ## Method, because one run decides nothing here
 
 - **The noise floor is ~15%.** Four runs of one arm at identical settings spread 26 669 to
@@ -93,6 +129,10 @@ GPUs, which is where the 313.6-against-82.5 rows-per-CPU-second figure comes fro
 - **So the arms are interleaved** (baseline, ours, baseline, ours, …) and the **pairwise
   ratios** are quoted rather than the means. A worker-count sweep looked like a 6% win on its
   first pass and lost on both repeats; the means hid the reversal.
+- **Rotating the arm order is the same argument one level up.** With three arms per pass
+  (baseline, knob off, knob on), always running one of them last would let a drift inside a
+  pass read as that arm's property. The order is base/off/on, then on/off/base, then
+  base/on/off.
 - **A simultaneous pair in one log is not achievable on this box**, tried three ways: at 12×10
   and 8×5 the baseline's concurrent load starved our in-process generator below the offer
   gate; at a load small enough to avoid that, the baseline logs too few samples to bound a
@@ -120,11 +160,18 @@ GPUs, which is where the 313.6-against-82.5 rows-per-CPU-second figure comes fro
 ## The verdict, and the one open question
 
 The ≥5× target needs a ratio to be against, and the four above give opposite answers. Absent
-a decision the number reported is **rows per host CPU-second: ~4×, so the target is NOT MET**
-— chosen because it is the only ratio measured the same way on both arms, because a resource
-ratio is what "5×" ought to mean, and because it is a floor that errs in the baseline's
-favour. It is deliberately not the 7.22× rows figure, which clears the target by counting a
-256×128 crop as one 640×640 frame.
+a decision the number reported is **rows per host CPU-second** — chosen because it is the only
+ratio measured the same way on both arms, because a resource ratio is what "5×" ought to mean,
+and because it is a floor that errs in the baseline's favour. It is deliberately not the 7.22×
+rows figure, which clears the target by counting a 256×128 crop as one 640×640 frame.
+
+On that ratio the answer now depends on one env var: **~3.4× as shipped, so NOT MET at the
+default; 7.17× with `SHIPINFER_CUDA_BLOCKING_SYNC=1`, which clears it.** Both are measured, in
+one sitting, with the control reproducing the previous one. Whether the knob should be the
+default is a separate decision and not this page's to make: what argues for it is −40% host
+CPU, +25% rows, fewer drops in every pass and no visible latency cost; what argues against is
+that `cli/bench` reports no latency percentiles, so the cost the knob is documented to trade
+for has never been measured directly — only its proxy.
 
 The headroom is our own host cost: 3.19 ms of CPU per row while our arm was host-bound and the
 baseline was saturated. `.claude/TASKS.md` holds the accounting under
