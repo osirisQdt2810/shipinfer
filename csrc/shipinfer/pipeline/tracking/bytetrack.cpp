@@ -27,6 +27,15 @@ namespace shipinfer::tracking {
             }
 
           private:
+            // doc: long DEFAULT-CONSTRUCTED, which is a DECIDED divergence and not an oversight
+            // `ByteTrackTracker::Options{}` and `kRegressionReset`, because `PlanNode` carries
+            // no `options`, no `algorithm` and no `regression_reset` -- so a chain that states
+            // any of them loads on both planes, reports `track` as having run on both, and
+            // emits DIFFERENT ids: Python honours all three (`track.py`, and `TrackerShard`
+            // refuses an unknown key at open), this runs the defaults. Registered as
+            // `tracker_options` in `benchmarks/parity/known.py` with its reproducing case, and
+            // owned by `CSRC-TRACKER-OPTIONS` in the ledger. Carrying them means new plan
+            // lines and a key table, which is a feature rather than this PR's fix.
             TrackerShard shard_;
         };
 

@@ -159,6 +159,11 @@ namespace shipinfer {
         std::string output_;
         int class_id_;
         std::shared_ptr<tracking::Associator> associator_;
+        //: Scratch, not state: cleared at the top of every `do_run`. One Dag per worker
+        //: (`bench.cpp`) is what makes a member safe here, and it is the same rule
+        //: `CropStage` follows with `WorkerScratch` -- a per-frame vector on the dispatch
+        //: path is an allocation a thousand times a second for nothing.
+        std::vector<Detection> selected_;
     };
 
     class ObjectStage : public ModelStage {

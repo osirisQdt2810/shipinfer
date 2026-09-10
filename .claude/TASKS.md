@@ -3060,6 +3060,23 @@ hook down, for when the operator asked to see something before it is executed.
       open item aimed at the ~4x -> 5x gap. Opening one is a decision about the target, which
       is why it waits on this question rather than the other way round.
 
+- [ ] CSRC-TRACKER-OPTIONS · carry the tracker's params on the plan. A DECIDED divergence,
+      registered as `tracker_options` in `benchmarks/parity/known.py` and reproduced by
+      `test_the_cpp_plane_reads_no_tracker_params`, found by #215's third review round. The
+      Python element reads `algorithm`, `options`, `regression_reset` and `attribution_iou`
+      from a chain's `params:` and `TrackerShard` refuses an unknown option key at `open()`;
+      `PlanNode` carries none of them, so `bytetrack.cpp` runs `ByteTrackTracker::Options{}`
+      and `kRegressionReset` however the chain is written. A chain stating `options:
+      {max_age: 90}` and `regression_reset: 0` therefore loads on both planes, reports
+      `track` as having run on both, and emits different ids -- and the C++ side recovers
+      from a stream restart the operator asked it never to recover from. THE FIX: new plan
+      lines (`regression_reset N`, `tracker_option <key> <value>`) plus a key table on the
+      lane side, which is a feature and not a review fix -- and the version gate is part of
+      it, since a reader that ignores an unknown line is how this got silent in the first
+      place. This line stays OPEN by design: `known.py`'s own test requires it, because the
+      register's only defence against becoming a suppression list is that each entry is
+      somebody's open work.
+
 - [~] **CSRC-GRAPH-HAS-NO-TRACKING · #169 MERGED BY THE OPERATOR 10 Sep (`a9867e3`), so
       PR 2 of 3 is mine to build and needs no stacking.** What #169 landed: the in-tree
       external lane and `TrackerShard` behind it. WHAT PR 2 IS: a `track` stage in the C++

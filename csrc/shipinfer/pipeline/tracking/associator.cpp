@@ -43,6 +43,10 @@ namespace shipinfer::tracking {
 
         // (impl, slot) -> the one associator that pair gets. See `create_associator`'s header
         // comment for why the key has two halves and why the cache is process-wide.
+        //
+        // NEVER CLEARED, which is right for `bench` (one chain, one process) and is a thing to
+        // fix when a runner gains `UpdateTopology`: a swapped chain reusing a slot name would
+        // be handed the old chain's tracker state, ids and all.
         std::mutex& made_lock() {
             static std::mutex lock;
             return lock;

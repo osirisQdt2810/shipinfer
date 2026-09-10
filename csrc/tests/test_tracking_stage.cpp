@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "shipinfer/pipeline/graph/dag.h"
 #include "shipinfer/pipeline/graph/emission.h"
 #include "shipinfer/pipeline/graph/stages.h"
 #include "shipinfer/pipeline/graph/state.h"
@@ -89,6 +90,11 @@ namespace {
         tag.frame_id = frame_id;
         auto state = std::make_unique<FrameState>(tag, 1080, 1920, 20.0f);
         state->set_detections(std::move(detections));
+        // BOTH, the way `DetectStage::do_run` does it: `set_detections` fills the vector and
+        // `set_detected` records that the detector ANSWERED, which is the flag `available()`
+        // reads. A frame with an empty vector and this flag set is "no objects"; without it,
+        // it is "the detector never ran", and the two are different events for a tracker.
+        state->set_detected(true);
         return state;
     }
 
@@ -234,6 +240,76 @@ namespace {
         check(associator->untracked_frames() == 0, "and is not counted as a reordering");
     }
 
+    // The Dag as the graph runs it, because `stage.run` called directly cannot see the defect
+    // below: `Dag::runnable` is what decides whether a stage is offered a frame at all.
+    class SilentObserver : public StageObserver {
+      public:
+        void planned(const std::vector<std::string>&) override {}
+        void finished(const StageOutcome& outcome) override { outcomes.push_back(outcome); }
+
+        std::vector<StageOutcome> outcomes;
+    };
+
+    // Counts calls and answers nothing, which is all this needs: the question is whether the
+    // associator was ASKED.
+    class CountingAssociator : public tracking::Associator {
+      public:
+        std::vector<int> ids(const std::string&, int64_t,
+                             const std::vector<Detection>& dets) override {
+            ++calls;
+            last_size = dets.size();
+            return {};
+        }
+
+        int calls = 0;
+        size_t last_size = 0;
+    };
+
+    void a_zero_detection_frame_still_reaches_the_tracker() {
+        // THE COST OF GETTING THIS WRONG is an invented identity. `needs` is "present and
+        // non-empty", so a stage that NEEDED the detections was skipped on every frame the
+        // detector answered with no boxes -- and a tracker that is not advanced does not age,
+        // so a ship that left frame stays lost-but-alive and the next object near its last
+        // box is published with its id. `track.py` advances on an empty `Detections` for
+        // exactly this reason.
+        auto associator = std::make_shared<CountingAssociator>();
+        Dag dag;
+        dag.add(std::make_unique<TrackStage>("track", "track_out", CropSpec::kAnyClass,
+                                             associator));
+        auto state = frame_with("cam0", 7, {});
+        SilentObserver observer;
+
+        dag.execute(*state, observer);
+
+        check(associator->calls == 1, "the tracker was advanced by the empty frame");
+        check(associator->last_size == 0, "with no detections");
+        check(observer.outcomes.size() == 1 && observer.outcomes[0].ran(),
+              "and the stage RAN, so the collector is not left waiting");
+    }
+
+    void a_frame_the_detector_never_answered_for_is_still_skipped() {
+        // The OTHER arm, and it is not the same event: `track.py` takes `_untracked` when
+        // `meta["detections"] is None`. `consumes` gates on `available()`, which is
+        // `detected_`, so this stage is still absent from that frame's plan.
+        auto associator = std::make_shared<CountingAssociator>();
+        Dag dag;
+        dag.add(std::make_unique<TrackStage>("track", "track_out", CropSpec::kAnyClass,
+                                             associator));
+        FrameTag tag;
+        tag.camera_id = "cam0";
+        tag.frame_id = 8;
+        // NO `set_detected`, which is the whole difference from the test above.
+        FrameState state(tag, 1080, 1920, 20.0f);
+        SilentObserver observer;
+
+        dag.execute(state, observer);
+
+        check(associator->calls == 0, "no detector answer, no tracker call");
+        check(observer.outcomes.size() == 1 &&
+                  observer.outcomes[0].status == StageStatus::Skipped,
+              "and the stage is skipped rather than run or failed");
+    }
+
     void more_ids_than_detections_cannot_walk_off_the_end() {
         // Not a caller this tree has; a tracker that answered long would be a crash otherwise.
         auto associator = std::make_shared<ScriptedAssociator>(std::vector<int>{1, 2, 3, 4});
@@ -257,6 +333,8 @@ int main() {
     a_refused_frame_runs_with_no_ids_rather_than_failing();
     an_ordinary_frame_counts_no_untracked();
     a_misconfigured_tracker_still_fails_the_stage();
+    a_zero_detection_frame_still_reaches_the_tracker();
+    a_frame_the_detector_never_answered_for_is_still_skipped();
     more_ids_than_detections_cannot_walk_off_the_end();
     std::printf("%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;

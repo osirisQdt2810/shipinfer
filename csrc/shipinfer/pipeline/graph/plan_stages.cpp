@@ -159,6 +159,10 @@ namespace shipinfer {
         return kind == "detect" || crops(kind) || kind == "track";
     }
 
+    bool plane_runs_a_model(const std::string& kind) {
+        return plane_runs(kind) && !in_tree(kind);
+    }
+
     std::string crop_payload_of(const std::string& slot) {
         return slot + "_crops";
     }

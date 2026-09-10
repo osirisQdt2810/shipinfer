@@ -249,10 +249,17 @@ namespace shipinfer {
 
     TrackStage::TrackStage(std::string name, std::string output, int class_id,
                            std::shared_ptr<tracking::Associator> associator)
-        // CONSUMES the detections and NEEDS them: there is nothing to associate on a frame the
-        // detector produced no boxes for, and `needs` keeps the stage out of that frame's plan
-        // rather than running it on an empty vector.
-        : Stage(std::move(name), {DETECTIONS}, {DETECTIONS}, {output}),
+        // doc: long two events this stage has to tell apart, and what needing DETECTIONS cost
+        // CONSUMES the detections and does NOT need them. `needs` is "present AND NON-EMPTY",
+        // so needing DETECTIONS skipped the stage on every frame the detector answered with
+        // ZERO boxes -- and an unadvanced tracker does not age, so a ship that left frame
+        // stays lost-but-alive with a Kalman prediction where it was and the next object near
+        // that box is published with its id. `consumes` gates on `available()` (`detected_`),
+        // so the stage still skips the frame the detector never answered for -- `track.py`'s
+        // `detections is None` arm -- and now runs on the zero-box frame, which is that
+        // file's other arm: "an empty `Detections` still advances the tracker below, because
+        // ageing is how a track dies".
+        : Stage(std::move(name), {DETECTIONS}, {}, {output}),
           output_(std::move(output)),
           class_id_(class_id),
           associator_(std::move(associator)) {}
@@ -264,18 +271,18 @@ namespace shipinfer {
         //
         // NO COPY at all for a slot that selects every row, which is the common shape: the
         // associator takes a const reference and the frame's own vector is already the answer.
-        // The copy was unconditional and ran once per frame on the dispatch path.
+        // A selected slot reuses `selected_` rather than allocating one per frame.
         //
         // `!= kAnyClass` and not `>= 0`, the same reading `CropStage` makes: `kNoClass` is
         // negative too, so `>= 0` would treat a declared EMPTY selection as every row -- the
         // opposite of what it means.
-        std::vector<Detection> filtered;
         const std::vector<Detection>* selected = &state.detections();
         if (class_id_ != CropSpec::kAnyClass) {
+            selected_.clear();
             for (const Detection& det : state.detections()) {
-                if (det.class_id == class_id_) filtered.push_back(det);
+                if (det.class_id == class_id_) selected_.push_back(det);
             }
-            selected = &filtered;
+            selected = &selected_;
         }
         ObjectBatch batch;
         batch.name = output_;

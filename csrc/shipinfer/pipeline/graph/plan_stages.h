@@ -107,6 +107,13 @@ namespace shipinfer {
     // reports as "not run here".
     bool plane_runs(const std::string& kind);
 
+    // ...and which of those kinds runs an ENGINE, which is a different question now that one
+    // of them does not. `bench_models.cpp` asks this one: a `track` slot with a stray `model:`
+    // is a loadable chain (`chain.py`: a model on an element that needs none is "meaningless,
+    // but accepted"), and asking `plane_runs` there sent it to `fed_row_of`, which found no
+    // crop or letterbox extent and aborted the WHOLE run over a slot that needs no engine.
+    bool plane_runs_a_model(const std::string& kind);
+
     std::string crop_payload_of(const std::string& slot);
     std::string output_of(const std::string& slot);
 
