@@ -1907,7 +1907,20 @@ hook down, for when the operator asked to see something before it is executed.
       p99 295 492 against 302 104 (6.6 ms). So the reassembly window is 99%+ of the end-to-end
       figure on both sources, the ingest gap shows only in the tail -- and #210's knob result
       was an END-TO-END result all along.
-      (a) IS PR #212, IN REVIEW (10 Sep): `frame_us_{samples,p50,p95,p99,max}` beside the
+      (a) MERGED as #212 (10 Sep), AND ITS REVIEW FOUND #211 ROUND 2'S DEFECT ONE WINDOW
+      OVER: the parity pair's Python half asserts `shipinfer_pipeline_frame_latency_us` in
+      `metrics.py`, a string already on main -- so it is green today and would STAY green
+      if the Python arm never surfaced the number anywhere. The body's "asserts both
+      windows on both planes" therefore claimed more than the tests guard. STILL OPEN, and
+      it is three lines plus a field: `"frame": read_total(runner.metrics.frame_latency_us)`
+      in `counters()` (and `None` in the short-run literal),
+      `ShipInferResult.steady_frame_latency`, and print it beside the reassembly line with
+      the same `bucket upper edges` caveat. TWO SMALLER NOTES: `bench.cpp:522` casts to
+      `uint32_t` with no upper clamp (a frame held past ~71 min would wrap; the
+      neighbouring `waited_us` push has the same shape), and a `frame_us_samples` below
+      `reassembly_us_samples` would be surprising enough to say in the run's own output
+      rather than only in a comment, since `captured_ns` is stamped on every source path.
+      WHAT #212 DID: `frame_us_{samples,p50,p95,p99,max}` beside the
       reassembly ones, `report_window(prefix, ...)` so the two cannot drift in format, the
       sample taken BEFORE `to_json`, and the parity test now asserting BOTH windows on both
       planes. It also had to CHANGE #211's assertion: that test grepped for the literal
