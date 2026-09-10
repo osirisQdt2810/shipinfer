@@ -1,6 +1,6 @@
 # Open work
 
-## WHAT NEEDS THE OPERATOR (9 Sep, night) — five actions, nothing else is blocked
+## WHAT NEEDS THE OPERATOR (10 Sep) — two of five closed; one new, and it is a merge
 
 Everything I own is done or in review; these are the only things I cannot do myself. Each
 line names the ledger item that holds the detail, and the exact action.
@@ -9,8 +9,9 @@ line names the ledger item that holds the detail, and the exact action.
 |---|---|---|
 | 1 | **Answer which comparison the >=5x is against** — four measured ratios: 0.60x events, 1.87x pixels, 7.22x rows, and rows per host CPU-second, which is now TWO numbers one env var apart: **~3.4x as shipped (target NOT met) and 7.17x with `SHIPINFER_CUDA_BLOCKING_SYNC=1` (target MET)**, nine runs, three passes, control reproducing the earlier sitting (10 Sep). **Saying nothing accepts my default: the like-for-like ratio, and the knob left off, so NOT MET.** | `C1-WHAT-IS-THE-5x-AGAINST?`, `DOES-THE-KNOB-MOVE-C1?` |
 | 0 | **Nothing — resolved itself.** A vendor apt repo served a bad index for ~30 min on 9 Sep and `main` went red on a repository this project never installs from; it cleared, and #194 and #196 merged on a re-run. #195 hardens against the next one and carries `automerge`. | `CI-A-VENDOR-REPO-BLOCKS-EVERY-MERGE` |
-| 2 | **Merge #169 by hand** (it edits `.github/workflows/**`, so the review job cannot mint a token). It unblocks the C++ tracking chain, which is a third of the system and is in NO number measured so far. 115 commits behind main but **conflict-free** (`git merge-tree`, 0 hunks, measured 9 Sep); NOT rebased, see its item. | `CSRC-GRAPH-HAS-NO-TRACKING`, `V146b` |
-| 3 | **Merge #187 by hand** (same reason; its own new CI leg is green). REBASED onto current main 9 Sep and re-run, so its CI reflects today's tree rather than a 39-commit-old one. | `V124b`, `V124a-PHASE3` |
+| 2 | **DONE 10 Sep — you merged it** (`a9867e3`). The C++ tracking chain is mine again. | `CSRC-GRAPH-HAS-NO-TRACKING`, `V146b` |
+| 3 | **DONE 10 Sep — you merged it** (`b645dbd`). `V124a-PHASE3` is unblocked. | `V124b`, `V124a-PHASE3` |
+| 6 | **Merge #214, or say no** — it flips the blocking-sync knob to ON by default. Opened WITHOUT `automerge` on purpose: a default change moves every future measurement's baseline, so the evidence is mine and the merge is yours. Measured at the design load (host CPU -40%, rows +25%, 3.41x -> 7.17x on the like-for-like ratio) and at a fifth of it (host CPU -44%/-55%, p99 **-72%/-70%**, zero drops). `SHIPINFER_CUDA_BLOCKING_SYNC=0` is the way back. | `DOES-THE-KNOB-HURT-AT-A-FIFTH-OF-THE-LOAD?` |
 | 4 | **Pull `nvcr.io/nvidia/deepstream` (~6 GB)** onto this box, or say no — the fourth topology's running half needs it; the design half is done. | `T4` |
 | 5 | **shipvision has no LICENSE file at all**, and **where does the NV12 work live?** (the claimed 1021 uncommitted lines are in no checkout I can see). | `SV-LICENSE`, `C9` |
 
