@@ -2700,6 +2700,47 @@ hook down, for when the operator asked to see something before it is executed.
       is not a convenience here, it is the only method that works, and `compare()`'s CPU column
       would have nothing to fill both halves of in one run.
 
+- [~] **V167-GSTREAMER-ONLY-3000 · THE FIRST NUMBERS ON THE MANDATED ROUTE, 10 Sep.**
+      Every figure below is `--source nvdec` over **gstreamer RTSP** from an **offline H.264
+      video** (`benchmarks/baseline/data/.rtsp/*.h264`, encoded once by ffmpeg from the 1080p
+      JPEGs -- so the "make the video" half was already built and is what the RTSP server
+      re-packetises). Binary rebuilt inside `shipinfer-gst:jammy-nvdec` with EVERY lane, so
+      `track` runs: the chain line says `6 stage(s), not run here: decode mtmc output`.
+      4 GPUs (2/3/4/6), 50 cameras x 100 fps x 40 s, fp16, 4 instances/device, blocking sync
+      on. `img/s = frames_accepted / 40`:
+      | chain | modules that EXECUTED | RTSP delivered | **img/s** |
+      |---|---|---|---|
+      | detect only | ingest -> detect | 3 661 | **2 696.5** |
+      | detect + segment | ingest -> detect -> crop -> segment | 2 946 | **486.8** |
+      | detect + person embedder | ingest -> detect -> crop -> embed_person | 2 662 | **856.5** |
+      | all four models | + embed_ship | 1 542 | **264.8** |
+      | the deployable chain, with TRACK | + track | 2 571 | **335.5** |
+      **AGAINST V167's 3 000 TARGET: the whole chain is at 335.5, which is 11%.** One model is
+      at 2 696 and is GENERATOR-limited rather than GPU-limited (RTSP delivered 3 661 of the
+      5 000 asked, and 38 634 frames were dropped by our side), so detect-only's own ceiling on
+      this route is not yet known.
+      **THE SEGMENTER IS THE SINGLE BIGGEST COST AND IT IS A CHAIN DECISION.** Adding it to
+      detect takes 2 696 -> 487, a **5.5x** drop, for **1.47 invocations per image** -- because
+      each one is a 640x640 CROP, the same input extent as a whole detect. The Python plane's
+      `PoolSegment` does NOT crop; it segments the whole frame ONCE
+      (`SEGMENT-NO-CLASSES-ASYMMETRY`). So the C++ plane is paying 1.47 detect-sized
+      inferences per image where the other plane pays ~1, and the chain file's
+      `classes: [ship]` is what selects that.
+      The person embedder costs 2 696 -> 857 (3.1x) for 7.80 invocations of 256x128, which is
+      the cheaper trade per invocation by an order of magnitude.
+      NVDEC IS NOT FASTER THAN REPLAY HERE, which is worth stating because it contradicts the
+      premise the route was chosen on: the same four-model chain is 492 img/s over replay and
+      265 over nvdec, and the deployable chain is 335 over nvdec. Both arms shed most of the
+      offer, so this is a comparison of two saturated systems and the nvdec arm carries the
+      RTSP servers' own cost on the same box (`generator_cpu_s` is reported apart, but the
+      cores are shared). It does not follow that the VRAM route is worse in a deployment where
+      nothing else runs on the host -- it follows that on THIS box, at THIS load, the upload
+      was not the wall.
+      NEXT: (1) find detect-only's real ceiling on this route by removing the generator limit;
+      (2) price the segmenter's whole-frame variant, since that is the plane-divergence and the
+      biggest single cost; (3) the C++ plane still has no `mtmc`, so "decode -> mtmc track"
+      cannot be measured end to end until PR 3 lands (the barrier half is built and green).
+
 - [~] **V165-WHOLE-PIPELINE-4500 · THE TARGET IS NOW ABSOLUTE AND IT IS THE WHOLE CHAIN.**
       4 500 img/s from `decode -> ... -> mtmc track`, not a multiple of anything -- so the
       offer-bound baseline stops being the denominator. The operator also asked the right
