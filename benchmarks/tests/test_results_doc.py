@@ -74,6 +74,12 @@ def test_the_page_says_off_by_default_only_while_it_is() -> None:
     bench = (REPO_ROOT / "csrc" / "shipinfer" / "cli" / "bench.cpp").read_text(encoding="utf-8")
 
     assert "**off by default**" in page
+    # The COUNT first: splitting on the gate marker only inspects what follows it, so a second
+    # unconditional call earlier in `main()` would flip the default with the rest of this green.
+    assert bench.count("gpuSetDeviceFlags(gpuDeviceScheduleBlockingSync)") == 1, (
+        "more than one place sets the flag, so the env gate is no longer the only way in and "
+        "the page's `~3.4x default` figure describes something that does not ship"
+    )
     guarded = bench.split('env_flag("SHIPINFER_CUDA_BLOCKING_SYNC")')[1]
     assert (
         "gpuSetDeviceFlags(gpuDeviceScheduleBlockingSync)" in guarded.split("std::printf")[0]
