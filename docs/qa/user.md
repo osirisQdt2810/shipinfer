@@ -1078,6 +1078,17 @@ The honest candidate is the one I named and skipped, `InstanceStats::ewma_latenc
 emitted: it gives no C1 ratio (the baseline reports no counterpart) but it is the only measure
 of where our own per-stage time goes, and V157's grant covers it.
 
+### V163 · 10 Sep 2026 — tôi đã merge cả 2 PR 169 và 187
+
+> tôi đã merge cả 2 PR 169 và 187
+
+Verified: `a9867e3` (#169, the in-tree external lane and the C++ per-camera tracker behind it)
+and `b645dbd` (#187, the second CI leg with the kernels' Python half) are both on `main`. Two
+of the five operator rows are therefore closed, and the items behind them --
+`CSRC-GRAPH-HAS-NO-TRACKING`, `V146b`, `V124b`, `V124a-PHASE3` -- move from `[!]` to mine.
+The tracking one is the substantial half: `C1`'s own numbers are all measured on a chain with
+no `track` and no `mtmc`, which the results page states as its largest negative claim.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
