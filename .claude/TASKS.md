@@ -2744,16 +2744,31 @@ hook down, for when the operator asked to see something before it is executed.
       four-model chain costs 4.96x of throughput (3 315.7 / 669.1), which is the 2.65 models
       plus the crops and the scatter. So 0.70x is not a scheduling result; it is the price of
       computing four models per image against a baseline that computes one.
-      **AND THE DETECT-ONLY RUN IS GPU-BOUND, WHICH RULES OUT SCHEDULING FOR THE LAST 1.45x.**
-      Measured from the same run's accounting: `per_device_busy_pct ship_detector 2:131.5
-      3:131.1 4:130.3 6:117.8` (two instances per device, so ~130% is both busy) against
-      `command_cores_busy 9.05` of 48 cores -- the host is at ~19% while every GPU is
-      saturated, `pipe` threads are 58.1% of 402.6 host CPU-s, and `accounted_pct` is 99.0. So
-      the remaining 1.45x cannot come from queues, placement or thread counts; it has to come
-      from doing less work per image (INT8, the fused kernels) or from more devices.
-      REMAINING LEVERS for the last 1.45x, both untouched: INT8 (fp16 alone gave 1.23x on the
-      full chain), and the fused kernels -- `ldd csrc/build/bench` still links no shipvision
-      library, so every letterbox and crop in these numbers is torch/CPU.
+      **THE DETECT-ONLY RUN'S ACCOUNTING, AND A CORRECTION TO MY FIRST READING OF IT.**
+      Measured: `per_device_busy_pct ship_detector 2:131.5 3:131.1 4:130.3 6:117.8`,
+      `command_cores_busy 9.05` of 48 cores, `pipe` threads 58.1% of 402.6 host CPU-s,
+      `accounted_pct 99.0`. I first wrote that as "the GPUs are saturated". IT IS NOT: the
+      counter is `compute_us / (seconds * 1e6)` summed over a device's INSTANCES, and there
+      are TWO per device, so the ceiling is 200% and 131.5% means each instance was executing
+      its engine ~66% of the run. A third of each instance's life is elsewhere -- the
+      preprocessing kernels on the same device (not counted in `compute_us`), stream
+      serialisation, or waiting for input. The host at ~19% of cores does rule out a HOST
+      bottleneck, and that much stands.
+      **AND THE FUSED-KERNEL LEVER IS SMALLER THAN I RECORDED, for a reason I should have
+      checked before writing it down.** I wrote "every letterbox and crop in these numbers is
+      torch/CPU" from `ldd csrc/build/bench` linking no shipvision library. WRONG for this
+      plane: `csrc/shipinfer/runtime/ops.cu` is 357 lines of the C++ plane's OWN CUDA kernels,
+      `stages.cpp` includes `runtime/ops.h`, and they already do resize + pad + colour convert
+      + NCHW in one launch per frame (and one launch for a frame's whole crop set), plus the
+      NV12 twins. What shipvision's `imgproc/image_ops.cu` adds over them is mean/std
+      normalisation and BATCHING ACROSS FRAMES -- one launch for B frames instead of B. So
+      linking it is a swap of one GPU kernel for a better-batched GPU kernel, not a CPU->GPU
+      move, and its upside is launch overhead rather than the memory traffic I implied.
+      REMAINING LEVERS for the last 1.45x: INT8 first (fp16 alone gave 1.23x on the full
+      chain, and it cuts the engine time that `per_device_busy_pct` actually measures), then
+      the batched kernels, and the question of where the other third of each instance's life
+      goes -- which is a measurement, not a guess: raise `--det-instances` per device and see
+      whether img/s moves.
       **THE QUESTION THIS PUTS TO THE OPERATOR, and it is theirs rather than mine:** 5x on the
       FOUR-MODEL chain, or 5x on work comparable to the baseline's one model? The metric is
       settled (V164, images/s) -- what is not settled is what the chain must compute while
