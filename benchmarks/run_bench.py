@@ -558,10 +558,14 @@ def _print_reassembly(result: Any) -> None:
     if cell is None or not cell.count:
         return
     window = "whole run" if result.steady_is_whole_run else "steady"
+    # "BUCKET UPPER EDGES" in the line a human reads, not only in the metric's help string:
+    # `quantile` returns the upper edge, so a true 51 ms p50 prints as 63 000 against
+    # `_STAGE_BUCKETS_US` -- ~24% high, always that way, and beside the C++ arm's exact
+    # figures it reads as this plane being slower. The mean is exact, so it goes too.
     print(
-        f"\nreassembly ({window}, {cell.count} frames): "
+        f"\nreassembly ({window}, {cell.count} frames, bucket upper edges): "
         f"p50 {cell.quantile(0.5):.0f} us  p95 {cell.quantile(0.95):.0f} us  "
-        f"p99 {cell.quantile(0.99):.0f} us"
+        f"p99 {cell.quantile(0.99):.0f} us  mean {cell.mean:.0f} us (exact)"
     )
 
 
