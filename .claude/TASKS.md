@@ -1876,6 +1876,28 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE HERE because the C++ plane is the one the measurement was taken on, and a
       Python A/B needs its own before/after at the design load to claim anything.
 
+- [ ] **THE-DISCOUNT-STOPS-AT-THE-GENERATORS-OWN-CHILDREN · #205's three findings (10 Sep).**
+      (1) `cpu_seconds` reads `/proc/<pid>/stat` fields 14/15 only, never 16/17
+      (`cutime`/`cstime`), so a generator's OWN children are not discounted -- and
+      `scripts/rtsp_serve.py:139` shells out to `ffmpeg -c:v libx264` over the whole JPEG set
+      when the `.h264` fixture is cold, as a child of the pid just declared. On a fresh tree
+      that is the largest single piece of generator CPU there is.
+      (2) `declare_generator`'s docstring says "called BY the generator, not by whoever spawned
+      it" while the only call site is the SPAWNER (`declare_generator(process.pid)`) and this
+      PR's own test pins that. A grep-falsifiable comment is worse than none: reword it to
+      describe the drop-box as spawner-declared with the no-arg form available.
+      (3) `_forget` sits behind `if generators - self._declared`, and `_generator_pids` returns
+      an empty set on `OSError`. One such tick AFTER a declaration re-adds the generator's
+      threads, and every later tick sees `generators == _declared` so the purge never runs
+      again -- threads in the table, CPU out of the denominator, i.e. the 284.7% incoherence in
+      miniature and silently. Call `_forget` every tick; `_declared` then has no purpose.
+      TWO BODY NITS, worth answering in the next PR rather than in code: `accounted_pct`'s
+      denominator DID move (`command_cpu_s` -> `bench_cpu_s`) and the body claimed no field
+      changed meaning; and with `--threads-interval 0` the three new fields are ABSENT while
+      `test_no_generator_leaves_the_fields_empty_rather_than_absent` makes "empty, not absent"
+      the principle for the no-generator case. The answer to the second is that absent and
+      empty mean different things here -- "not measured" versus "measured, none found" -- and a
+      zero would be a claim the run cannot make; that belongs in the docstring.
 - [~] **BENCH-CPP-LEAVES-THE-CURRENT-DEVICE · PR #206 IN REVIEW (10 Sep).**
       `gpuGetDevice(&previous)` before the walk and `gpuSetDevice(previous)` after it, so
       the block is safe by construction rather than by position. Source-level assertion in
@@ -1888,7 +1910,7 @@ hook down, for when the operator asked to see something before it is executed.
       `prefer_blocking_sync`. Benign THERE (five lines into `main()`, before any device is
       chosen) which is why it was not a blocker, but it should ride with the next change to
       that file rather than being rediscovered.
-- [~] **HOST-CPU-ACCOUNTING-FOLDS-IN-ITS-GENERATOR · PR #205 IN REVIEW (10 Sep) fixes all four.**
+- [x] **HOST-CPU-ACCOUNTING-FOLDS-IN-ITS-GENERATOR · MERGED as #205 (10 Sep); all four fixed.**
       A drop-box the wrapper exports and the generator declares itself into, so a spawned
       generator is named in `spawned_generators` AND subtracted -- `bench_cpu_s` is what
       `accounted_pct` divides by, because an external `--pid` generator is absent from
