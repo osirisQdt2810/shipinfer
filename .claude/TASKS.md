@@ -2719,8 +2719,38 @@ hook down, for when the operator asked to see something before it is executed.
       shipvision library, so the fused kernels are not in it, and the chain runs ~2.65 models
       per frame (detect -> conditional segment -> two embedders) against the baseline's ONE.
       So 0.58x is what an FP32, unfused, four-model chain does against a one-model FP32
-      baseline. NEXT: build FP16 engines and re-measure, because it is the biggest single
-      factor and the cheapest to try.
+      baseline.
+      **FP16 BUILT AND MEASURED (10 Sep). It helps, and it is not the answer alone.** Both arms
+      on the SAME fp16 engine -- `--precision fp16`, added because the harness could not
+      express that comparison and `require_same_engines` would rightly have refused an fp16
+      plan against an fp32 baseline ("roughly a 2x architecture win that nothing in the harness
+      could detect"):
+      | prec | baseline | ours replay | ratio | ours nvdec | ratio |
+      |---|---|---|---|---|---|
+      | fp32 | 934.8 | 544.4 | 0.58x | 473.6 | 0.51x |
+      | fp16 | 959.6 | 669.1 | **0.70x** | 451.1 | 0.47x |
+      FP16 lifted our replay arm 1.23x and the baseline only 1.03x -- precision matters more on
+      the side running 2.65 models per frame. THE NVDEC ARM GOT WORSE (473.6 -> 451.1), which
+      says its ceiling is not the engines: that path is host-bound.
+      **AND THEN THE DECISIVE EXPERIMENT, which reframes the whole number without arguing the
+      metric.** The baseline runs ONE model per image (`det` and `seg` are two disjoint
+      one-model pipelines). So: the same chain with only `detect`, same four GPUs, same fp16
+      engine, offered 5 000 img/s until it shed 34%:
+      | chain | models/frame | img/s | vs baseline |
+      |---|---|---|---|
+      | full (detect + segment + 2 embedders) | ~2.65 | 669.1 | 0.70x |
+      | detect only -- THE BASELINE'S OWN SHAPE | 1 | **3 315.7** | **3.46x** |
+      ON COMPARABLE WORK THIS PLANE IS ALREADY AT 3.46x AND 1.45x SHORT OF THE TARGET. The
+      four-model chain costs 4.96x of throughput (3 315.7 / 669.1), which is the 2.65 models
+      plus the crops and the scatter. So 0.70x is not a scheduling result; it is the price of
+      computing four models per image against a baseline that computes one.
+      REMAINING LEVERS for the last 1.45x, both untouched: INT8 (fp16 alone gave 1.23x on the
+      full chain), and the fused kernels -- `ldd csrc/build/bench` still links no shipvision
+      library, so every letterbox and crop in these numbers is torch/CPU.
+      **THE QUESTION THIS PUTS TO THE OPERATOR, and it is theirs rather than mine:** 5x on the
+      FOUR-MODEL chain, or 5x on work comparable to the baseline's one model? The metric is
+      settled (V164, images/s) -- what is not settled is what the chain must compute while
+      hitting it, and the two readings are 0.70x and 3.46x of the same runs.
       ORIGINAL:
       METRIC: images processed per second. NOT events/s, NOT rows, NOT rows per host CPU-second
       -- the operator ruled those out by name. FOUR GPUs. TARGET 5x the baseline.
