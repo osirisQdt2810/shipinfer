@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-10 — the C++ bench reports a latency, for the first time
+
+`cli/bench` printed 18 counters and no latency, while the sizing section says the bottleneck is
+load balance and END-TO-END LATENCY. The number was already there and never summarised:
+`reassembly/collector.cpp:133` sets `result.waited_us` on every `FrameResult`. So
+`core/percentile.h` (nearest-rank, `nth_element`, no bucket boundary to argue about) and
+`reassembly_us_{samples,p50,p95,p99,max}`, sampled for EVERY finished frame so a shedding run's
+latency is not the good frames'. Named for the window it measures -- collector-open to finish,
+not capture-to-emission, which needs a stamp `FrameState` lacks
+(`BOTH-PLANES-SHOULD-REPORT-THE-SAME-LATENCY-WINDOW`). IT SETTLED THE KNOB ABOVE: two
+interleaved pairs at the design load put p50 -10/-12%, p95 -15/-14%, p99 -13/-25% with the flag
+ON, so its "latency for host CPU" trade does not materialise here. `max` barely moves.
+
+---
+
 ## 2026-09-10 — the synchronise need not spin (a knob, off by default)
 
 `TrtInstance::execute` ends in `gpuStreamSynchronize` and NEITHER plane set
