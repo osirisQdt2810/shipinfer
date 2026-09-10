@@ -2700,7 +2700,28 @@ hook down, for when the operator asked to see something before it is executed.
       is not a convenience here, it is the only method that works, and `compare()`'s CPU column
       would have nothing to fill both halves of in one run.
 
-- [ ] **FPS-ON-FOUR-GPUS · the measurement V164 asks for, and the only headline that counts.**
+- [~] **FPS-ON-FOUR-GPUS · MEASURED 10 Sep, and it is 0.58x -- 8.6x short of the target.**
+      GPUs 2/3/4/6 (1 and 5 have tenants), 50 x 20 x 40 s, `--seconds 40` so the divisor is
+      exactly 40 (`frames_read` 39 998 confirms 1000/s offered):
+      | arm | images/s | vs baseline |
+      |---|---|---|
+      | baseline `sim_pipeline_v2` | **934.8** SATURATED (det 468.0 + seg 466.8) | 1.00x |
+      | ours, `--source replay` | **544.4** (21 775 accepted) | **0.58x** |
+      | ours, `--source nvdec` | **473.6** (18 946 accepted) | **0.51x** |
+      BOTH ARMS SHED 46-49% of a 1000 img/s offer, so this is CAPACITY and not an offer
+      shortfall: the plane retires ~500 img/s on four GPUs. 5x is 4 674 img/s, so the gap is
+      **8.6x**. Reported to the operator as measured, without arguing the metric -- V164 ruled
+      and events/rows/CPU-seconds are out.
+      **THE LARGEST UNEXPLOITED LEVER IS PRECISION, AND IT IS A REBUILD RATHER THAN A
+      REDESIGN.** Every engine in the chain is FP32: `yolo26n_fp32.engine`,
+      `yolo26n-seg_fp32.engine`, `reid_r50_fp32.engine`. FP16 on an A5000 is typically 2-3x and
+      INT8 more. Two more are untouched in this number: `ldd csrc/build/bench` links NO
+      shipvision library, so the fused kernels are not in it, and the chain runs ~2.65 models
+      per frame (detect -> conditional segment -> two embedders) against the baseline's ONE.
+      So 0.58x is what an FP32, unfused, four-model chain does against a one-model FP32
+      baseline. NEXT: build FP16 engines and re-measure, because it is the biggest single
+      factor and the cheapest to try.
+      ORIGINAL:
       METRIC: images processed per second. NOT events/s, NOT rows, NOT rows per host CPU-second
       -- the operator ruled those out by name. FOUR GPUs. TARGET 5x the baseline.
       WHAT HAS TO BE RE-TAKEN: every C1 figure is five-GPU and most are event-based. Both arms
