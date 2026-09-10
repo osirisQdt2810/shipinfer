@@ -2729,7 +2729,23 @@ hook down, for when the operator asked to see something before it is executed.
       back to the bench's `--precision` choices, because it would be a knob that lies. Found
       while fixing `BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE`, and named by #216's review round 2.
 
-- [~] BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE · OPEN AS #218. On `fix/the-engine-checks-follow-the-chain`:
+- [~] BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE · OPEN AS #218, round 1 fixed and pushed
+      (`79ac5eb`). ONE BLOCKING, and it was THIS PR's OWN DEFECT ONE LEVEL DOWN: an engine
+      check demanding an artefact the run does not load, in `require_same_engines` rather than
+      `require_inputs`. `--systems baseline` was refused because `person_embedder` had no plan,
+      with a message claiming "the baseline loads reid_r50_fp32.engine" -- which the same
+      docstring contradicts two paragraphs above -- and a remedy that could not work, because
+      `Target("reid", ..., version_dir=None)` meant `--force` rebuilt the engine, printed
+      success and installed it nowhere. The operator runs the printed command, the guard fails
+      identically, and the only exit was a manual `cp` no message mentions.
+      FIXED AT THE ROOT: `version_dir` becomes `version_dirs`, a tuple, and `reid` names BOTH
+      embedders -- so `--force` is a remedy that works for all four models, which is also what
+      lets one message serve every pair. The two embedder READMEs said "two steps"; they say
+      one step now. Plus the reviewer's two smaller halves: the guard takes `system` and skips
+      the embedder pair for a baseline-only run, and the absent-plan message no longer claims
+      the baseline loads an engine it never loads. And one test asserted the OPPOSITE of the
+      new behaviour because its premise WAS the defect
+      (`test_a_target_with_no_version_dir_is_never_asked` pinned that reid installs nowhere). On `fix/the-engine-checks-follow-the-chain`:
       `require_inputs(system)` takes the caller's own name -- each system already called it for
       itself, so the name was available and simply not asked for -- the baseline needs the two
       FLAT engines, our side needs the repository, and an unknown name is refused rather than
