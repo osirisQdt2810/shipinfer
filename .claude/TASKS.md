@@ -1762,6 +1762,29 @@ hook down, for when the operator asked to see something before it is executed.
       default, and a Python before/after at the design load needs the harness's sharded
       generator. The knob is inert until asked for, so shipping it ahead of its own A/B changes
       no existing measurement -- but the A/B is still owed and this item stays open for it.
+      **THE A/B WAS ATTEMPTED AND IS NOT DONE, and what stopped it is worth more than a
+      shrug (10 Sep). Five prerequisites, discovered one per attempt; four are now solved.**
+      (1) `models/yolo26n_fp32.engine` and `reid_r50_fp32.engine` -- node-local, absent from a
+      worktree. COPIED (251 MB).
+      (2) `models/yolo26n-seg_fp32.engine` -- **this box had NEVER built it**, so the Python
+      harness's full chain has never run here. BUILT: 14.2 MB in 14.4 s.
+      (3) That build needs `shipvision`, which the bench image does not carry (it is the
+      submodule, editable-installed in the host venv). SOLVED by mounting the primary
+      checkout's `3rdparty/shipvision` at `/shipvision` with `PYTHONPATH`.
+      (4) `_gpus.sh` filters DEVICE NODES and leaves `CUDA_VISIBLE_DEVICES` unset, so five
+      GPUs appear inside the container as ordinals 0-4 -- `--gpus` must name the RENUMBERED
+      ones. `SHIPINFER_GPUS=1,3,4,5,6 --gpus 0,1,2,3,4`.
+      (5) **THE ONE THAT REMAINS**, and it is the constraint CLAUDE.md already documents: at
+      50x20 the harness REFUSES rather than measuring its own generator -- "20 replay cameras
+      at 10 fps deliver ~87 img/s ... the wall is not decoding, it is one interpreter running
+      the camera threads and the pipeline workers together. So: lower --cameras/--fps to a
+      rate this host can generate, or run the generator as several processes." So the A/B at
+      the design load needs the SHARDED generator (`benchmarks/harness/shards.py`).
+      NOT LOWERED TO GET A NUMBER: the harness's own message says "Do not raise the tolerance",
+      and measuring this flag where the host is idle would produce a null result that says
+      nothing about the load it is for -- the host being the wall IS the precondition for the
+      knob to help. The mechanism is measured on the C++ plane at the design load; what is
+      owed here is the same load through this plane's generator.
       ORIGINAL: `src/shipinfer/runtime/device.py` sets no device
       flag either -- `grep -rn "cudaSetDeviceFlags|set_device_flags" src/` is empty -- so the
       Python plane's `ModelInstance` threads wait in the same place for the same reason, and
