@@ -1809,9 +1809,12 @@ hook down, for when the operator asked to see something before it is executed.
       the offer gate would be refused by the drop gate instead, correctly.
       (5c) THE A/B WAS UNFALSIFIABLE AS SET UP -- and this one is a defect on our side, not the
       box's. `grep -c 'blocking synchronise'` was **0 in all four arms, including both flag-on
-      arms**. `device.py:69` logs it at INFO and nothing in `benchmarks/` configures logging,
-      so the root logger's WARNING default swallows it. Had a run finished, neither arm would
-      have said whether the knob applied -- exactly the null result rounds 2 and 3 were about.
+      arms**. `device.py:69` logs it at INFO and the harness configures WARNING
+      (`benchmarks/harness/shipinfer.py:392`, `SHIPINFER_BENCH_LOG`), so the line existed and
+      no arm printed it. Had a run finished, neither arm would have said whether the knob
+      applied -- exactly the null result rounds 2 and 3 were about. The C++ arm does not have
+      this problem because #202 PRINTS it from `cli/bench.cpp`; a level knob nobody sets is
+      not the same as an unconditional line in the run's own output.
       (6) AND THE INSTRUMENT THAT PRODUCED THE C++ FINDING IS NOT ON THIS PLANE.
       `deploy/rootless/bench.sh:150` execs `run_bench.py` directly; only the C++ wrappers wrap
       `scripts/host_cpu.py` (`scripts/run_cpp_bench.sh:82`). So `host cpu:` lines = 0 in all
