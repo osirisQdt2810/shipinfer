@@ -2729,8 +2729,7 @@ hook down, for when the operator asked to see something before it is executed.
       back to the bench's `--precision` choices, because it would be a knob that lies. Found
       while fixing `BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE`, and named by #216's review round 2.
 
-- [~] BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE · BUILT AND GREEN, waiting only for a free PR slot
-      (#217 is in review; one at a time). On `fix/the-engine-checks-follow-the-chain`:
+- [~] BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE · OPEN AS #218. On `fix/the-engine-checks-follow-the-chain`:
       `require_inputs(system)` takes the caller's own name -- each system already called it for
       itself, so the name was available and simply not asked for -- the baseline needs the two
       FLAT engines, our side needs the repository, and an unknown name is refused rather than
