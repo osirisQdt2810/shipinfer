@@ -1762,6 +1762,16 @@ hook down, for when the operator asked to see something before it is executed.
       default, and a Python before/after at the design load needs the harness's sharded
       generator. The knob is inert until asked for, so shipping it ahead of its own A/B changes
       no existing measurement -- but the A/B is still owed and this item stays open for it.
+      **AND THE A/B WOULD HAVE BEEN MEANINGLESS TWICE OVER, both caught by review before the
+      numbers existed (10 Sep).** Round 2: the knob was applied from `InferenceServer.start`,
+      after `DeviceManager.__init__` had already taken every device's primary context, so
+      `cudaSetDeviceFlags` answered 216 and the flag never applied -- a null result waiting to
+      be explained. Round 3: `prefer_blocking_sync` walked every visible device and did not put
+      the caller's device back, so `torch.cuda.synchronize()` with no argument -- which the
+      harness calls at teardown -- would have waited on a DIFFERENT device in the two arms.
+      **An A/B whose arms differ in two ways measures neither**, and #202's method was "one
+      binary and one env var so nothing else differs". Both fixed; the run was stopped mid-way
+      through the first pair rather than finished against the broken code.
       **THE A/B WAS ATTEMPTED AND IS NOT DONE, and what stopped it is worth more than a
       shrug (10 Sep). Five prerequisites, discovered one per attempt; four are now solved.**
       (1) `models/yolo26n_fp32.engine` and `reid_r50_fp32.engine` -- node-local, absent from a
@@ -1779,7 +1789,11 @@ hook down, for when the operator asked to see something before it is executed.
       at 10 fps deliver ~87 img/s ... the wall is not decoding, it is one interpreter running
       the camera threads and the pipeline workers together. So: lower --cameras/--fps to a
       rate this host can generate, or run the generator as several processes." So the A/B at
-      the design load needs the SHARDED generator (`benchmarks/harness/shards.py`).
+      the design load needs the SHARDED generator -- which is a FLAG, `--topology fleet`
+      (`run_bench.py:786`), so prerequisite (5) is solved too and the run is one command.
+      ALSO OWED, from round 3's non-blocking note: `bench.cpp:329-334` has the same
+      unrestored-device wart, benign there (five lines into `main()`, before any device is
+      chosen) but it should ride with the next change to that file.
       NOT LOWERED TO GET A NUMBER: the harness's own message says "Do not raise the tolerance",
       and measuring this flag where the host is idle would produce a null result that says
       nothing about the load it is for -- the host being the wall IS the precondition for the
