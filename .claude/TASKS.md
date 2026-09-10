@@ -7,7 +7,7 @@ line names the ledger item that holds the detail, and the exact action.
 
 | # | Action | Item |
 |---|---|---|
-| 1 | **Answer which comparison the >=5x is against** — four measured ratios: 0.60x events, 1.87x pixels, 7.22x rows, ~3.94x rows per host CPU-second. **Saying nothing accepts my default: the last one, target NOT MET.** | `C1-WHAT-IS-THE-5x-AGAINST?` |
+| 1 | **Answer which comparison the >=5x is against** — four measured ratios: 0.60x events, 1.87x pixels, 7.22x rows, and rows per host CPU-second, which is now TWO numbers one env var apart: **~3.4x as shipped (target NOT met) and 7.17x with `SHIPINFER_CUDA_BLOCKING_SYNC=1` (target MET)**, nine runs, three passes, control reproducing the earlier sitting (10 Sep). **Saying nothing accepts my default: the like-for-like ratio, and the knob left off, so NOT MET.** | `C1-WHAT-IS-THE-5x-AGAINST?`, `DOES-THE-KNOB-MOVE-C1?` |
 | 0 | **Nothing — resolved itself.** A vendor apt repo served a bad index for ~30 min on 9 Sep and `main` went red on a repository this project never installs from; it cleared, and #194 and #196 merged on a re-run. #195 hardens against the next one and carries `automerge`. | `CI-A-VENDOR-REPO-BLOCKS-EVERY-MERGE` |
 | 2 | **Merge #169 by hand** (it edits `.github/workflows/**`, so the review job cannot mint a token). It unblocks the C++ tracking chain, which is a third of the system and is in NO number measured so far. 115 commits behind main but **conflict-free** (`git merge-tree`, 0 hunks, measured 9 Sep); NOT rebased, see its item. | `CSRC-GRAPH-HAS-NO-TRACKING`, `V146b` |
 | 3 | **Merge #187 by hand** (same reason; its own new CI leg is green). REBASED onto current main 9 Sep and re-run, so its CI reflects today's tree rather than a 39-commit-old one. | `V124b`, `V124a-PHASE3` |
@@ -2520,7 +2520,14 @@ hook down, for when the operator asked to see something before it is executed.
                                           that their FLOPs per pixel differ too
         rows into a model       7.22x   -- counts a crop and a frame alike, and 12.7 of our rows
                                           per request ARE crops
-        rows per host CPU-s    ~3.94x   -- ADDED 9 Sep by #190/#191 and the only one with a
+        rows per host CPU-s    ~3.4x DEFAULT / 7.17x WITH THE KNOB -- see
+                                          `DOES-THE-KNOB-MOVE-C1?`: nine runs on 10 Sep, three
+                                          passes, the flag-off control reproducing the 3.94x
+                                          below, so THE ANSWER TO YOUR QUESTION MOVED. 7.17x
+                                          clears >=5x on this ratio; the knob is off by
+                                          default and flipping it waits on a latency figure
+                                          the bench does not print
+                                 ~3.94x   -- ADDED 9 Sep by #190/#191 and the only one with a
                                           LIKE-FOR-LIKE denominator: the same kernel counter
                                           on both arms. Mean of THREE INTERLEAVED pairs
                                           (4.11/3.36/4.36), and a FLOOR -- the baseline's
