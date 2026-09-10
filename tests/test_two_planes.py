@@ -153,12 +153,12 @@ class TestTheUndecidedRowsAreSomebodysWork:
 
 
 class TestBothPlanesNameTheSameLatencyWindow:
-    """The sync rule for the one latency figure both planes can measure.
+    """The sync rule for BOTH latency windows, now that each plane reports both.
 
-    They report DIFFERENT windows otherwise -- the Python plane's `frame_latency_us` is capture
-    to emission, which the C++ plane cannot compute because `FrameState` carries no capture
-    stamp. `BOTH-PLANES-SHOULD-REPORT-THE-SAME-LATENCY-WINDOW` holds that half. This is the
-    half they share, so a rename on either side has to move the other.
+    The reassembly window is collector-open to finished; the frame window is capture to
+    emission, which the Python plane's own docstring calls "the number the deployment is
+    judged on". Neither is comparable across planes unless both planes report it, so a rename
+    on either side has to move the other.
     """
 
     def test_the_reassembly_window_is_reported_on_both(self) -> None:
@@ -168,7 +168,21 @@ class TestBothPlanesNameTheSameLatencyWindow:
         bench = (ROOT / "csrc" / "shipinfer" / "cli" / "bench.cpp").read_text(encoding="utf-8")
 
         assert "shipinfer_pipeline_reassembly_us" in metrics
-        assert "reassembly_us_p50" in bench
+        # On the CALL and not on `reassembly_us_p50`: the C++ names are built from a prefix,
+        # so the literal a reader greps for is not in the source.
+        assert 'report_window("reassembly_us"' in bench
+
+    def test_capture_to_emission_is_reported_on_both(self) -> None:
+        """The half that was open until the C++ plane got a `frame_us` window: it turned out
+        `FrameTag::captured_ns` had been stamped all along and `events/schema.cpp` was already
+        computing the figure, so what was missing was the summary."""
+        metrics = (ROOT / "src" / "shipinfer" / "pipeline" / "metrics.py").read_text(
+            encoding="utf-8"
+        )
+        bench = (ROOT / "csrc" / "shipinfer" / "cli" / "bench.cpp").read_text(encoding="utf-8")
+
+        assert "shipinfer_pipeline_frame_latency_us" in metrics
+        assert 'report_window("frame_us"' in bench
 
     def test_both_measure_it_from_the_collector_opening_the_frame(self) -> None:
         """Same window, or the two figures are not comparable however they are named.
