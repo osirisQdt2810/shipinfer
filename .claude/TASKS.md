@@ -1919,6 +1919,29 @@ hook down, for when the operator asked to see something before it is executed.
       AND THE FLAG-ON ARM IS THE STABLE ONE: 670.5 against 666.7 (0.6% apart) while flag-off
       swings 294.5 / 263.7 with the box's load -- which is what a spin does, since a spinning
       wait costs whatever contention is available to lose.
+      PASS b's BASELINE IS ITS BEST (97.3 against a's 83.0) and pass b's ratio its worst, which
+      is #190's own caveat reproducing: the baseline's throughput is ASSERTED from its
+      configuration minus buffer growth while its CPU-seconds are MEASURED, so a box that
+      starves it lowers the denominator and not the numerator. So these ratios are FLOORS and
+      they err in the baseline's favour -- the same direction #190 recorded.
+      THE LATENCY HALF OF THE TRADE DOES NOT SHOW UP, and `cli/bench` has the counters to say
+      so even though it prints no percentiles. `collector_timeouts` -- a stage that did not
+      answer in time -- goes DOWN with the flag, 67 -> 10 in pass a and 148 -> 76 in pass b,
+      and every other counter improves with it:
+        arm      read  accepted  dropped   complete  timeouts
+        a_off   36901     19286    17613      19219        67
+        a_on    37427     23222    14176      23212        10
+        b_off   35804     13691    22125      13543       148
+        b_on    36262     23745    12505      23669        76
+      `bench.cpp`'s own comment says the knob is off by default "because it trades wake-up
+      latency for host CPU, and the host is only the wall at this load -- at a fifth of it the
+      trade goes the other way". At THIS load the trade does not appear at all: the freed CPU
+      lets the pipeline keep up, so fewer stages time out rather than more. And the Python
+      plane's A/B at a THIRD of the design per-GPU load showed -8% CPU with no throughput
+      change and no harm, so the regime where the caveat bites is lighter than either
+      measurement reaches. NEXT, once pass c lands: propose making it the DEFAULT, with this as
+      the evidence, the env var kept as the override, and the untested light-load regime named
+      in the PR rather than papered over.
       PREREQUISITE FOUND THE HARD WAY: `csrc/build/bench` in this checkout was built 9 Sep
       22:37, BEFORE #202 added the flag, so the first nvdec smoke printed no announce line
       and the arm would have been measured flag-off in both arms. And a plain
