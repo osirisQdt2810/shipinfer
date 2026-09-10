@@ -29,7 +29,7 @@ from typing import Any
 
 from shipinfer.core.metrics.base import labels_key
 
-__all__ = ["HistogramCell", "read_cell"]
+__all__ = ["HistogramCell", "read_cell", "read_total"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +108,35 @@ def read_cell(histogram: Any, **labels: str) -> HistogramCell:
                 total = float(value)
             elif name.endswith("_count"):
                 count = int(value)
+    if not cumulative:
+        return HistogramCell(edges, (0,) * (len(edges) + 1), 0, 0.0)
+    running = [cumulative.get(str(edge), 0) for edge in histogram.buckets]
+    running.append(cumulative.get("+Inf", count))
+    counts = tuple(now - then for then, now in zip([0, *running[:-1]], running, strict=True))
+    return HistogramCell(edges, counts, count, total)
+
+
+def read_total(histogram: Any) -> HistogramCell:
+    """Every cell summed, for a distribution whose label is not the question.
+
+    `read_cell` answers "this stage" or "this camera"; this answers "the fleet". The reassembly
+    window is observed per camera, because that is what every metric on this plane does, and
+    compared against the C++ plane's `reassembly_us_*`, which is one distribution -- so the
+    comparison needs the labels added up rather than one camera picked.
+    """
+    edges = tuple(float(edge) for edge in histogram.buckets)
+    cumulative: dict[str, int] = {}
+    count = 0
+    total = 0.0
+    for name, row_labels, value in histogram.samples():
+        row = tuple(row_labels)
+        if name.endswith("_bucket"):
+            if row and row[-1][0] == "le":
+                cumulative[row[-1][1]] = cumulative.get(row[-1][1], 0) + int(value)
+        elif name.endswith("_sum"):
+            total += float(value)
+        elif name.endswith("_count"):
+            count += int(value)
     if not cumulative:
         return HistogramCell(edges, (0,) * (len(edges) + 1), 0, 0.0)
     running = [cumulative.get(str(edge), 0) for edge in histogram.buckets]

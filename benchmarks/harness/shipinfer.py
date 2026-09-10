@@ -61,7 +61,7 @@ from typing import Any
 
 from benchmarks.harness.analysis import BUFFER_SUFFIX
 from benchmarks.harness.config import BenchConfig
-from benchmarks.harness.histograms import HistogramCell, read_cell
+from benchmarks.harness.histograms import HistogramCell, read_cell, read_total
 from benchmarks.harness.sampler import OccupancySampler
 
 __all__ = [
@@ -487,6 +487,11 @@ def run_shipinfer(
                 "stages": {
                     s: read_cell(runner.metrics.stage_latency_us, stage=s) for s in stages
                 },
+                # The window the C++ plane prints as `reassembly_us_*`, so the two planes'
+                # latency can be compared at all -- bucketed here, exact there. Summed over
+                # cameras, because that plane reports one distribution and this one observes
+                # per camera like everything else here.
+                "reassembly": read_total(runner.metrics.reassembly_us),
             }
 
         sampler = OccupancySampler(log, probe, interval_s=config.sample_interval_s, meta=meta)

@@ -242,6 +242,38 @@ class TestTheProfileReadsOneWindow:
         assert steady.quantile(0.5) >= 2000.0  # the bucket that holds 2000, not the 100s
         assert read_cell(histogram, stage="detect").mean == pytest.approx(860.0)  # whole run
 
+    def test_every_label_is_summed_when_the_label_is_not_the_question(self) -> None:
+        """`read_total`, which the reassembly window needs: it is observed per camera like
+        everything else on that plane, and compared against a C++ figure that is ONE
+        distribution. Picking a camera would compare a fiftieth against the whole."""
+        from benchmarks.harness.histograms import read_cell, read_total
+        from shipinfer.core.metrics.histogram import Histogram
+
+        histogram = Histogram("h", "test")
+        for value in (1000.0, 1000.0):
+            histogram.observe(value, camera="cam0")
+        histogram.observe(500_000.0, camera="cam1")
+
+        whole = read_total(histogram)
+
+        assert whole.count == 3
+        assert whole.count == sum(
+            read_cell(histogram, camera=c).count for c in ("cam0", "cam1")
+        )
+        assert whole.mean == pytest.approx((1000.0 + 1000.0 + 500_000.0) / 3)
+        # And the tail is the slow camera's, which is the point of summing rather than picking.
+        assert whole.quantile(0.99) >= 500_000.0
+        assert read_cell(histogram, camera="cam0").quantile(0.99) < 500_000.0
+
+    def test_an_unobserved_histogram_sums_to_an_empty_cell(self) -> None:
+        from benchmarks.harness.histograms import read_total
+        from shipinfer.core.metrics.histogram import Histogram
+
+        whole = read_total(Histogram("h", "test"))
+
+        assert whole.count == 0
+        assert whole.mean == 0.0
+
     def test_a_snapshot_cannot_be_subtracted_from_an_earlier_one(self) -> None:
         from benchmarks.harness.histograms import read_cell
         from shipinfer.core.metrics.histogram import Histogram
