@@ -1876,7 +1876,15 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE HERE because the C++ plane is the one the measurement was taken on, and a
       Python A/B needs its own before/after at the design load to claim anything.
 
-- [ ] **DOES-THE-KNOB-MOVE-C1? · the one C1 question that does NOT need the operator (10 Sep).**
+- [~] **DOES-THE-KNOB-MOVE-C1? · RUNNING (10 Sep): nine runs, three passes, rotated.**
+      PREREQUISITE FOUND THE HARD WAY: `csrc/build/bench` in this checkout was built 9 Sep
+      22:37, BEFORE #202 added the flag, so the first nvdec smoke printed no announce line
+      and the arm would have been measured flag-off in both arms. And a plain
+      `build_csrc.py` on this host leaves out the `gstreamer` and `nvdec` lanes (no
+      `pkg-config` for them here), so the rebuild has to happen INSIDE
+      `shipinfer-gst:jammy-nvdec` with `SHIPINFER_TENSORRT_DIR=/tensorrt` -- `run.sh` does
+      not mount TensorRT, `cpp.sh` does. Rebuilt, and the smoke prints `cuda: blocking sync
+      on 5 device(s)` with `per_device_rows` in the log.
       `C1-WHAT-IS-THE-5x-AGAINST?` is blocked on which comparison the >=5x is against -- the
       operator's to answer. But the fourth ratio, `rows per host CPU-second`, is the only one
       with a LIKE-FOR-LIKE denominator, and the blocking-sync knob acts directly on its
