@@ -157,6 +157,157 @@ class TestTheAccountingIsDivisible:
         assert out["generator_cores_busy"] == 0.0
 
 
+#: Named threads that burn a per-thread CPU budget, with no project imports: a test for a
+#: `/proc` reader must not depend on the package it happens to be shipped with.
+#: `time.thread_time()` and not `process_time()` -- the latter counts every thread, so five
+#: threads sharing one budget all exit at once and the sampler sees nothing.
+_THREADS = """
+import ctypes, ctypes.util, threading, time
+
+libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
+libc.pthread_self.restype = ctypes.c_void_p
+libc.pthread_self.argtypes = []
+libc.pthread_setname_np.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+
+
+def burn(name, seconds):
+    libc.pthread_setname_np(libc.pthread_self(), name.encode())
+    end = time.thread_time() + seconds
+    while time.thread_time() < end:
+        pass
+
+
+plan = {plan}
+threads = [threading.Thread(target=burn, args=pair) for pair in plan]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join()
+"""
+
+
+class TestWhichThreadsSpentIt:
+    """`NOT-GPU-BOUND-AT-FIVE-GPUS` ruled the GPUs out and asked which threads spend the host
+    CPU. Both planes name their threads now, so `/proc/<pid>/task/` answers it -- and this is
+    the arithmetic that turns those names into a breakdown.
+    """
+
+    #: One long, one medium, two short of a class, and a singleton. Long enough that a 20 ms
+    #: sampler sees several ticks of each.
+    _PLAN = (("pipe-0", 0.6), ("cam-a", 0.3), ("cam-b", 0.3), ("m0.0-detect", 0.15))
+
+    def _run(self, host_cpu: ModuleType, tmp_path: Path) -> dict:
+        out = tmp_path / "cpu.json"
+        code = host_cpu.main(
+            [
+                "--threads",
+                # Explicit, so the class docstring's "a 20 ms sampler" is true rather than
+                # aspirational: the default is 200 ms and these threads live under a second.
+                "--threads-interval",
+                "0.02",
+                "--out",
+                str(out),
+                "--",
+                sys.executable,
+                "-c",
+                _THREADS.format(plan=repr(self._PLAN)),
+            ]
+        )
+        assert code == 0
+        return json.loads(out.read_text(encoding="utf-8"))
+
+    def test_the_breakdown_names_the_classes_and_ranks_them(
+        self, host_cpu: ModuleType, tmp_path: Path
+    ) -> None:
+        """The whole point: `pipe` burned twice what each `cam` did, and the two `cam` threads
+        are one row of two. Ranked by CPU, because the question is where the time goes."""
+        accounting = self._run(host_cpu, tmp_path)
+        threads = accounting["threads"]
+
+        assert {"pipe", "cam", "m0.0"} <= set(threads), threads
+        assert threads["cam"]["threads"] == 2, threads
+        assert threads["pipe"]["cpu_s"] > threads["m0.0"]["cpu_s"], threads
+        assert list(threads) == sorted(threads, key=lambda k: -threads[k]["cpu_s"]), threads
+
+    def test_the_sampled_sum_is_a_lower_bound_and_says_how_much_it_saw(
+        self, host_cpu: ModuleType, tmp_path: Path
+    ) -> None:
+        """Sampling can only miss CPU, never invent it, so the breakdown's own
+        trustworthiness is a number in every run rather than a caveat in a docstring."""
+        accounting = self._run(host_cpu, tmp_path)
+
+        assert accounting["threads_cpu_s"] <= accounting["command_cpu_s"] + 0.05
+        assert 0.0 < accounting["accounted_pct"] <= 100.5, accounting
+        assert accounting["threads_cpu_s"] == pytest.approx(
+            sum(entry["cpu_s"] for entry in accounting["threads"].values()), abs=0.05
+        )
+
+    def test_it_is_off_unless_asked_for(self, host_cpu: ModuleType, tmp_path: Path) -> None:
+        """Every existing reader of this JSON predates the breakdown, so the default output
+        must not change shape."""
+        out = tmp_path / "plain.json"
+        host_cpu.main(
+            ["--out", str(out), "--", sys.executable, "-c", _SPIN.format(seconds=SPIN_S)]
+        )
+
+        accounting = json.loads(out.read_text(encoding="utf-8"))
+        assert "threads" not in accounting
+        assert "accounted_pct" not in accounting
+
+    def test_a_class_is_the_name_up_to_its_discriminator(self, host_cpu: ModuleType) -> None:
+        """The grouping both planes' schemes were designed for -- and `m3.0` keeps its DEVICE,
+        because which device's instances are hot is the question behind the question."""
+        assert host_cpu.thread_class("cam-camera-0049") == "cam"
+        assert host_cpu.thread_class("pipe-127") == "pipe"
+        assert host_cpu.thread_class("m3.0-ship_detec") == "m3.0"
+        assert host_cpu.thread_class("sweeper") == "sweeper"
+        assert host_cpu.thread_class("bench") == "bench"
+
+    def test_the_heaviest_individual_threads_are_named(
+        self, host_cpu: ModuleType, tmp_path: Path
+    ) -> None:
+        """A class can hide the answer: at the design load each `m<device>.<ordinal>` class
+        holds one thread per MODEL, so only the individual names say which model costs most."""
+        accounting = self._run(host_cpu, tmp_path)
+
+        top = accounting["threads_top"]
+        names = [row["name"] for row in top]
+        assert "pipe-0" in names, top
+        assert [row["cpu_s"] for row in top] == sorted(
+            (row["cpu_s"] for row in top), reverse=True
+        ), top
+        assert max(row["cpu_s"] for row in top) <= accounting["command_cpu_s"] + 0.05
+        assert len({row["tid"] for row in top}) == len(top), top
+
+    def test_two_threads_with_one_name_are_two_rows(self, host_cpu: ModuleType) -> None:
+        """A name is not unique -- GStreamer gives all fifty cameras' jitterbuffer threads the
+        same `comm` -- and a mapping keyed by name dropped every duplicate but the last, i.e.
+        the SMALLEST of a collided set. The class row was right all along; only this one lied,
+        and it lied in the direction of "those threads are few and cheap".
+        """
+        sampler = host_cpu.ThreadSampler(os.getpid(), interval_s=0.01)
+        sampler._seen = {
+            11: ("rtpjitterbuffer", 0.9),
+            12: ("rtpjitterbuffer", 0.5),
+            13: ("rtpjitterbuffer", 0.1),
+        }
+
+        top = sampler.top()
+
+        assert [row["cpu_s"] for row in top] == [0.9, 0.5, 0.1], top
+        assert {row["tid"] for row in top} == {11, 12, 13}, top
+        assert sampler.by_class()["rtpjitterbuffer"] == {"cpu_s": 1.5, "threads": 3}
+
+    def test_a_thread_that_exits_keeps_the_cpu_it_used(self, host_cpu: ModuleType) -> None:
+        """A tid that vanishes between ticks must not fall out of the total: the highest
+        reading per tid is kept, because a thread's CPU only ever grows."""
+        sampler = host_cpu.ThreadSampler(os.getpid(), interval_s=0.01)
+        sampler._seen = {7: ("cam-a", 1.5), 8: ("cam-b", 0.5)}
+
+        assert sampler.total() == 2.0
+        assert sampler.by_class()["cam"] == {"cpu_s": 2.0, "threads": 2}
+
+
 class TestTheWrapperIsTransparentToTheCommand:
     """It sits between the harness and the bench, so its own behaviour must be invisible."""
 
