@@ -1904,7 +1904,32 @@ hook down, for when the operator asked to see something before it is executed.
       (`pipeline/graph/state.h:72`).
       TWO PLANES: this is a per-frame seam, so the Python plane owes the same figure and the
       parity harness the same assertion -- open its ledger item with the PR rather than after.
-      THEN the default question is answerable with evidence instead of a proxy.
+      **BUILT AND MEASURED (10 Sep); the PR waits on #209 merging.** `core/percentile.h`
+      (nearest-rank, header-only, offline-testable), `csrc/tests/test_percentile.cpp` (18
+      checks -- it caught my OWN wrong expectation: nearest-rank p99 of 100 samples is the
+      99th, so a single slow frame reaches `max` and not p99, which is why the report prints
+      both), the samples collected in `cli/bench.cpp`'s emit lambda under the same mutex
+      pattern `unwritable_by_camera` uses, and `reassembly_us_{samples,p50,p95,p99,max}`
+      printed and added to `run_cpp_bench.sh`'s alternation. Demonstrated at 8x10 on 2 GPUs:
+      p50 51.4 ms, p95 71.0 ms, p99 96.4 ms, max 242.7 ms over 2400 samples.
+      **AND IT ANSWERS THE DEFAULT QUESTION, IN THE DIRECTION THAT REMOVES THE LAST OBJECTION.**
+      Two interleaved pairs at the design load (50x20x40 s, `--source nvdec`, GPUs 3/4/5/6/0):
+        | | off1 | on1 | off2 | on2 | pair 1 | pair 2 |
+        |---|---|---|---|---|---|---|
+        | p50 us | 185 384 | 166 385 | 201 429 | 176 805 | **-10.2%** | **-12.2%** |
+        | p95 us | 345 093 | 293 796 | 396 938 | 343 406 | **-14.9%** | **-13.5%** |
+        | p99 us | 775 312 | 677 782 | 896 838 | 669 229 | **-12.6%** | **-25.4%** |
+        | max us | 1 582 798 | 1 576 183 | 1 603 140 | 1 596 779 | -0.4% | -0.4% |
+        | complete | 21 663 | 24 611 | 19 396 | 22 955 | +13.6% | +18.4% |
+        | timeouts | 8 | 4 | 50 | 3 | | |
+      `bench.cpp`'s own comment says the knob "trades wake-up latency for host CPU". AT THIS
+      LOAD IT DOES NOT: latency falls at every rank in both pairs, because the freed CPU lets
+      the pipeline keep up -- the wake-up cost is real per synchronise and smaller than the
+      queueing it removes. The max barely moves, which is the honest caveat: the worst frame is
+      a shed-and-retry tail the knob does not touch.
+      SO THE DEFAULT QUESTION IS NOW ANSWERABLE, and the answer the evidence supports is ON:
+      -40% host CPU, +25% rows, 3.41x -> 7.17x on C1's like-for-like ratio, fewer drops in
+      every pass, and latency lower at p50/p95/p99. That is a separate PR after this one.
 - [~] **THE-GENERATOR-TREE-IS-REMEMBERED-NOT-PROVEN · PR #209 IN REVIEW (10 Sep), and it
       carries #208's notes 1 and 3 too -- the same failure shape twice.**
       A GUARD THAT PASSES ON THE DRIFT IT GUARDS, in two places: reinstating the growth
