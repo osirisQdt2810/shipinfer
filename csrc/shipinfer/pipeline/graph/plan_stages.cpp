@@ -1,6 +1,6 @@
 #include "shipinfer/pipeline/graph/plan_stages.h"
 
-#include "shipinfer/pipeline/tracking/registry.h"
+#include "shipinfer/pipeline/tracking/associator.h"
 
 namespace shipinfer {
 
@@ -26,7 +26,7 @@ namespace shipinfer {
             // the Dag asked for it. Asking the registry makes a lane-less build report
             // `track` in `unsupported` instead, which is what it did before there was a
             // tracker at all and is the only coherent answer.
-            if (in_tree(node.kind)) return tracking::TRACKERS().has(node.impl);
+            if (in_tree(node.kind)) return tracking::ASSOCIATORS().has(node.impl);
             return !node.model.empty() && loaded.count(node.model) != 0;
         }
 

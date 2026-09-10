@@ -1,6 +1,6 @@
 #include "shipinfer/pipeline/graph/from_plan.h"
 
-#include "shipinfer/pipeline/tracking/registry.h"
+#include "shipinfer/pipeline/tracking/associator.h"
 
 namespace shipinfer {
 
@@ -37,11 +37,13 @@ namespace shipinfer {
         // [embed_ship, embed_person]`): the ids are scattered onto the same rows their vectors
         // are, and a tracker that ran first would be tracking boxes nothing had embedded.
         //
-        // BY NAME, and this file includes no tracker header: `tracking/registry.h` explains
-        // that including one would drag an external lane into the closure of the whole graph
-        // plane -- measured, as a binary that would not link at all.
+        // The ASSOCIATOR by name, and the stage built here: `tracking/associator.h` explains
+        // the two build lines that put the tracker in another unit -- one measured as a binary
+        // that would not link, the other as a lane whose CI job is g++ alone.
         if (planned.track) {
-            dag.add(tracking::create_track_stage(planned.track->impl, *planned.track));
+            dag.add(
+                std::make_unique<TrackStage>(planned.track->slot, planned.track->output,
+                                             tracking::create_associator(planned.track->impl)));
         }
         return dag;
     }

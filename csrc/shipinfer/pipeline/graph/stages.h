@@ -22,6 +22,7 @@
 #include "shipinfer/pipeline/graph/plan_stages.h"
 #include "shipinfer/pipeline/graph/stage.h"
 #include "shipinfer/pipeline/graph/state.h"
+#include "shipinfer/pipeline/tracking/associator.h"
 
 namespace shipinfer {
 
@@ -128,6 +129,30 @@ namespace shipinfer {
     // Applied per CHUNK, before anything is appended, so the fold sees one response's rows
     // together. Folding after the join would read three chunks' answers as one.
     using ObjectCombine = std::function<OutputTensor(const InferenceResponse&)>;
+
+    // One camera's tracker over one frame's detections, as an `ObjectBatch` of ids.
+    //
+    // NOT a `ModelStage`: no engine and no queue, so it runs on the worker's own thread like
+    // `CropStage`. The associator is SHARED by every worker -- one tracker per camera is the
+    // correctness constraint -- and it is an interface, not a tracker: `tracking/associator.h`
+    // explains the two build lines that forbid this unit from including one.
+    //
+    // A DETECTION THE TRACKER DID NOT CONFIRM gets no row, which leaves its `track_id` null
+    // rather than `-1`. That is what the Python plane emits for the same case, and the chain
+    // file's own comment says why it happens: a detection between the publish threshold and
+    // the tracker's own only ever CONTINUES a track.
+    class TrackStage : public Stage {
+      public:
+        TrackStage(std::string name, std::string output,
+                   std::shared_ptr<tracking::Associator> associator);
+
+      protected:
+        size_t do_run(FrameState& state) override;
+
+      private:
+        std::string output_;
+        std::shared_ptr<tracking::Associator> associator_;
+    };
 
     class ObjectStage : public ModelStage {
       public:

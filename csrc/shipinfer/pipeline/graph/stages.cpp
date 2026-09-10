@@ -247,6 +247,40 @@ namespace shipinfer {
           output_(std::move(output)),
           combine_(std::move(combine)) {}
 
+    TrackStage::TrackStage(std::string name, std::string output,
+                           std::shared_ptr<tracking::Associator> associator)
+        // CONSUMES the detections and NEEDS them: there is nothing to associate on a frame the
+        // detector produced no boxes for, and `needs` keeps the stage out of that frame's plan
+        // rather than running it on an empty vector.
+        : Stage(std::move(name), {DETECTIONS}, {DETECTIONS}, {output}),
+          output_(std::move(output)),
+          associator_(std::move(associator)) {}
+
+    size_t TrackStage::do_run(FrameState& state) {
+        const std::vector<Detection>& detections = state.detections();
+        ObjectBatch batch;
+        batch.name = output_;
+        batch.width = 1;
+        const std::vector<int> ids =
+            associator_->ids(state.tag().camera_id, state.tag().frame_id, detections);
+        for (size_t row = 0; row < ids.size() && row < detections.size(); ++row) {
+            // A row per CONFIRMED id only. `-1` is "matched no track", and an absent row is how
+            // `events/records.cpp` leaves `track_id` null for that object.
+            if (ids[row] < 0) continue;
+            batch.object_indices.push_back(detections[row].index);
+            // FLOAT, because `ObjectBatch::data` is one: exact for ids below 2^24, and a
+            // monotonic per-camera counter reaches that after ~16.7M tracks. The Python plane
+            // carries the same ids as `int64`, so the two planes differ THERE and the ledger
+            // holds the item; nothing here can widen the carrier alone.
+            batch.data.push_back(static_cast<float>(ids[row]));
+        }
+        const size_t rows = batch.rows();
+        // Attached even when EMPTY, like a crop payload: the name exists, so a reader that
+        // joins on it finds an answer rather than a missing key.
+        state.attach(std::move(batch));
+        return rows;
+    }
+
     size_t ObjectStage::do_run(FrameState& state) {
         const DevicePayload* payload = state.payload(source_);
         if (payload == nullptr)

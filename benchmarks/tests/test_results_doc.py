@@ -38,7 +38,7 @@ def test_the_chain_measured_now_tracks_and_still_has_no_mtmc(name: str) -> None:
 
     assert "mtmc" not in body, f"{name} now builds an mtmc node; RESULTS.md still excludes it"
     if name == "from_plan.cpp":
-        assert "create_track_stage" in body, (
+        assert "create_associator" in body, (
             "the graph no longer asks for a tracker, so the page's tracking numbers describe "
             "a chain that is not being built"
         )
