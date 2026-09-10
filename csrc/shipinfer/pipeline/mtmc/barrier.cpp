@@ -1,0 +1,395 @@
+#include "shipinfer/pipeline/mtmc/barrier.h"
+
+#include <algorithm>
+#include <chrono>
+
+namespace shipinfer::mtmc {
+
+    namespace {
+
+        double steady_seconds() {
+            using namespace std::chrono;
+            return duration_cast<duration<double>>(steady_clock::now().time_since_epoch())
+                .count();
+        }
+
+        // Whether `live` is a subset of the cameras that reported into `bucket`.
+        bool every_live_reported(const std::set<std::string>& live,
+                                 const std::map<std::string, double>& reported) {
+            for (const std::string& camera : live) {
+                if (reported.count(camera) == 0) return false;
+            }
+            return true;
+        }
+
+    }  // namespace
+
+    WaiterBudget::WaiterBudget(int permits) : permits_(permits) {
+        if (permits < 0) {
+            throw ConfigError("a waiter budget cannot have " + std::to_string(permits) +
+                              " permits; 0 means 'never wait', which is what a single-worker "
+                              "runner gets");
+        }
+    }
+
+    int WaiterBudget::held() const {
+        std::lock_guard<std::mutex> guard(lock_);
+        return held_;
+    }
+
+    bool WaiterBudget::acquire() {
+        std::lock_guard<std::mutex> guard(lock_);
+        if (held_ >= permits_) return false;
+        ++held_;
+        return true;
+    }
+
+    void WaiterBudget::release() {
+        std::lock_guard<std::mutex> guard(lock_);
+        if (held_ <= 0) {
+            throw ServerStateError(
+                "a waiter budget was released more times than it was acquired; the permit "
+                "count is now meaningless and the never-starve guard with it");
+        }
+        --held_;
+    }
+
+    InstantBarrier::InstantBarrier(Options options, std::shared_ptr<WaiterBudget> budget,
+                                   Clock clock, OnEvent on_event)
+        : window_s_(options.sync_window_s),
+          workers_(options.workers),
+          max_instants_(options.max_instants),
+          budget_(budget ? std::move(budget)
+                         : std::make_shared<WaiterBudget>(std::max(0, options.workers - 1))),
+          clock_(clock ? std::move(clock) : Clock(steady_seconds)),
+          on_event_(std::move(on_event)),
+          // Four windows of history, floored at eight: long enough that a frame arriving a
+          // few instants late is called LATE rather than opening a new instant, short enough
+          // that the map is not a leak.
+          recent_limit_(static_cast<size_t>(std::max(8, options.max_instants * 4))) {
+        if (!(window_s_ > 0.0)) {
+            throw ConfigError("sync_window_s must be positive, got " +
+                              std::to_string(window_s_) +
+                              "; an instant with no width admits one camera and refuses the "
+                              "rest of its group as late");
+        }
+        if (max_instants_ < 1) {
+            throw ConfigError("max_instants must be at least 1, got " +
+                              std::to_string(max_instants_) +
+                              "; zero open instants means every frame evicts itself");
+        }
+    }
+
+    int InstantBarrier::waiters() const {
+        std::lock_guard<std::mutex> guard(lock_);
+        return waiters_;
+    }
+
+    std::set<std::string> InstantBarrier::live() const {
+        std::lock_guard<std::mutex> guard(lock_);
+        return live_;
+    }
+
+    size_t InstantBarrier::open_instants() const {
+        std::lock_guard<std::mutex> guard(lock_);
+        return buckets_.size();
+    }
+
+    std::map<std::string, uint64_t> InstantBarrier::instant_stats() const {
+        std::lock_guard<std::mutex> guard(lock_);
+        return instant_counts_;
+    }
+
+    std::map<std::string, uint64_t> InstantBarrier::frame_stats() const {
+        std::lock_guard<std::mutex> guard(lock_);
+        return frame_counts_;
+    }
+
+    void InstantBarrier::refresh_live() {
+        live_ = hooked_ ? announced_ : seen_;
+    }
+
+    void InstantBarrier::camera_added(const std::string& camera_id) {
+        std::lock_guard<std::mutex> guard(lock_);
+        // ANNOUNCED WINS from the first announcement onward. Before any hook fires the live
+        // set is what has been seen, so a chain with no lifecycle wiring still closes on
+        // evidence; after one, a camera that has never sent a frame is still waited for,
+        // which is the whole point of the hook.
+        hooked_ = true;
+        announced_.insert(camera_id);
+        refresh_live();
+    }
+
+    void InstantBarrier::drop_camera(const std::string& camera_id) {
+        std::lock_guard<std::mutex> guard(lock_);
+        announced_.erase(camera_id);
+        seen_.erase(camera_id);
+        refresh_live();
+        // SEALED, NOT CLOSED, and by the lifecycle thread: dropping the last missing camera
+        // completes every open instant, and this thread has no association function -- so it
+        // marks them and a waiter does the work. `seal` explains why that split matters.
+        for (auto& [instant, bucket] : buckets_) {
+            if (bucket->ready || bucket->done) continue;
+            if (every_live_reported(live_, bucket->reported)) {
+                seal(*bucket, kClosedComplete);
+            }
+        }
+    }
+
+    std::shared_ptr<InstantBarrier::Bucket> InstantBarrier::match(double capture_s) {
+        // NEWEST FIRST, because when two open buckets could both take a capture the later one
+        // is the instant the group is currently filling; joining the older would put this
+        // frame in an instant its own camera may already have contributed to.
+        for (auto it = buckets_.rbegin(); it != buckets_.rend(); ++it) {
+            Bucket& bucket = *it->second;
+            if (bucket.ready || bucket.done) continue;
+            const double spread =
+                std::max(bucket.last, capture_s) - std::min(bucket.first, capture_s);
+            if (spread < window_s_) return it->second;
+        }
+        return nullptr;
+    }
+
+    int64_t InstantBarrier::late_instant(double capture_s) const {
+        for (auto it = recent_.rbegin(); it != recent_.rend(); ++it) {
+            const auto& [first, last] = it->second;
+            if (first <= capture_s && capture_s <= last) return it->first;
+        }
+        return 0;
+    }
+
+    std::shared_ptr<InstantBarrier::Bucket> InstantBarrier::open(double capture_s, double now) {
+        evict();
+        ++next_instant_;
+        auto bucket = std::make_shared<Bucket>();
+        bucket->instant = next_instant_;
+        bucket->deadline = now + window_s_;
+        bucket->first = capture_s;
+        bucket->last = capture_s;
+        buckets_[bucket->instant] = bucket;
+        return bucket;
+    }
+
+    void InstantBarrier::seal(Bucket& bucket, const std::string& reason) {
+        // doc: long why sealing is not closing, and who is allowed to run the association
+        // SEALED rather than closed on the spot because the thread that seals is not a member
+        // of this instant: if it ran the association and the callback threw, the exception
+        // would fail ITS frame -- a frame from a different instant -- while the instant that
+        // actually failed was somebody else's. A waiter is a worker holding the callback and
+        // owns the answer it is waiting for, so it is the right thread to run it. A sealed
+        // bucket with no waiters simply expires: every frame in it was emitted by the
+        // never-starve guard and nobody is owed an answer.
+        bucket.ready = true;
+        bucket.ready_reason = reason;
+        if (bucket.waiters > 0) cond_.notify_all();
+    }
+
+    InstantOutcome InstantBarrier::missed(const std::string& reason, int64_t instant) {
+        ++frame_counts_[reason];
+        InstantOutcome outcome;
+        outcome.reason = reason;
+        outcome.instant = instant;
+        return outcome;
+    }
+
+    void InstantBarrier::event(const std::string& reason) {
+        ++instant_counts_[reason];
+        if (on_event_) on_event_(reason);
+    }
+
+    void InstantBarrier::remember(const Bucket& bucket) {
+        recent_[bucket.instant] = {bucket.first, bucket.last};
+        while (recent_.size() > recent_limit_) recent_.erase(recent_.begin());
+    }
+
+    InstantOutcome InstantBarrier::close(const std::shared_ptr<Bucket>& bucket,
+                                         const std::string& reason,
+                                         const Association& associate) {
+        // OUT OF THE MAP BEFORE THE CALLBACK RUNS, so a frame arriving for this instant while
+        // the association is in flight is late rather than a member of a bucket that is
+        // already being consumed. The `shared_ptr` is what makes that safe with waiters still
+        // asleep on it.
+        buckets_.erase(bucket->instant);
+        remember(*bucket);
+        Results results;
+        try {
+            results = associate(bucket->entries);
+        } catch (...) {
+            bucket->results = nullptr;
+            bucket->associated = false;
+            bucket->reason = kDroppedFailed;
+            bucket->done = true;
+            event(kDroppedFailed);
+            cond_.notify_all();
+            throw;
+        }
+        bucket->results = std::move(results);
+        bucket->associated = true;
+        bucket->reason = reason;
+        bucket->done = true;
+        event(reason);
+        cond_.notify_all();
+        InstantOutcome outcome;
+        outcome.reason = reason;
+        outcome.results = bucket->results;
+        outcome.associated = true;
+        outcome.instant = bucket->instant;
+        return outcome;
+    }
+
+    void InstantBarrier::retire(double now) {
+        // doc: long why an expired bucket with no waiters is discarded rather than associated
+        // Such a bucket holds only frames the never-starve guard already emitted, so no
+        // association would have a reader -- running one would cost a tracker call and a
+        // global-id assignment for nothing, and NOT running one would leave the bucket to be
+        // evicted later and read as clock skew. It is discarded and counted under the reason
+        // it was SEALED with, because "a camera moved on" is what happened to that instant and
+        // `kClosedAdvanced` is the share an operator reads before touching `sync_window_ms`.
+        if (buckets_.empty()) return;
+        // The front bucket has the earliest deadline of all -- every deadline is one window
+        // after its bucket opened and the map is ordered by instant id -- so if it has not
+        // expired, none has. This runs on every submit and almost always stops here.
+        if (buckets_.begin()->second->deadline > now) return;
+        std::vector<int64_t> stale;
+        for (const auto& [instant, bucket] : buckets_) {
+            if (bucket->waiters == 0 && bucket->deadline <= now) stale.push_back(instant);
+        }
+        for (const int64_t instant : stale) {
+            const auto found = buckets_.find(instant);
+            if (found == buckets_.end()) continue;
+            const std::shared_ptr<Bucket> bucket = found->second;
+            buckets_.erase(found);
+            remember(*bucket);
+            bucket->results = nullptr;
+            bucket->associated = false;
+            bucket->reason =
+                bucket->ready ? bucket->ready_reason : std::string(kDroppedExpired);
+            bucket->done = true;
+            event(bucket->reason);
+        }
+        if (!stale.empty()) cond_.notify_all();
+    }
+
+    void InstantBarrier::evict() {
+        // OLDEST BY INSTANT ID, which is the order buckets were opened and therefore also the
+        // order their deadlines expire. Evicting by capture time instead would let a single
+        // camera with a stale clock push out the instant the rest of the group is actively
+        // filling, which is the opposite of what eviction is for.
+        while (buckets_.size() >= static_cast<size_t>(max_instants_)) {
+            const std::shared_ptr<Bucket> bucket = buckets_.begin()->second;
+            buckets_.erase(buckets_.begin());
+            remember(*bucket);
+            bucket->results = nullptr;
+            bucket->associated = false;
+            bucket->reason = kDroppedEvicted;
+            bucket->done = true;
+            event(kDroppedEvicted);
+            cond_.notify_all();
+        }
+    }
+
+    size_t InstantBarrier::close_all(const std::string& reason) {
+        std::lock_guard<std::mutex> guard(lock_);
+        closed_ = true;
+        const size_t resolved = buckets_.size();
+        while (!buckets_.empty()) {
+            const std::shared_ptr<Bucket> bucket = buckets_.begin()->second;
+            buckets_.erase(buckets_.begin());
+            remember(*bucket);
+            bucket->results = nullptr;
+            bucket->associated = false;
+            bucket->reason = reason;
+            bucket->done = true;
+            event(reason);
+        }
+        cond_.notify_all();
+        return resolved;
+    }
+
+    InstantOutcome InstantBarrier::submit(const std::string& camera_id, double capture_s,
+                                          std::shared_ptr<void> payload,
+                                          const Association& associate) {
+        std::unique_lock<std::mutex> guard(lock_);
+        if (closed_) return missed(kDroppedShutdown, 0);
+        const double now = clock_();
+        retire(now);
+        if (seen_.insert(camera_id).second) refresh_live();
+
+        std::shared_ptr<Bucket> bucket = match(capture_s);
+        if (!bucket) {
+            const int64_t late = late_instant(capture_s);
+            if (late != 0) return missed(kMissedLate, late);
+            bucket = open(capture_s, now);
+        } else {
+            const auto reported = bucket->reported.find(camera_id);
+            if (reported != bucket->reported.end()) {
+                if (capture_s <= reported->second) {
+                    return missed(kMissedDuplicate, bucket->instant);
+                }
+                // This camera has moved on, so that instant has every frame it will ever get
+                // from it. Seal it -- a waiter closes it -- and put this frame in the instant
+                // that starts here.
+                seal(*bucket, kClosedAdvanced);
+                bucket = open(capture_s, now);
+            }
+        }
+
+        bucket->reported[camera_id] = capture_s;
+        bucket->entries.push_back(InstantEntry{camera_id, std::move(payload)});
+        bucket->first = std::min(bucket->first, capture_s);
+        bucket->last = std::max(bucket->last, capture_s);
+
+        if (every_live_reported(live_, bucket->reported)) {
+            return close(bucket, kClosedComplete, associate);
+        }
+        // The never-starve guard, counted process-wide: two barriers each admitting
+        // `workers - 1` waiters would park every worker between them.
+        if (!budget_->acquire()) return missed(kMissedWouldStarve, bucket->instant);
+
+        // PAIRED STRUCTURALLY, the way Python's `try`/`finally` is: the permit and both
+        // waiter counts come back on every exit from the wait, including a throw.
+        struct Waiting {
+            InstantBarrier& barrier;
+            Bucket& bucket;
+            ~Waiting() {
+                --barrier.waiters_;
+                --bucket.waiters;
+                barrier.budget_->release();
+            }
+        };
+        {
+            ++waiters_;
+            ++bucket->waiters;
+            const Waiting held{*this, *bucket};
+            // Re-derived from `clock_` on every wake rather than computed once: a notify_all
+            // for a DIFFERENT bucket wakes every waiter here anyway, and re-deriving is what
+            // puts expiry on the injected clock. One `wait_for` with the whole window would
+            // hand the decision back to real time whatever `clock_` says.
+            while (!(bucket->done || bucket->ready)) {
+                const double remaining = bucket->deadline - clock_();
+                if (remaining <= 0.0) break;
+                cond_.wait_for(guard, std::chrono::duration<double>(remaining));
+            }
+        }
+        if (bucket->done) {
+            InstantOutcome outcome;
+            outcome.reason = bucket->reason;
+            outcome.results = bucket->results;
+            outcome.associated = bucket->associated;
+            outcome.instant = bucket->instant;
+            return outcome;
+        }
+        const auto still = buckets_.find(bucket->instant);
+        if (still != buckets_.end() && still->second == bucket) {
+            // Either somebody sealed it while we slept or the window ran out. Both mean: this
+            // thread is the closer.
+            return close(bucket,
+                         bucket->ready ? bucket->ready_reason : std::string(kClosedWindow),
+                         associate);
+        }
+        // Removed from the map without being marked done. No path does that today; a refusal
+        // is still better than a hang if one is ever added.
+        return missed(kDroppedExpired, bucket->instant);
+    }
+
+}  // namespace shipinfer::mtmc
