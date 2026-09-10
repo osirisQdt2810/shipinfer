@@ -1876,8 +1876,17 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE HERE because the C++ plane is the one the measurement was taken on, and a
       Python A/B needs its own before/after at the design load to claim anything.
 
-- [ ] **BOTH-PLANES-SHOULD-REPORT-THE-SAME-LATENCY-WINDOW · the parity item the C++ latency
-      PR opens (V88/V89, 10 Sep).** After it, the two planes report DIFFERENT windows:
+- [~] **BOTH-PLANES-SHOULD-REPORT-THE-SAME-LATENCY-WINDOW · PR #211 IN REVIEW (10 Sep)
+      closes half (b) and #210's two nits with it. HALF (a) STAYS OPEN.**
+      (b) DONE in #211: `shipinfer_pipeline_reassembly_us` on the STAGE bucket edges (this
+      window runs tens to hundreds of ms, where `_E2E_BUCKETS_US` steps 2-2.5x and a p50
+      would say only "somewhere in 50-100 ms" -- the argument that file's own comment makes
+      for stages), observed in `_emit` so evictions and timeouts count, `read_total` to sum
+      the per-camera cells against the C++ plane's one distribution, and
+      `TestBothPlanesNameTheSameLatencyWindow` asserting both the metric family AND that
+      both derive it from the collector opening the frame -- so a rename or a changed
+      window on either side fails. Both falsified. Suite 4168.
+      (a) STILL OWED, and it is the one the operator's latency requirement names: After it, the two planes report DIFFERENT windows:
         Python: `frame_latency_us` -- "capture to emission ... the number the deployment is
                 judged on" (`pipeline/metrics.py:166-169`), plus `stage_latency_us`, and the
                 harness already reads the latter into the run's JSON.
