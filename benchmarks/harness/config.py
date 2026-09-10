@@ -217,6 +217,10 @@ class BenchConfig:
     #: ``model_repository/<name>/1/model.plan``, built from the same ONNX.
     det_engine: Path | None = None
     seg_engine: Path | None = None
+    #: Which precision BOTH sides load when neither engine is named. `require_same_engines`
+    #: below is what makes this a knob rather than a hazard: point it at fp16 without
+    #: installing fp16 plans and the run is REFUSED, which is what that guard exists for.
+    precision: str = "fp32"
     model_repository: Path | None = None
     #: Where JSONL logs, console captures and ``summary.json`` land.
     out_dir: Path = field(default_factory=lambda: _repo_root() / ".artifacts" / "bench")
@@ -371,8 +375,9 @@ class BenchConfig:
             self,
             person_frames=self.person_frames or data / person_dir,
             ship_frames=self.ship_frames or data / ship_dir,
-            det_engine=self.det_engine or root / "models" / "yolo26n_fp32.engine",
-            seg_engine=self.seg_engine or root / "models" / "yolo26n-seg_fp32.engine",
+            det_engine=self.det_engine or root / "models" / f"yolo26n_{self.precision}.engine",
+            seg_engine=self.seg_engine
+            or root / "models" / f"yolo26n-seg_{self.precision}.engine",
             model_repository=repository,
             instances_per_gpu=self.instances_per_gpu or resolved_instances,
         )

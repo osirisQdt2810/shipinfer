@@ -755,6 +755,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--fps", type=float, default=20.0)
     p.add_argument("--gpus", default="2,3,4,5", help="physical CUDA ordinals, comma separated")
     p.add_argument("--seconds", type=float, default=70.0)
+    p.add_argument(
+        "--precision",
+        choices=("fp32", "fp16", "int8"),
+        default="fp32",
+        help="which engines BOTH sides load. The plans have to match: `build_engines.py "
+        "--fp16` or `--int8` installs them, and `require_same_engines` refuses a mismatch "
+        "rather than reporting a precision difference as an architecture win.",
+    )
     p.add_argument("--warmup", type=float, default=10.0, dest="warmup_s")
     p.add_argument("--batch", type=int, default=8)
     p.add_argument(
@@ -873,6 +881,7 @@ def main(argv: list[str] | None = None) -> int:
         gpus=tuple(int(g) for g in args.gpus.split(",") if g.strip()),
         batch=args.batch,
         seconds=args.seconds,
+        precision=args.precision,
         warmup_s=args.warmup_s,
         resolution=args.resolution,
         source=args.source,

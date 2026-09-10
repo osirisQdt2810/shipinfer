@@ -242,6 +242,32 @@ class TestTheProfileReadsOneWindow:
         assert steady.quantile(0.5) >= 2000.0  # the bucket that holds 2000, not the 100s
         assert read_cell(histogram, stage="detect").mean == pytest.approx(860.0)  # whole run
 
+    def test_the_precision_knob_moves_both_sides_or_neither(self) -> None:
+        """A knob that moved only the baseline's engine would be the exact hazard
+        `require_same_engines` was written about -- "a plan built fp16 against the baseline's
+        fp32 is roughly a 2x architecture win that nothing in the harness could detect".
+
+        So this asserts the two things that make it safe: the default names carry the suffix,
+        and an explicit engine still overrides it.
+        """
+        from benchmarks.harness.config import BenchConfig
+
+        fp32 = BenchConfig().resolved()
+        fp16 = BenchConfig(precision="fp16").resolved()
+
+        assert fp32.det_engine is not None and fp32.det_engine.name == "yolo26n_fp32.engine"
+        assert fp16.det_engine is not None and fp16.det_engine.name == "yolo26n_fp16.engine"
+        assert fp16.seg_engine is not None and fp16.seg_engine.name == "yolo26n-seg_fp16.engine"
+
+    def test_an_explicit_engine_still_wins_over_the_precision(self) -> None:
+        from pathlib import Path as _Path
+
+        from benchmarks.harness.config import BenchConfig
+
+        named = BenchConfig(precision="fp16", det_engine=_Path("/tmp/some.engine")).resolved()
+
+        assert named.det_engine == _Path("/tmp/some.engine")
+
     def test_every_label_is_summed_when_the_label_is_not_the_question(self) -> None:
         """`read_total`, which the reassembly window needs: it is observed per camera like
         everything else on that plane, and compared against a C++ figure that is ONE
