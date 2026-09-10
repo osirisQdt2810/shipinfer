@@ -2937,6 +2937,32 @@ hook down, for when the operator asked to see something before it is executed.
       `core/events/schema.h` that is emitted today and always null, with
       `body_track_id_vec`/`ship_track_id_vec` already on the wire. So it is a stage plus a
       fill, not a schema change. PR 3 is `mtmc`.
+      **PR 2's DESIGN, established by reading rather than guessing (10 Sep):**
+      (1) THE MECHANISM IS ALREADY THERE. `pipeline/events/records.cpp:70` maps a field named
+      `track_id` to `Field::TrackId`, which fills `record.track_id` from an `ObjectBatch` row.
+      So the stage produces an `ObjectBatch` of ids and nothing in the schema or the wire
+      changes -- `body_track_id_vec`/`ship_track_id_vec` stop being all-null.
+      (2) `-1` FROM THE SHARD MEANS "no confirmed track", and the right JSON for that is an
+      ABSENT id rather than a `-1`. So those rows are left out of the batch, which leaves
+      `track_id` null for that object -- the same thing the Python plane does with `None`.
+      (3) THE #199 LIFECYCLE RULE IS ALREADY HONOURED by #169's own API: `reset_if_present`
+      resets only a camera that HAS a tracker, which is precisely "a first `camera_added`
+      resets nothing". Worth a test asserting it, not a fix.
+      (4) A CARRIER LIMIT I DID NOT INTRODUCE BUT AM THE FIRST TO HIT, and the planes DIVERGE
+      on it: `ObjectBatch::data` is `std::vector<float>`, exact for integers to 2^24 (16 777
+      216), while the Python plane carries the same ids as `np.int64`
+      (`pipeline/graph/tracking.py:311`) with an `_as_int` converter. `records.cpp`'s own
+      refusal message admits the narrowness ("ObjectBatch carries floats"). ByteTrack ids are
+      monotonic per camera, so a 24/7 camera eventually rounds two tracks onto one id. It is
+      PRE-EXISTING -- `Field::ShipId` already casts a float to `int64_t` -- so widening the
+      carrier is its own item, not PR 2's, and PR 2 states the arithmetic rather than
+      implying exactness.
+      (5) A GUARD WILL FIRE, and that is what it is for:
+      `benchmarks/tests/test_results_doc.py::test_the_chain_measured_still_has_no_tracking`
+      greps `plan.cpp`/`from_plan.cpp` for `track` and asserts ZERO. Adding the stage fails it,
+      exactly like #208's "off by default" guard did -- so PR 2 also moves `RESULTS.md`'s
+      largest NEGATIVE claim ("tracking and MTMC are in none of these numbers") and re-measures
+      whatever it changes.
       ORIGINAL: it adds a
       **A RULE FOR THE PORT, from #199 (9 Sep): a FIRST `camera_added` resets nothing.** The
       Python element reset a camera's tracker on every announcement, and because the runner
