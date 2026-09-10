@@ -1904,35 +1904,52 @@ hook down, for when the operator asked to see something before it is executed.
       contains, because round 2 REFRAMED it and I updated the round-2 section without
       reconciling the list above it. The grep-the-body rule has to be re-run after every round,
       not only before the first push.
-- [~] **DOES-THE-KNOB-MOVE-C1? · RUNNING (10 Sep): nine runs, three passes, rotated. FIVE
-      DONE AND THE ANSWER IS LARGE.** On #190's own definition -- ours = summed
+- [x] **DOES-THE-KNOB-MOVE-C1? · YES, IT ROUGHLY DOUBLES IT. Nine runs, three passes,
+      rotated, all exit 0 (10 Sep).** On #190's own definition -- ours = summed
       `per_device_rows` over `command_cpu_s`, baseline = the HARNESS's `baseline host cpu:`
       line (`RUSAGE_CHILDREN` around the run window, which is what #190 divided by; the
       wrapper's `command_cpu_s` covers `run_bench.py` itself and is 4.5 CPU-s larger):
-        base_a  501.9 CPU-s   83.0 rows/CPU-s     <- #190 measured 87.2 / 113.0 / 84.2
-        a_off   783.7 CPU-s  294.5   -> 3.55x     <- #190's mean was 3.94x, so the CONTROL
-        a_on    419.8 CPU-s  670.5   -> 8.08x        reproduces and the method is sound
-        b_off   624.9 CPU-s  263.7
-        b_on    428.0 CPU-s  666.7
-      THE KNOB IS 2.28x ON THIS METRIC IN PASS a AND 2.53x IN PASS b, and it moves BOTH terms:
-      CPU 783.7 -> 419.8 (-46%) and rows 230 801 -> 281 472 (+22%), which compound.
-      AND THE FLAG-ON ARM IS THE STABLE ONE: 670.5 against 666.7 (0.6% apart) while flag-off
-      swings 294.5 / 263.7 with the box's load -- which is what a spin does, since a spinning
-      wait costs whatever contention is available to lose.
+      | pass | base | ours OFF | ours ON | OFF ratio | ON ratio | the knob |
+      |---|---|---|---|---|---|---|
+      | a | 83.0 | 294.5 | 670.5 | 3.55x | 8.08x | 2.28x |
+      | b | 97.3 | 263.7 | 666.7 | 2.71x | 6.85x | 2.53x |
+      | c | 99.6 | 396.3 | 656.6 | 3.98x | 6.59x | 1.66x |
+      | mean | | | | **3.41x** | **7.17x** | **2.15x** |
+      THE CONTROL REPRODUCES #190, which is what makes the rest readable: flag-off means 3.41x
+      (2.71-3.98) against #190's 3.94x (3.36-4.36), and its baseline column lands at
+      83.0/97.3/99.6 against #190's 87.2/113.0/84.2. Same method, same box, a day apart.
+      **7.17x IS PAST THE >=5x TARGET ON THIS RATIO** -- and only on this ratio, which is the
+      one `C1-WHAT-IS-THE-5x-AGAINST?` records as the only like-for-like one. It inherits that
+      ratio's weighting (a 640x640 detector row and a 256x128 crop count alike) and its FLOOR
+      property, so it does not answer the operator's question; it moves the one number that
+      could be moved without the answer.
+      IT MOVES BOTH TERMS, and they compound: CPU 704.2 -> 422.6 mean (-40%) and rows
+      224 871 -> 280 848 mean (+25%).
+      THE FLAG-ON ARM IS THE STABLE ONE, and that is the most telling number here:
+        CPU-s      on 419.8/428.0/419.9 (2% spread)   off 783.7/624.9/704.1 (23%)
+        rows       on 3% spread                       off 51%
+        accepted   on 22 753-23 745 (4%)              off 13 691-23 264 (51%)
+      A spinning wait costs whatever contention is available to lose, so the flag-off arm is a
+      function of the box's other tenants and the flag-on arm is a function of the work.
       PASS b's BASELINE IS ITS BEST (97.3 against a's 83.0) and pass b's ratio its worst, which
       is #190's own caveat reproducing: the baseline's throughput is ASSERTED from its
       configuration minus buffer growth while its CPU-seconds are MEASURED, so a box that
       starves it lowers the denominator and not the numerator. So these ratios are FLOORS and
       they err in the baseline's favour -- the same direction #190 recorded.
-      THE LATENCY HALF OF THE TRADE DOES NOT SHOW UP, and `cli/bench` has the counters to say
-      so even though it prints no percentiles. `collector_timeouts` -- a stage that did not
-      answer in time -- goes DOWN with the flag, 67 -> 10 in pass a and 148 -> 76 in pass b,
-      and every other counter improves with it:
+      THE LATENCY HALF OF THE TRADE DOES NOT SHOW UP -- AND ONE PASS INVERTS, which is the
+      honest way to say it. `cli/bench` prints no percentiles but it counts
+      `collector_timeouts`, a stage that did not answer in time:
         arm      read  accepted  dropped   complete  timeouts
         a_off   36901     19286    17613      19219        67
         a_on    37427     23222    14176      23212        10
         b_off   35804     13691    22125      13543       148
         b_on    36262     23745    12505      23669        76
+        c_off   37325     23264    14061      23238        26
+        c_on    36370     22753    13617      22681        72
+      Off: 67/148/26 (mean 80). On: 10/76/72 (mean 53). Lower on average and PASS c GOES THE
+      OTHER WAY, so with n=3 and that spread the claim this supports is "no evidence of a
+      latency penalty", not "the latency improves". What is unambiguous is the drop count:
+      every flag-on arm sheds fewer frames than its own pass's flag-off arm.
       `bench.cpp`'s own comment says the knob is off by default "because it trades wake-up
       latency for host CPU, and the host is only the wall at this load -- at a fifth of it the
       trade goes the other way". At THIS load the trade does not appear at all: the freed CPU
