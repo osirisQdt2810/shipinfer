@@ -1891,7 +1891,7 @@ hook down, for when the operator asked to see something before it is executed.
           records it into NO metric, so it owes `reassembly_us` for the like-for-like half.
       (b) IS THE CHEAP ONE and gives the parity harness something to assert; (a) is the one the
       operator's latency requirement actually names.
-- [~] **THE-BENCH-REPORTS-NO-LATENCY-AT-ALL · the gap the knob measurement exposed (10 Sep).**
+- [~] **THE-BENCH-REPORTS-NO-LATENCY-AT-ALL · PR #210 IN REVIEW (10 Sep).**
       `cli/bench` prints 18 counters and NOT ONE latency figure. `grep -nE "p50|p99|latency|
       percentile" .artifacts/cpp/k1_a_on.log` is empty; the only proxy is
       `collector_timeouts`, which is why `DOES-THE-KNOB-MOVE-C1?` could say "no evidence of a
