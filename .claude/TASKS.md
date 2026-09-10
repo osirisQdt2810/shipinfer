@@ -2732,6 +2732,34 @@ hook down, for when the operator asked to see something before it is executed.
       this session is `--source replay`, so the operator's instinct is right: it is not the
       deployment's path, and the resolution sweep above (3x throughput swing with engine time
       flat) is that upload showing up.
+      **THE ONE CONSISTENT STATEMENT, because I gave the operator two that read as
+      contradictory (V166) -- every number in this session is the `replay` route and NOTHING
+      measured used gstreamer/nvdec:**
+      | run | input route | modules that EXECUTED | img/s |
+      |---|---|---|---|
+      | the highest number I have | replay | ingest(replay) -> detect | **4 716** |
+      | the four-model chain | replay | ingest -> detect -> crop -> segment -> embed_person -> embed_ship | **695** |
+      | whole pipeline incl. track + mtmc | -- | **never measured** | -- |
+      `replay` IS: JPEGs on disk, decoded ONCE on the host CPU into pinned host RAM, then
+      copied host->VRAM EVERY FRAME, then the letterbox kernel, then TensorRT. The nv12 route
+      is the opposite -- NVDEC decodes into VRAM and there is no upload -- and it is the one
+      that removes that copy. Saying "replay ... that is exactly the trip nv12 removes" read as
+      "replay is the nv12 route", which is the reverse; the sentence was mine and it was wrong.
+      **AND THERE IS NO END-TO-END NUMBER FOR TWO INDEPENDENT REASONS, both measured today:**
+        1. C++ plane: `mtmc` does not exist there. The 695 run says so itself -- "not run here:
+           decode track mtmc output". `track` landed as #215; `mtmc` is PR 3, and its pure half
+           (the instant barrier, 83 checks, ASan clean) is built on
+           `feat/the-cpp-plane-syncs-instants`.
+        2. Python plane: it HAS every module including track and mtmc, and the harness cannot
+           feed it. `--topology single`: the generator delivered **358.6 img/s against a 1000
+           target (36%)**. `--topology fleet`, 4 shards: **72-76 img/s per shard against
+           240-260 (28-32%)**, then 5 s stage timeouts. The harness's own refusal names the
+           cause: "the wall is not decoding -- it is one interpreter running the camera threads
+           and the pipeline workers together", and arch.md section 9 puts ingest in separate
+           processes for exactly that.
+      SO THE OFFER GATE IS THE FIRST THING IN THE WAY of answering V165 at all, on the only
+      plane that has every module. Fixing it is not a scheduling change: it is ingest in its
+      own processes, or the C++ plane finished to `mtmc`.
       NEXT, in order: (1) the same chain on `--source nvdec` at the peak instance count with
       blocking sync on, which is the only arm that tests the VRAM premise; (2) a stage
       ablation, because 11.74 invocations is a CHAIN design number and not a hardware one --
