@@ -1749,8 +1749,20 @@ hook down, for when the operator asked to see something before it is executed.
       contend with them and measure noise.
       Suite 4098 passed, C++ offline tier all green (18 binaries).
 
-- [ ] **THE-PYTHON-PLANE-SPINS-TOO · the other half of the blocking-sync knob, opened by the
-      C++ PR under the sync rule (9/10 Sep).** `src/shipinfer/runtime/device.py` sets no device
+- [~] **THE-PYTHON-PLANE-SPINS-TOO · PR #203 (10 Sep) closes the seam.** Same knob name, same
+      three parse rules, same default (off); `ctypes` into libcudart because torch wraps no
+      `cudaSetDeviceFlags`, WITH the prototypes declared and a test asserting the declaration
+      rather than trusting it -- #200's undeclared draft segfaulted 282 tests, which no
+      `try/except` catches. Applied from `InferenceServer.start` before the first model,
+      because the driver refuses the flag once a device has a context. Best effort otherwise:
+      a missing libcudart or a device that already has one is a warning naming the device, and
+      the return value says which devices took it. Suite 4127 passed.
+      **NOT MEASURED ON THIS PLANE, and the PR says so rather than implying otherwise:** #202's
+      A/B is the reason to expect the same result on the same hardware and the same CUDA
+      default, and a Python before/after at the design load needs the harness's sharded
+      generator. The knob is inert until asked for, so shipping it ahead of its own A/B changes
+      no existing measurement -- but the A/B is still owed and this item stays open for it.
+      ORIGINAL: `src/shipinfer/runtime/device.py` sets no device
       flag either -- `grep -rn "cudaSetDeviceFlags|set_device_flags" src/` is empty -- so the
       Python plane's `ModelInstance` threads wait in the same place for the same reason, and
       `torch.cuda.synchronize`/an event wait inherits the same `cudaDeviceScheduleAuto`.
@@ -1765,8 +1777,8 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE HERE because the C++ plane is the one the measurement was taken on, and a
       Python A/B needs its own before/after at the design load to claim anything.
 
-- [~] **THE-INSTANCE-THREADS-SPIN-ON-cudaStreamSynchronize · CONFIRMED AND FIXED, PR #202,
-      and the hypothesis predicted the mechanism (9 Sep).** Two interleaved pairs,
+- [x] **THE-INSTANCE-THREADS-SPIN-ON-cudaStreamSynchronize · MERGED as #202 (4675250, 10 Sep),
+      APPROVE on round 1, and the hypothesis predicted the mechanism.** Two interleaved pairs,
       50x20x70 s, GPUs 1/3/4/5/6, one binary and one env var so nothing else differs:
         run          flag     events   host cpu-s   cores   mdl threads   pipe threads
         spinA        off      38 129       1139.7   14.68        630.8          208.8
