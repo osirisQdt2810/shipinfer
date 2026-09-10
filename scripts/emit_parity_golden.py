@@ -31,6 +31,9 @@ for entry in (str(ROOT), str(ROOT / "src")):
 from benchmarks.parity.drive_events import GOLDEN as EVENT_GOLDEN  # noqa: E402
 from benchmarks.parity.drive_events import load as load_event  # noqa: E402
 from benchmarks.parity.drive_events import render as render_event  # noqa: E402
+from benchmarks.parity.drive_identity import GOLDEN as IDENTITY_GOLDEN  # noqa: E402
+from benchmarks.parity.drive_identity import load as load_identity  # noqa: E402
+from benchmarks.parity.drive_identity import render_identity  # noqa: E402
 from benchmarks.parity.drive_masks import GOLDEN as MASK_GOLDEN  # noqa: E402
 from benchmarks.parity.drive_masks import load as load_mask  # noqa: E402
 from benchmarks.parity.drive_masks import render_masks  # noqa: E402
@@ -55,9 +58,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scenario", required=True, help="a name under scenarios/, or a path")
     parser.add_argument(
         "--kind",
-        choices=("ingest", "queue", "event", "plan", "record", "mask"),
+        choices=("ingest", "queue", "event", "plan", "record", "mask", "identity"),
         default="ingest",
-        help="which seam: the camera actors, the request queue (scenarios/queues/), one\n        perception event (scenarios/events/), a resolved chain (scenarios/plans/), or\n        one frame's stage outputs through the production record builder\n        (scenarios/records/), or a segmentation engine's two outputs through the mask\n        fold (scenarios/masks/)",
+        help="which seam: the camera actors, the request queue (scenarios/queues/), one\n        perception event (scenarios/events/), a resolved chain (scenarios/plans/), or\n        one frame's stage outputs through the production record builder\n        (scenarios/records/), or a segmentation engine's two outputs through the mask\n        fold (scenarios/masks/), or the cross-camera identity map the reference answers a\n        scenario with (scenarios/identity/)",
     )
     parser.add_argument("--out", type=Path, help="write the trace here instead of stdout")
     parser.add_argument(
@@ -69,24 +72,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--force", action="store_true", help="overwrite an existing golden")
     args = parser.parse_args(argv)
 
+    if args.kind == "identity":
+        # Scenarios in, the reference's ids out. Like `plan`: no trace and nothing to sample,
+        # because the artefact that crosses the plane boundary IS the answer.
+        text = render_identity(load_identity(args.scenario))
+        name = Path(args.scenario).stem
+        return _emit(text, IDENTITY_GOLDEN / f"{name}.txt", args, tally=_lines(text, "line"))
+
     if args.kind == "plan":
         # A chain file in, the plan text out. No trace and nothing to run: the artefact that
         # crosses the plane boundary IS the golden, so `records_min` has no meaning here.
         chain = load_plan_scenario(args.scenario)
         text = render_plan(chain)
-        destination = PLAN_GOLDEN / f"{chain.stem}.plan" if args.emit_golden else args.out
-        if destination is None:
-            print(text, end="")
-            return 0
-        if args.emit_golden and destination.exists() and not args.force:
-            raise ConfigurationError(
-                f"{destination} already exists. A golden is captured once and committed; "
-                f"pass --force only when the change to the plane IS the decision"
-            )
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(text, encoding="utf-8")
-        print(f"wrote {destination} ({len(text.splitlines())} line(s))")
-        return 0
+        return _emit(text, PLAN_GOLDEN / f"{chain.stem}.plan", args, tally=_lines(text, "line"))
 
     # One LINE rather than a trace, like `event` below -- the difference is which driver
     # builds it: `event` states finished records and compares the two JSON writers, `record`
@@ -95,19 +93,8 @@ def main(argv: list[str] | None = None) -> int:
         named = Path(args.scenario)
         scenario = load_record(str(named) if named.suffix == ".scn" else args.scenario)
         line = render_record(scenario)
-        destination = RECORD_GOLDEN / f"{scenario.name}.jsonl" if args.emit_golden else args.out
-        if destination is None:
-            print(line)
-            return 0
-        if args.emit_golden and destination.exists() and not args.force:
-            raise ConfigurationError(
-                f"{destination} already exists. A golden is captured once and committed; "
-                f"pass --force only when the change to the plane IS the decision"
-            )
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(line + "\n", encoding="ascii")
-        print(f"wrote {destination} (1 record)")
-        return 0
+        golden = RECORD_GOLDEN / f"{scenario.name}.jsonl"
+        return _emit(line + "\n", golden, args, tally="1 record", encoding="ascii")
 
     # One area per crop, one per line -- the FOLD, which is one seam upstream of `record`:
     # a record scenario states already-reduced rows and cannot see a fold that is missing.
@@ -115,19 +102,8 @@ def main(argv: list[str] | None = None) -> int:
         named = Path(args.scenario)
         scenario = load_mask(str(named) if named.suffix == ".scn" else args.scenario)
         text = render_masks(scenario)
-        destination = MASK_GOLDEN / f"{scenario.name}.txt" if args.emit_golden else args.out
-        if destination is None:
-            print(text, end="")
-            return 0
-        if args.emit_golden and destination.exists() and not args.force:
-            raise ConfigurationError(
-                f"{destination} already exists. A golden is captured once and committed; "
-                f"pass --force only when the change to the plane IS the decision"
-            )
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(text, encoding="ascii")
-        print(f"wrote {destination} ({len(text.splitlines())} area(s))")
-        return 0
+        golden = MASK_GOLDEN / f"{scenario.name}.txt"
+        return _emit(text, golden, args, tally=_lines(text, "area"), encoding="ascii")
 
     if args.kind == "event":
         # One line, not a trace: an event is a single value and what the planes must agree
@@ -135,19 +111,8 @@ def main(argv: list[str] | None = None) -> int:
         named = Path(args.scenario)
         scenario = load_event(str(named) if named.suffix == ".scn" else args.scenario)
         line = render_event(scenario)
-        destination = EVENT_GOLDEN / f"{scenario.name}.jsonl" if args.emit_golden else args.out
-        if destination is None:
-            print(line)
-            return 0
-        if args.emit_golden and destination.exists() and not args.force:
-            raise ConfigurationError(
-                f"{destination} already exists. A golden is captured once and committed; "
-                f"pass --force only when the change to the plane IS the decision"
-            )
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(line + "\n", encoding="ascii")
-        print(f"wrote {destination} (1 record)")
-        return 0
+        golden = EVENT_GOLDEN / f"{scenario.name}.jsonl"
+        return _emit(line + "\n", golden, args, tally="1 record", encoding="ascii")
 
     queues = args.kind == "queue"
     root = QUEUE_SCENARIOS if queues else SCENARIOS
@@ -177,6 +142,36 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {args.out} ({len(lines)} record(s))")
     else:
         print("\n".join(_render(trace)))
+    return 0
+
+
+def _lines(text: str, unit: str) -> str:
+    return f"{len(text.splitlines())} {unit}(s)"
+
+
+def _emit(
+    text: str, golden: Path, args: argparse.Namespace, *, tally: str, encoding: str = "utf-8"
+) -> int:
+    """Print it, write it where `--out` says, or lay down the golden BOTH planes are held to.
+
+    One writer for five kinds. `plan`, `record`, `mask` and `event` each carried this block
+    verbatim -- they differ only in the golden's name, its encoding and what the line counts
+    -- and `identity` would have been the fifth copy. The refusal matters most: regenerating a
+    golden to make a plane pass is what this harness exists to prevent, so `--force` is
+    guarded in ONE place rather than in each kind that remembers to.
+    """
+    destination = golden if args.emit_golden else args.out
+    if destination is None:
+        print(text, end="")
+        return 0
+    if args.emit_golden and destination.exists() and not args.force:
+        raise ConfigurationError(
+            f"{destination} already exists. A golden is captured once and committed; "
+            f"pass --force only when the change to the plane IS the decision"
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(text, encoding=encoding)
+    print(f"wrote {destination} ({tally})")
     return 0
 
 
