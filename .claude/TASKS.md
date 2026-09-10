@@ -3418,14 +3418,21 @@ hook down, for when the operator asked to see something before it is executed.
           the offline tier. `ClusterRegistry::create` answers a ConfigError rather than
           `std::out_of_range` (the hole #215's review found in its sibling) and a lane-less
           build blames the LANE rather than the name.
-          REMAINING, and the algorithm is already read off the reference so it needs no
-          rediscovery: (a) the LANE UNIT behind the seam -- gram = E.E^T, then
-          `GatedMatcher::build(gram, observations, n)` for distances, then
-          `AgglomerativeClusterer::fit_predict(distances, n)` for labels, then 3b's
-          `GlobalIdAssigner::assign(observations, labels)`; plus the hit/size GATE that
-          `ClusterMTMCTracker.track` applies before clustering, which is one more small
-          stateful piece; (b) `MtmcStage`, which is barrier + scatter and nothing else; (c) the
-          plan's `mtmc` node and the `global_id` event field.
+          **AND THE GATE IS BUILT AND REFERENCE-VERIFIED TOO** (`mtmc/gate.{h,cpp}`,
+          `test_mtmc_gate.cpp` 26 checks, `test_gate_parity.cpp` 4 checks against a committed
+          golden, `--kind gate` on the emitter). HEIGHT FIRST THEN AGE is the property a port
+          gets wrong silently, and the order-swap mutation fails BOTH gates -- the parity one
+          printing the divergence itself ("reference: admitted / port: admitted cam0#1", the
+          too-small track entering the matrix early). One departure with its reason at the
+          line: a zero frame extent admits nothing rather than dividing by it.
+          REMAINING for 3c, and the algorithm is already read off the reference so it needs no
+          rediscovery: (a) the LANE UNIT behind the seam -- gate.filter, then gram = E.E^T,
+          then `GatedMatcher::build(gram, observations, n)` for distances, then
+          `AgglomerativeClusterer::fit_predict(distances, n)` for labels, then
+          `GlobalIdAssigner::assign(observations, labels)`; (b) `MtmcStage`, which is barrier +
+          scatter and nothing else; (c) the plan's `mtmc` node and the `global_id` event field.
+          So every STATEFUL piece is now ported and reference-verified; what is left is the
+          glue and the wiring.
       UNTIL 3c LANDS, "decode -> mtmc track" cannot be measured on the C++ plane at all, which
       is what V165/V167's target is defined over -- so this is on the critical path for the
       target and not a side quest.
