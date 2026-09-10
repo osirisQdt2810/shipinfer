@@ -2937,6 +2937,28 @@ hook down, for when the operator asked to see something before it is executed.
       `core/events/schema.h` that is emitted today and always null, with
       `body_track_id_vec`/`ship_track_id_vec` already on the wire. So it is a stage plus a
       fill, not a schema change. PR 3 is `mtmc`.
+      **PR 2 IS OPEN AS #215 (10 Sep), and the design changed once under measurement.**
+      MY FIRST DRAFT WOULD HAVE DELETED THE GRAPH FROM A LANE-LESS BUILD. Putting `TrackStage`
+      in `graph/stages.h` and including `tracking/shard.h` there made `stages.o` and
+      `from_plan.o` reach an external lane, so `build_csrc.py` DROPPED them without the
+      submodule and `bench` failed to link -- undefined `build_dag`, `WorkerScratch`,
+      `loaded_names`. `ingest/registry.h` states that invariant for the same reason, so #215
+      applies its answer: `tracking/registry.h` (lane-free), the lane's unit registering
+      itself, `create_track_stage(impl, spec)` from the graph, and a refusal that says the LANE
+      is absent rather than the name unknown.
+      AND `runnable` ASKS THE REGISTRY rather than returning `true` for an in-tree kind:
+      otherwise a lane-less build claims the slot in `stage_names` and its own note, then
+      throws when the Dag asks for it. Proven both ways -- with the lane 6 stages and "not run
+      here: decode mtmc output"; without it 5 stages, "decode track mtmc output", and a derived
+      note that adds ", and neither is tracking".
+      TWO FIXTURES CHANGED, because the refusal they hit is right: `test_walk.py` and
+      `test_chain.py` used two `kind: track` elements as generic shapes, and two trackers over
+      one camera's rows is two ids for one detection. Disjoint `classes:`, which is the remedy
+      the refusal's own message names.
+      COST, on the pair the change makes possible (same chain, same source, lane in vs out,
+      8x10x20 s on two GPUs): 1 595 complete events tracked against 1 600 untracked -- 0.3%,
+      inside this box's noise AT THAT LOAD, and `RESULTS.md` says it that way rather than
+      claiming the design load.
       **PR 2's DESIGN, established by reading rather than guessing (10 Sep):**
       (1) THE MECHANISM IS ALREADY THERE. `pipeline/events/records.cpp:70` maps a field named
       `track_id` to `Field::TrackId`, which fills `record.track_id` from an `ObjectBatch` row.
