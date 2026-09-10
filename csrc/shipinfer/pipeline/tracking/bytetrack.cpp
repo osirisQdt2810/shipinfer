@@ -14,9 +14,11 @@ namespace shipinfer::tracking {
 
     namespace {
 
-        // ONE SHARD PER PROCESS, held by the associator the registry hands out and shared by
-        // every worker that asks for one: a shard per Dag would be a tracker per WORKER for one
-        // camera, which is the identity split `shard.h` exists to prevent.
+        // ONE SHARD PER ASSOCIATOR, and `create_associator` decides how many associators
+        // there are: one per (impl, slot), shared by every worker. The sharing axis is not
+        // this file's to choose -- it was, and choosing "one per process" here gave two
+        // tracking slots one shard keyed by camera, so the second slot's every frame was
+        // refused as out of order.
         class ShardAssociator : public Associator {
           public:
             std::vector<int> ids(const std::string& camera_id, int64_t frame_id,
@@ -32,8 +34,7 @@ namespace shipinfer::tracking {
         // inside it (`params: algorithm: bytetrack`) is the only one this lane has, so the plan
         // writer does not emit it and this does not read it.
         const AssociatorRegistrar kShipvision("shipvision", [] {
-            static const std::shared_ptr<Associator> one = std::make_shared<ShardAssociator>();
-            return one;
+            return std::make_shared<ShardAssociator>();
         });
 
     }  // namespace

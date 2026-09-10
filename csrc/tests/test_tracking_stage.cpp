@@ -51,6 +51,27 @@ namespace {
         std::vector<int> answer_;
     };
 
+    // Refuses every frame the way `TrackerShard` refuses a reordered one, so the stage's
+    // handling of a ROUTINE refusal is reachable without a real tracker and a race.
+    class RefusingAssociator : public tracking::Associator {
+      public:
+        std::vector<int> ids(const std::string& camera_id, int64_t frame_id,
+                             const std::vector<Detection>&) override {
+            throw InferenceError("camera '" + camera_id + "': frame " +
+                                 std::to_string(frame_id) + " reached the tracker after 99");
+        }
+    };
+
+    // A tracker whose configuration is wrong fails on every frame, and that IS a fault -- so
+    // the stage must not turn it into a quiet untracked frame.
+    class MisconfiguredAssociator : public tracking::Associator {
+      public:
+        std::vector<int> ids(const std::string&, int64_t,
+                             const std::vector<Detection>&) override {
+            throw ConfigError("tracker 'shipvision': max_age must be positive");
+        }
+    };
+
     Detection box(float x) {
         Detection det;
         det.x1 = x;
@@ -169,6 +190,50 @@ namespace {
         check(batch != nullptr && batch->empty(), "the name exists and is empty");
     }
 
+    void a_refused_frame_runs_with_no_ids_rather_than_failing() {
+        // THE COST OF GETTING THIS WRONG is not a missing id, it is a TIMEOUT. A Failed stage
+        // never delivers its slot to the collector, so the frame waits in `pending_` for
+        // `sweep()` and is retired at `timeout_ms` in the fault channel -- one reassembly
+        // window late, for a frame whose only problem is that it has no ids.
+        auto associator = std::make_shared<RefusingAssociator>();
+        TrackStage stage("track", "track_out", CropSpec::kAnyClass, associator);
+        auto state = frame_with("cam0", 41, {box(0), box(100)});
+
+        const StageOutcome outcome = stage.run(*state);
+        const ObjectBatch* batch = state->batch("track_out");
+
+        check(outcome.ran(), "the stage RAN, so the collector gets its slot on time");
+        check(outcome.error.empty(), "and a reordering is not reported as a stage fault");
+        check(outcome.rows == 0, "with no rows");
+        check(batch != nullptr && batch->empty(), "the output name exists and is empty");
+        check(associator->untracked_frames() == 1, "and the frame is counted, not swallowed");
+    }
+
+    void an_ordinary_frame_counts_no_untracked() {
+        // The counter's other half: a number that only goes up is not evidence.
+        auto associator = std::make_shared<ScriptedAssociator>(std::vector<int>{7});
+        TrackStage stage("track", "track_out", CropSpec::kAnyClass, associator);
+        auto state = frame_with("cam0", 1, {box(0)});
+
+        stage.run(*state);
+
+        check(associator->untracked_frames() == 0, "a tracked frame is not an untracked one");
+    }
+
+    void a_misconfigured_tracker_still_fails_the_stage() {
+        // Only `InferenceError` is the routine refusal. A ConfigError means the deploy is
+        // wrong on every frame, and burying it as "untracked" would hide it behind a counter.
+        auto associator = std::make_shared<MisconfiguredAssociator>();
+        TrackStage stage("track", "track_out", CropSpec::kAnyClass, associator);
+        auto state = frame_with("cam0", 1, {box(0)});
+
+        const StageOutcome outcome = stage.run(*state);
+
+        check(outcome.status == StageStatus::Failed, "a configuration fault still fails");
+        check(outcome.error.find("max_age") != std::string::npos, "carrying its message");
+        check(associator->untracked_frames() == 0, "and is not counted as a reordering");
+    }
+
     void more_ids_than_detections_cannot_walk_off_the_end() {
         // Not a caller this tree has; a tracker that answered long would be a crash otherwise.
         auto associator = std::make_shared<ScriptedAssociator>(std::vector<int>{1, 2, 3, 4});
@@ -189,6 +254,9 @@ int main() {
     a_selection_tracks_only_its_own_rows();
     a_declared_empty_selection_tracks_nothing();
     a_frame_with_no_detections_attaches_an_empty_batch();
+    a_refused_frame_runs_with_no_ids_rather_than_failing();
+    an_ordinary_frame_counts_no_untracked();
+    a_misconfigured_tracker_still_fails_the_stage();
     more_ids_than_detections_cannot_walk_off_the_end();
     std::printf("%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;

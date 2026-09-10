@@ -1,6 +1,9 @@
 #include "shipinfer/pipeline/tracking/associator.h"
 
+#include <map>
+#include <mutex>
 #include <sstream>
+#include <utility>
 
 #include "shipinfer/ingest/omitted_lanes.h"
 
@@ -21,7 +24,14 @@ namespace shipinfer::tracking {
     }
 
     std::shared_ptr<Associator> AssociatorRegistry::create(const std::string& impl) const {
-        return entries_.at(impl)();
+        // `find` and a TYPED refusal, not `at`: this is public, so a second caller that had
+        // not asked `has` first would get `std::out_of_range` out of a registry whose whole
+        // vocabulary is `ConfigError`.
+        const auto entry = entries_.find(impl);
+        if (entry == entries_.end()) {
+            throw ConfigError("no tracker is registered as '" + impl + "'");
+        }
+        return entry->second();
     }
 
     AssociatorRegistry& ASSOCIATORS() {
@@ -29,8 +39,40 @@ namespace shipinfer::tracking {
         return registry;
     }
 
-    std::shared_ptr<Associator> create_associator(const std::string& impl) {
-        if (ASSOCIATORS().has(impl)) return ASSOCIATORS().create(impl);
+    namespace {
+
+        // (impl, slot) -> the one associator that pair gets. See `create_associator`'s header
+        // comment for why the key has two halves and why the cache is process-wide.
+        std::mutex& made_lock() {
+            static std::mutex lock;
+            return lock;
+        }
+
+        std::map<std::pair<std::string, std::string>, std::shared_ptr<Associator>>& made() {
+            static std::map<std::pair<std::string, std::string>, std::shared_ptr<Associator>>
+                cache;
+            return cache;
+        }
+
+    }  // namespace
+
+    std::vector<MadeAssociator> made_associators() {
+        std::lock_guard<std::mutex> held(made_lock());
+        std::vector<MadeAssociator> out;
+        for (const auto& [key, associator] : made()) {
+            out.push_back(MadeAssociator{key.first, key.second, associator});
+        }
+        return out;
+    }
+
+    std::shared_ptr<Associator> create_associator(const std::string& impl,
+                                                  const std::string& slot) {
+        if (ASSOCIATORS().has(impl)) {
+            std::lock_guard<std::mutex> held(made_lock());
+            std::shared_ptr<Associator>& cached = made()[{impl, slot}];
+            if (!cached) cached = ASSOCIATORS().create(impl);
+            return cached;
+        }
         std::ostringstream known;
         for (const std::string& name : ASSOCIATORS().names()) {
             known << (known.tellp() > 0 ? ", " : "") << name;

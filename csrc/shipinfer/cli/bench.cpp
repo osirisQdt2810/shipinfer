@@ -43,6 +43,7 @@
 #include "shipinfer/pipeline/graph/stages.h"
 #include "shipinfer/pipeline/queue_sink.h"
 #include "shipinfer/pipeline/reassembly/collector.h"
+#include "shipinfer/pipeline/tracking/associator.h"
 #include "shipinfer/runtime/containment.h"
 #include "shipinfer/scheduling/policies/registry.h"
 #include "shipinfer/scheduling/queues/fair.h"
@@ -872,6 +873,14 @@ int main(int argc, char** argv) {
                 std::cout << "queue_rejected_by_camera " << camera << " " << count << "\n";
             }
             std::cout << "queue_evicted " << stats.evicted << "\n";
+            // PER SLOT, from the associators rather than from a worker's Dag: one associator
+            // serves every worker for one slot, so this is the run's answer. A reordered
+            // frame is published with no ids and counted HERE -- not in `frames_failed` and
+            // not as a reassembly timeout, which is what it used to become.
+            for (const tracking::MadeAssociator& made : tracking::made_associators()) {
+                std::cout << "track_frames_untracked " << made.slot << " "
+                          << made.associator->untracked_frames() << "\n";
+            }
         };
 
         const size_t abandoned =

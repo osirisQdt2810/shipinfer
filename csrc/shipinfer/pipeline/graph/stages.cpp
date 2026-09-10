@@ -258,28 +258,50 @@ namespace shipinfer {
           associator_(std::move(associator)) {}
 
     size_t TrackStage::do_run(FrameState& state) {
-        // THE SELECTED ROWS ONLY, and they are copied because the associator's answer is
-        // parallel to what it was GIVEN -- a filtered vector keeps `selected[i]`'s own
-        // `index`, so the ids still land on the detector's indices.
+        // THE SELECTED ROWS ONLY, and the filtered copy keeps `(*selected)[i].index` -- the
+        // associator's answer is parallel to what it was GIVEN, so the ids still land on the
+        // detector's own indices rather than on the selection's.
+        //
+        // NO COPY at all for a slot that selects every row, which is the common shape: the
+        // associator takes a const reference and the frame's own vector is already the answer.
+        // The copy was unconditional and ran once per frame on the dispatch path.
         //
         // `!= kAnyClass` and not `>= 0`, the same reading `CropStage` makes: `kNoClass` is
         // negative too, so `>= 0` would treat a declared EMPTY selection as every row -- the
         // opposite of what it means.
-        std::vector<Detection> selected;
-        for (const Detection& det : state.detections()) {
-            if (class_id_ != CropSpec::kAnyClass && det.class_id != class_id_) continue;
-            selected.push_back(det);
+        std::vector<Detection> filtered;
+        const std::vector<Detection>* selected = &state.detections();
+        if (class_id_ != CropSpec::kAnyClass) {
+            for (const Detection& det : state.detections()) {
+                if (det.class_id == class_id_) filtered.push_back(det);
+            }
+            selected = &filtered;
         }
         ObjectBatch batch;
         batch.name = output_;
         batch.width = 1;
-        const std::vector<int> ids =
-            associator_->ids(state.tag().camera_id, state.tag().frame_id, selected);
-        for (size_t row = 0; row < ids.size() && row < selected.size(); ++row) {
+        // CAUGHT HERE, and not left to `Stage::run`. A tracker refuses a frame that does not
+        // advance its camera's stream, and a pool of workers reorders frames routinely -- so
+        // this is an ordinary outcome. Letting it out would make the stage FAIL, which never
+        // delivers the slot to the collector, so the frame the graph promised sits in
+        // `pending_` until `sweep()` retires it as a TIMEOUT: published a reassembly window
+        // late and counted in the fault channel, for a frame whose only problem is that it
+        // has no ids. `track.py` catches the same refusal and returns `_untracked(item)`.
+        std::vector<int> ids;
+        try {
+            ids = associator_->ids(state.tag().camera_id, state.tag().frame_id, *selected);
+        } catch (const InferenceError&) {
+            // NOT swallowed: counted on the associator, which is shared per slot, so the run
+            // can report it. Only this type -- a ConfigError from a misconfigured tracker is
+            // a fault and must still fail the stage.
+            associator_->note_untracked();
+            ids.clear();
+        }
+        for (size_t row = 0; row < ids.size() && row < selected->size(); ++row) {
             // A row per CONFIRMED id only. `-1` is "matched no track", and an absent row is how
             // `events/records.cpp` leaves `track_id` null for that object.
             if (ids[row] < 0) continue;
-            batch.object_indices.push_back(selected[row].index);
+            batch.object_indices.push_back((*selected)[row].index);
             // FLOAT, because `ObjectBatch::data` is one: exact for ids below 2^24, and a
             // monotonic per-camera counter reaches that after ~16.7M tracks. The Python plane
             // carries the same ids as `int64`, so the two planes differ THERE and the ledger
