@@ -80,6 +80,53 @@ jobs:
   # two files is a copy that drifts.
   #
   # `merge` gates on this, so a red C++ tier blocks an auto-merge exactly as a red test does.
+  tests-with-kernels:
+    name: Tests (with the kernels' Python half)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # THE SECOND LEG, and it is second on purpose. The `test` job above fetches NO
+      # submodule because that is the check on ADR-001's promise -- the offline tier must
+      # pass without the fused kernels -- so the shipvision coverage cannot be added to it
+      # without deleting the property it exists to prove. MEASURED on run 34344651408: 189 of
+      # that job's 248 skips are this submodule, so the Python plane's real `track`, `mtmc`
+      # and `reid` elements were covered on developers' machines and on no machine that gates
+      # a merge.
+      - uses: actions/checkout@v4
+        with:
+          # Only the kernels, by name -- `submodules: recursive` also pulls
+          # `benchmarks/baseline`, a third-org SSH remote this runner cannot read, and one
+          # failing submodule aborts the whole checkout. Same reasoning as `kernels` below.
+          submodules: false
+      - name: Check out the kernels only
+        # The PYTHON half is all this needs: no cmake, no CUDA toolkit, no build. That is why
+        # this job is 4 minutes and `kernels` is 25.
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init --depth 1 3rdparty/shipvision
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install torch (CPU build)
+        run: pip install --index-url https://download.pytorch.org/whl/cpu torch
+      - name: Install the package and its dev tooling
+        run: pip install -e ".[dev,cli]"
+      - name: Install the kernels' Python half
+        # `pip install -e`, NOT `PYTHONPATH`. shipvision is a pure setuptools package with
+        # dependencies of its own, and `mot/association/solver.py` needs `scipy` from its
+        # `solvers` extra -- `linear_sum_assignment`, which shipvision's own comment says it
+        # will not hand-roll. PYTHONPATH hands over the source without the dependencies, and
+        # the first run of this job proved it: those 189 tests went from SKIPPED to ERROR with
+        # "shipvision.mot cannot be imported (No module named 'scipy')". No build happens
+        # here -- no setup.py, no extension, `setuptools.build_meta` and one metadata step.
+        # `deploy/rootless/_container.sh` gets away with PYTHONPATH only because the bench
+        # IMAGE already carries scipy; a plain runner carries nothing.
+        run: pip install -e "3rdparty/shipvision[solvers]"
+      - name: Run the offline test suite with the kernels importable
+        run: bash scripts/run_tests.sh
+
   cpp:
     uses: ./.github/workflows/cpp.yml
 
@@ -267,7 +314,7 @@ jobs:
 
   merge:
     name: Auto-merge
-    needs: [test, cpp, pr-body, review]
+    needs: [test, tests-with-kernels, cpp, pr-body, review]
     if: needs.review.outputs.verdict == 'APPROVE' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 5
