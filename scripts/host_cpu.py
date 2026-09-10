@@ -93,12 +93,12 @@ def thread_cpu(pid: int) -> dict[int, tuple[str, float]]:
     """``{tid: (name, cpu_seconds)}`` for one process, from `/proc/<pid>/task/`.
 
     The process's OWN two fields, without `cutime`/`cstime`: a per-thread `stat` reports the
-    THREAD GROUP's figures for those, so the leader's row would carry every reaped child (and
-    non-leaders zero) -- the CPU `cpu_seconds` subtracts, added back on one row.
+    THREAD GROUP's figures for those, so EVERY row carries every reaped child and the CPU
+    `cpu_seconds` subtracts would return once per thread. Measured -- three threads, a 0.6 s
+    child reaped by a non-leader, `cutime=50` on all three.
 
-    One directory deeper than :func:`cpu_seconds`, and `comm` separately
-    rather than out of `stat`: a thread name can contain a `)` and the parse below already
-    keys on the LAST one, so reading the name from its own file is both simpler and exact.
+    `comm` separately rather than out of `stat`, one directory deeper than
+    :func:`cpu_seconds`: a thread name can contain a `)` and the parse keys on the LAST one.
     """
     out: dict[int, tuple[str, float]] = {}
     try:

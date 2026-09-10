@@ -74,11 +74,20 @@ def test_the_page_says_off_by_default_only_while_it_is() -> None:
     bench = (REPO_ROOT / "csrc" / "shipinfer" / "cli" / "bench.cpp").read_text(encoding="utf-8")
 
     assert "**off by default**" in page
-    # The COUNT first: splitting on the gate marker only inspects what follows it, so a second
-    # unconditional call earlier in `main()` would flip the default with the rest of this green.
-    assert bench.count("gpuSetDeviceFlags(gpuDeviceScheduleBlockingSync)") == 1, (
-        "more than one place sets the flag, so the env gate is no longer the only way in and "
-        "the page's `~3.4x default` figure describes something that does not ship"
+    # The COUNT first, and over the WHOLE of `csrc/`: splitting on the gate marker inspects
+    # only what follows it, and counting inside one file would miss the flag moving out of
+    # `bench.cpp` -- `gpuSetDeviceFlags` is a `platform.h` alias any unit can reach.
+    setters = [
+        path
+        for path in sorted((REPO_ROOT / "csrc").rglob("*"))
+        if path.suffix in {".h", ".cpp", ".cu"}
+        and "SetDeviceFlags" in path.read_text(encoding="utf-8")
+        and path.name != "platform.h"
+    ]
+    assert setters == [REPO_ROOT / "csrc" / "shipinfer" / "cli" / "bench.cpp"], setters
+    assert bench.count("SetDeviceFlags") == 1, (
+        "more than one place sets a device flag, so the env gate is no longer the only way in "
+        "and the page's `~3.4x default` figure describes something that does not ship"
     )
     guarded = bench.split('env_flag("SHIPINFER_CUDA_BLOCKING_SYNC")')[1]
     assert (

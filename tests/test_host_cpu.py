@@ -662,6 +662,42 @@ class TestAGeneratorTheBenchSpawnedIsNotTheBench:
         sampler._sample()
 
         assert set(sampler.by_class()) == {"pipe"}, sampler.by_class()
+        assert sampler.total() == pytest.approx(1.0)
+
+    def test_a_retired_row_is_purged_with_its_process(
+        self, host_cpu: ModuleType, tmp_path: Path, monkeypatch
+    ) -> None:
+        """`_forget` has two halves and only one of them was reachable from a test.
+
+        A tid the generator recycled leaves a row in `_retired`, which `by_class` and `total`
+        both read. Adding `assert total == 1.0` to the sibling above does NOT cover it --
+        checked, by deleting the retired half: 44 tests still pass. Nothing retires there,
+        because no reading goes backwards. This is that reading.
+        """
+        box = tmp_path / "generators.pids"
+        readings = [
+            {os.getpid(): {1: ("pipe-0", 1.0)}, 100: {2: ("gen-0", 5.0)}},
+            # Same tid, lower: a new thread on a recycled id, so the old row RETIRES.
+            {os.getpid(): {1: ("pipe-0", 1.0)}, 100: {2: ("gen-1", 0.5)}},
+        ]
+        state = {"tick": 0}
+        monkeypatch.setattr(host_cpu, "process_tree", _fake_tree({os.getpid(): [100], 100: []}))
+        monkeypatch.setattr(
+            host_cpu, "thread_cpu", lambda pid: readings[min(state["tick"], 1)][pid]
+        )
+        monkeypatch.setattr(host_cpu, "cpu_seconds", lambda pid: 5.0)
+        sampler = host_cpu.ThreadSampler(os.getpid(), interval_s=10.0, generators=box)
+
+        sampler._sample()
+        state["tick"] = 1
+        sampler._sample()
+        assert sampler.total() == pytest.approx(6.5), "the pre-condition: 1.0 + 5.0 + 0.5"
+
+        box.write_text("100\n", encoding="utf-8")
+        sampler._sample()
+
+        assert set(sampler.by_class()) == {"pipe"}, sampler.by_class()
+        assert sampler.total() == pytest.approx(1.0), "the retired 5.0 went with the rest"
 
     def test_declaring_is_a_no_op_when_nobody_is_measuring(
         self, host_cpu: ModuleType, monkeypatch
