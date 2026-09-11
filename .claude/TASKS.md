@@ -2963,19 +2963,44 @@ hook down, for when the operator asked to see something before it is executed.
       NOT A THROUGHPUT KNOB, and the first pair said otherwise: 29 565/31 760/30 725 frames
       accepted at 8 against 31 729-34 908 above it, overlapping ranges. One pair would have
       read as +18%; three runs an arm is what refused it.
-      THE FIX, both planes: the bound follows the LIVE SET when the chain names none --
-      `max(kDefaultMaxInstants, live cameras)`, recomputed in `refresh_live` /
-      `_refresh_live` as cameras arrive and leave. Every camera holds one instant open and
+      THE FIX, both planes: the bound follows the FLEET when the chain names none --
+      `max(kDefaultMaxInstants, cameras seen or announced)`, recomputed in `refresh_live` /
+      `_refresh_live` as cameras arrive and leave. Seen UNION announced, not `live_`: the live
+      set is a roster decision, and `ship_person_cpu.yaml` declares four cameras against a
+      fifty-camera fleet, so a roster-derived bound would have been 8 again on the shipped
+      configuration. PROVED on that configuration, unchanged: bound 54, nothing evicted, 1 683
+      observations admitted and **25 global identities over 68 tracks** where the default bound
+      resolved none in three runs. Every camera holds one instant open and
       seals more as it advances, so the number legitimately open scales with the fleet; a
       constant below it spends eviction on buckets the group is still filling rather than on
       the stale clock eviction is for. A named number stays exact in BOTH directions, which
       keeps eviction testable and lets an operator who measured their own spread say so.
       `mtmc_max_instants` is now a bench counter, because the bound is no longer a constant a
       reader can look up.
-      WHAT IT DOES NOT ANSWER: ids are 0/0 in one of the six arms above the knee (32, which
-      admitted the most observations of any run). The bound was PREVENTING association and no
-      longer is; what the clusterer does with a 50-camera instant is the next question and is
-      not this item's.
+      WHAT IT DOES NOT ANSWER: identity is erratic at this load -- 0 to 25 ids across the nine
+      runs above the knee, and the arm that admitted the MOST observations (2 180, the
+      fifty-camera roster) resolved NONE. The bound fixed eviction, deterministically; what the
+      clusterer then does with a 50-camera instant is the next question and is not this item's.
+      FILED AS `MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD` below.
+
+- [ ] MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD · FOUND 11 Sep while closing
+      `MTMC-EIGHT-OPEN-INSTANTS-IS-A-SMALL-GROUP'S-BOUND`, and it is what that item uncovered
+      rather than caused. With eviction gone, the design load (50 cameras x 20 fps, pan
+      fixture, 92 workers, four A5000s, 40 s) admits 527-2 258 observations per run and
+      resolves anywhere from 0 to 25 global identities across nine runs at the SAME settings --
+      including one arm that admitted the most of any run (2 180, the fifty-camera roster) and
+      resolved NONE, and one that admitted 1 683 and resolved 25 over 68 tracks.
+      WHY IT IS NOT NOISE TO SHRUG AT: a deployment cannot be handed "identity works about
+      two thirds of the time". Either the gate's `min_hits` over CONSECUTIVE instants is being
+      broken by a stream the queue decimates (23% refused at this load -- see
+      `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY`), or the clusterer's thresholds are wrong for a
+      50-camera instant, or both.
+      WHAT TO MEASURE FIRST, in this order: (a) the admitted observations PER CAMERA per
+      instant -- if a typical instant holds two cameras rather than fifty, no cross-camera
+      cluster can form and the barrier's `window` share says why; (b) `min_hits` at 1 against
+      the production 3, which separates "the gate never accumulates" from "the appearance
+      distance never matches"; (c) the same run at 12 cameras, where the queue refuses nothing,
+      to tell the rate apart from the fleet size.
 
 - [ ] MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK · (a) DONE 11 Sep, (b) STILL OPEN. #222 converged the two planes onto the
       CAPTURE (wall) stamp, because keying instants on different clocks is two sets of global

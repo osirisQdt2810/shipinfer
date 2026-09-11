@@ -514,12 +514,26 @@ instant is the next question, not this one's answer.
 (the first 8-arm against the first 64-arm) would have read as +18%. Three runs an arm is what
 says otherwise.
 
-**The fix is that the default follows the fleet** — `max(8, live cameras)`, recomputed as
-cameras arrive, on both planes. A chain that names `max_instants` still gets exactly that
-number, in both directions: an operator who has measured their own arrival spread can say so,
-and eviction stays testable. At fifty cameras the derived bound is 50, three times the measured
-knee; at the twelve-camera rig above it is 12, which is where every earlier row on this page
-already sat.
+**The fix is that the default follows the fleet** — `max(8, cameras seen or announced)`,
+recomputed as cameras arrive, on both planes. A chain that names `max_instants` still gets
+exactly that number, in both directions: an operator who has measured their own arrival spread
+can say so, and eviction stays testable.
+
+Seen *union* announced, and not the live set, because the live set is a roster decision. The
+chain this repository ships declares four cameras and every fleet here is fifty, so a bound
+derived from the roster would have been 8 again — the bug, on the shipped configuration. Both
+arms, same build, same load:
+
+| chain | announced | bound in force | evicted | admitted | ids / tracks |
+|---|---|---|---|---|---|
+| `ship_person_cpu.yaml`, **unchanged** | 4 | **54** | 0 | 1 683 | **25 / 68** |
+| the same with a fifty-camera roster | 50 | **50** | 0 | 2 180 | 0 / 0 |
+
+The first row is the headline: **the chain this repository ships resolves 25 global identities
+at the design load**, where every run at the default bound resolved none. The second row is the
+caveat, and it is the same one the sweep carries — identity is erratic at this load (0 to 25
+across nine runs above the knee, and the arm that admitted the MOST observations resolved none),
+so what the bound fixed is *eviction*, deterministically, and identity is downstream of that.
 
 ## The verdict, and the one open question
 
