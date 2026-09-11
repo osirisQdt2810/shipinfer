@@ -2785,6 +2785,37 @@ hook down, for when the operator asked to see something before it is executed.
       takes the noun and the lane -- is cheaper than a third copy, and until then the two can
       drift independently, which is the real cost. Whoever adds the third writes the template.
 
+- [ ] CSRC-MTMC-GATE-OPTIONS · THE GATE'S THRESHOLDS ARE NOT SETTABLE FROM THE CHAIN, and
+      MEASURED 11 Sep that is what makes the chain issue zero global ids: at 12 cameras x 20 fps
+      with zero frames dropped and the barrier closing instants on evidence
+      (`complete 282 advanced 184 window 522`), the run reports
+      `mtmc_observations offered 3768 admitted 0` and `mtmc_identities 0 0`. Lower the floor and
+      the SAME run answers `admitted 4046` and `identities 20 52` -- 20 global ids across 52
+      tracks -- so the chain is proven end to end and the gate is what closed it.
+      WHY: `ObservationGate`'s defaults are the reference's production values --
+      `min_height_fraction = 1/9`, which is 120 px of a 1080-tall frame and
+      "roughly the smallest crop its re-ID model was trained to handle" -- and the benchmark's
+      2K crowd frames have people below that. The mtmc node's `params:` carry `group`,
+      `cameras`, `sync_window_ms` and `max_instants`; `min_hits` and `min_height_fraction` are
+      not on the plan at all, so neither a site nor a benchmark can say otherwise.
+      THE FIX is the sibling of `CSRC-TRACKER-OPTIONS`: carry them on `MtmcStageSpec` the way
+      `sync_window_ms` now is, refuse the out-of-range values the way the reference does
+      (`min_hits >= 1`, `min_height_fraction` in [0, 1)), and thread them into
+      `create_cluster_tracker`. The one design question worth stating: a tracker is cached per
+      (impl, slot), so two chains asking for different options on one slot must be REFUSED
+      rather than silently sharing the first one's gate.
+
+- [ ] BENCH-FOOTAGE-IS-BELOW-THE-MTMC-GATE · `benchmarks/baseline/data/{person_2K,ship_2K}` is
+      what every measurement uses, and its subjects are shorter than the gate's 120 px floor at
+      1080p -- so a bench run cannot exercise cross-camera association at the reference's
+      defaults, whatever else it proves (measured, see `CSRC-MTMC-GATE-OPTIONS`). THE OPTIONS:
+      (a) footage whose people clear a ninth of the frame -- the `person_4K`/`ship_4K` sets are
+      already in the submodule and worth measuring first, since a 4K frame's ninth is 2 160/9
+      = 240 px and the subjects may scale with it; (b) crop the existing frames so the subjects
+      are proportionally taller, which changes what the detector sees and is therefore a
+      different measurement; (c) set the gate's floor from the chain and say in the report what
+      it was. (c) is honest and cheap; (a) is the one that measures the deployment.
+
 - [ ] MTMC-GATE-COMMITS-BEFORE-THE-GRAM-CAN-THROW · `ShipvisionCluster::ids()` is not atomic on
       refusal while the half it wraps promises it is: `identity.h` says "EVERY EMBEDDING IS
       CHECKED BEFORE ANYTHING IS MUTATED, so a refusal leaves the instant unapplied and the
