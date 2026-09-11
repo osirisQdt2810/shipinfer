@@ -306,6 +306,8 @@ namespace shipinfer {
             // for every camera this shard happens to see.
             spec.group = node->group.empty() ? node->slot : node->group;
             spec.cameras = node->cameras;
+            spec.gate.min_hits = node->min_hits;
+            spec.gate.min_height_fraction = node->min_height_fraction;
             for (const ObjectStageSpec& object : built.objects) {
                 if (object.fold) continue;  // a segmenter's fold is an area, not an embedding
                 spec.embedding_sources.push_back(object.output);

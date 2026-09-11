@@ -22,6 +22,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -105,13 +106,35 @@ namespace shipinfer::mtmc {
         std::atomic<uint64_t> admitted_{0};
     };
 
-    using ClusterTrackerFactory = std::function<std::shared_ptr<ClusterTracker>()>;
+    //: What the CHAIN gets to say about a cross-camera tracker. The gate's two thresholds
+    //: today: a site whose people are small in frame admits nothing at the reference's
+    //: production values and had no way to say so -- measured, and the reason the chain's
+    //: first end-to-end run issued zero global ids (`CSRC-MTMC-GATE-OPTIONS`).
+    //:
+    //: DECLARED HERE rather than in `gate.h`, which includes this header and not the other
+    //: way round, and kept as a struct so the identity map's bounds can join it
+    //: (`CSRC-TRACKER-OPTIONS`) without another signature change.
+    struct ClusterOptions {
+        //: Absent means "the chain did not say", which is the implementation's own default --
+        //: not a number chosen here. Two defaults for one knob is how they drift.
+        std::optional<int> min_hits;
+        std::optional<double> min_height_fraction;
+
+        bool operator==(const ClusterOptions& other) const {
+            return min_hits == other.min_hits &&
+                   min_height_fraction == other.min_height_fraction;
+        }
+    };
+
+    using ClusterTrackerFactory =
+        std::function<std::shared_ptr<ClusterTracker>(const ClusterOptions&)>;
 
     class ClusterRegistry {
       public:
         void add(const std::string& impl, ClusterTrackerFactory factory);
         bool has(const std::string& impl) const;
-        std::shared_ptr<ClusterTracker> create(const std::string& impl) const;
+        std::shared_ptr<ClusterTracker> create(const std::string& impl,
+                                               const ClusterOptions& options = {}) const;
         std::vector<std::string> names() const;
 
       private:
@@ -128,8 +151,12 @@ namespace shipinfer::mtmc {
     // and one worse: a cross-camera tracker is the identity space for a whole GROUP, so a
     // second instance would issue a second, contradictory set of global ids for the same
     // objects. Two `mtmc` slots are two groups and get two.
+    //: AND THE SAME OPTIONS EVERY TIME for one slot. The tracker is cached, so a second
+    //: caller asking for different thresholds on one slot would silently get the first
+    //: caller's gate -- a configuration that is not the one in the file. Refused instead.
     std::shared_ptr<ClusterTracker> create_cluster_tracker(const std::string& impl,
-                                                           const std::string& slot);
+                                                           const std::string& slot,
+                                                           const ClusterOptions& options = {});
 
     struct MadeClusterTracker {
         std::string impl;

@@ -354,6 +354,16 @@ class TestBothPlanesRefuseTheSameText:
         ("plan 3 x\nnode a b c\nmax_instants 3abc\n", "a count with a tail"),
         ("plan 3 x\nnode a b c\nmax_instants --5\n", "a doubly-negative count"),
         ("plan 3 x\nnode a b c\nmax_instants 99999999999\n", "a count past a 32-bit int"),
+        # THE GATE'S TWO NUMBERS, at the bounds the reference states for itself: a floor of
+        # zero hits associates a track on the frame it first appeared, and 1.0 of frame height
+        # admits nothing at all -- a gate that closes rather than thresholds.
+        ("plan 3 x\nnode a b c\nmin_hits 0\n", "a floor of zero observations"),
+        ("plan 3 x\nnode a b c\nmin_hits -1\n", "and a negative count"),
+        ("plan 3 x\nnode a b c\nmin_hits 3abc\n", "a hit count with a tail"),
+        ("plan 3 x\nnode a b c\nmin_height_fraction 1.0\n", "a height floor admitting nothing"),
+        ("plan 3 x\nnode a b c\nmin_height_fraction -0.1\n", "and a fraction below zero"),
+        ("plan 3 x\nnode a b c\nmin_height_fraction nan\n", "a non-finite height floor"),
+        ("plan 3 x\nnode a b c\nmin_height_fraction abc\n", "and one that is not a number"),
         ("plan 3 x\nsetting nonsense 1\n", "a setting key neither plane would use"),
         ("plan 3 x\nsetting workers four\n", "a setting value that is not an integer"),
         ("plan 3 x\nsetting workers 4\n", "one setting, so seven a reader would default"),
@@ -406,6 +416,10 @@ class TestBothPlanesRefuseTheSameText:
         ),
         (f"plan 3 x\n{ALL_SETTINGS}", "every setting, the only complete spelling"),
         ("plan 3 x\npolicy jsq\n", "a policy with no options, which is the ordinary case"),
+        (
+            "plan 3 x\nnode a b c\nmin_hits 1\nmin_height_fraction 0.0\n",
+            "the loosest gate a chain can ask for: every track, at any height",
+        ),
         ("plan 3 x\npolicy jsq\npolicy_option a 1\npolicy_option b 2\n", "and with two"),
         (
             f"plan 3 x\n{ALL_SETTINGS.replace('block_timeout_ms 50', 'block_timeout_ms 0')}",
@@ -523,6 +537,81 @@ class TestTheBarriersWindowCrosses:
         with pytest.raises(ConfigurationError, match="must be positive"):
             self.resolved(
                 "{impl: shipvision, params: {scope: global, sync_window_ms: 0}, after: track}",
+                dims,
+            )
+
+
+class TestTheGateCrosses:
+    """`CSRC-MTMC-GATE-OPTIONS`: the reference admits an observation only after `min_hits`
+    consecutive qualifying instants, and only if the box is at least `min_height_fraction` of
+    frame height -- 3 and 1/9 by default, which is 120 px at 1080p. On footage whose subjects
+    are smaller than that the gate admits NOTHING (`mtmc_observations offered 3768 admitted
+    0`), and until now no chain could say otherwise: the element took `options` and the plan
+    carried none of them, so the C++ plane ran the defaults whatever the chain said."""
+
+    def chain(self, mtmc: str) -> str:
+        return (
+            "name: gate\nelements:\n"
+            "  decode: {impl: replay}\n"
+            "  detect: {impl: pool, model: ship_detector}\n"
+            "  embed: {impl: pool, model: person_embedder, params: {classes: [person]}}\n"
+            "  track: {impl: shipvision, after: embed}\n"
+            f"  mtmc: {mtmc}\n"
+            "  output: {impl: none}\n"
+        )
+
+    def resolved(self, mtmc: str, dims: dict[str, tuple[int, int]]) -> str:
+        chain = Topology.from_spec(ChainSpec.from_yaml(self.chain(mtmc)))
+        return plan_text(resolve_plan(chain, dims=dims))
+
+    def test_the_chains_gate_reaches_the_plan(self, dims: dict[str, tuple[int, int]]) -> None:
+        text = self.resolved(
+            "{impl: shipvision, params: {scope: global, options: {min_hits: 1, "
+            "min_height_fraction: 0.02}}, after: track}",
+            dims,
+        )
+
+        assert "min_hits 1" in text
+        assert "min_height_fraction 0.02" in text
+
+    def test_an_unstated_gate_emits_no_line(self, dims: dict[str, tuple[int, int]]) -> None:
+        """Absent is the implementation's own default, which is where it belongs: a number
+        written here would be a second copy of the reference's."""
+        text = self.resolved("{impl: shipvision, params: {scope: global}, after: track}", dims)
+
+        assert "min_hits" not in text and "min_height_fraction" not in text
+
+    def test_an_option_the_plan_cannot_carry_is_refused_by_name(
+        self, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """The element forwards every `options` key to the reference tracker and the plan
+        carries two of them, so a third would run on this plane and vanish on the other --
+        one chain file, two configurations, which is the class #222 kept finding."""
+        with pytest.raises(ConfigurationError, match="appearance_threshold"):
+            self.resolved(
+                "{impl: shipvision, params: {scope: global, options: "
+                "{appearance_threshold: 0.5}}, after: track}",
+                dims,
+            )
+
+    @pytest.mark.parametrize(
+        ("options", "match"),
+        [
+            ("{min_hits: 0}", "first seen"),
+            ("{min_hits: 2.5}", "whole number"),
+            ("{min_height_fraction: 1.0}", "admits nothing"),
+            ("{min_height_fraction: -0.1}", r"\[0, 1\)"),
+        ],
+    )
+    def test_the_references_own_bounds_are_refused_from_the_chain(
+        self, options: str, match: str, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """`ObservationGate` refuses these itself, so the plan writer agreeing is what keeps
+        a chain file from resolving into a plan the runtime then rejects."""
+        with pytest.raises(ConfigurationError, match=match):
+            self.resolved(
+                f"{{impl: shipvision, params: {{scope: global, options: {options}}}, "
+                "after: track}",
                 dims,
             )
 

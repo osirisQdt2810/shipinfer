@@ -102,6 +102,12 @@ class PlanNode:
     #: two instant memberships for one chain file (#222's review).
     group: str | None = None
     cameras: tuple[str, ...] = ()
+    #: The GATE's two thresholds, from the slot's `params: options:`. They decide which tracks
+    #: may be associated at all, and the reference's production values admit nothing on footage
+    #: whose subjects are small in frame -- measured, and the reason the C++ chain's first
+    #: end-to-end run issued zero global ids (`CSRC-MTMC-GATE-OPTIONS`).
+    min_hits: int | None = None
+    min_height_fraction: float | None = None
 
 
 class SettingsLike(Protocol):
@@ -422,6 +428,10 @@ def resolve_plan(
                     _barrier_instants(node.spec.params, where) if node.kind == "mtmc" else None
                 ),
                 group=_barrier_group(node.spec.params, where) if node.kind == "mtmc" else None,
+                min_hits=_gate_hits(node.spec.params, where) if node.kind == "mtmc" else None,
+                min_height_fraction=(
+                    _gate_height(node.spec.params, where) if node.kind == "mtmc" else None
+                ),
                 cameras=(
                     _barrier_cameras(node.spec.params, where) if node.kind == "mtmc" else ()
                 ),
@@ -565,6 +575,78 @@ def _barrier_window(params: Mapping[str, Any], where: str) -> float | None:
     return window
 
 
+#: The `options:` keys a PLAN can carry, which is the gate's two. Every other
+#: `ClusterMTMCTracker` keyword the Python element accepts is refused at plan time rather than
+#: dropped: a plan that silently lost one would have the C++ plane run a configuration the
+#: chain does not state, which is the divergence this whole seam exists to prevent
+#: (`CSRC-TRACKER-OPTIONS` is the item that widens this set).
+_PLAN_OPTIONS = ("min_hits", "min_height_fraction")
+
+
+def _gate_options(params: Mapping[str, Any], where: str) -> Mapping[str, Any]:
+    """The slot's `params: options:`, refused if it holds a key no plan can carry."""
+    options = params.get("options")
+    if options is None:
+        return {}
+    if not isinstance(options, Mapping):
+        raise ConfigurationError(
+            f"{where}: `params: options:` must be a mapping of tracker keyword arguments, "
+            f"got {type(options).__name__}"
+        )
+    extra = sorted(set(options) - set(_PLAN_OPTIONS))
+    if extra:
+        raise ConfigurationError(
+            f"{where}: `params: options:` states {extra}, which a plan cannot carry yet -- so "
+            f"the C++ plane would run without them while this one honours them. A plan carries "
+            f"{list(_PLAN_OPTIONS)}; see CSRC-TRACKER-OPTIONS"
+        )
+    return options
+
+
+def _gate_hits(params: Mapping[str, Any], where: str) -> int | None:
+    """Consecutive qualifying instants before a track may be associated, or `None`.
+
+    The reference's own bound: at least one, because zero would admit a track on the frame it
+    was first seen and cross-camera identity would follow a single spurious view.
+    """
+    value = _gate_options(params, where).get("min_hits")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigurationError(
+            f"{where}: `min_hits` is {value!r}; it counts observations and is a whole number"
+        )
+    if value < 1:
+        raise ConfigurationError(
+            f"{where}: `min_hits` is {value}; 0 would admit a track on the frame it was first "
+            f"seen, which is the reference's own refusal"
+        )
+    return value
+
+
+def _gate_height(params: Mapping[str, Any], where: str) -> float | None:
+    """Minimum box height as a fraction of frame height, or `None` when the chain is silent.
+
+    In `[0, 1)`, the reference's range: 1.0 admits nothing at all, which is not a threshold
+    but an off switch, and a negative one is not a fraction.
+    """
+    value = _gate_options(params, where).get("min_height_fraction")
+    if value is None:
+        return None
+    try:
+        fraction = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"{where}: `min_height_fraction` is {value!r}; it is a fraction of frame height"
+        ) from exc
+    if not 0.0 <= fraction < 1.0 or not math.isfinite(fraction):
+        raise ConfigurationError(
+            f"{where}: `min_height_fraction` is {value}; a fraction of frame height is in "
+            f"[0, 1), and 1.0 admits nothing at all rather than thresholding"
+        )
+    return fraction
+
+
 def _barrier_group(params: Mapping[str, Any], where: str) -> str | None:
     """The group's name, or `None` when the chain does not say (the element uses the slot)."""
     value = params.get("group")
@@ -692,6 +774,10 @@ def plan_text(plan: ResolvedPlan) -> str:
         # comma-joined list would need a second escaping rule for a camera id.
         for camera in node.cameras:
             lines.append(f"camera {camera}")
+        if node.min_hits is not None:
+            lines.append(f"min_hits {node.min_hits}")
+        if node.min_height_fraction is not None:
+            lines.append(f"min_height_fraction {node.min_height_fraction!r}")
         if node.sync_window_ms is not None:
             lines.append(f"sync_window_ms {node.sync_window_ms!r}")
         if node.max_instants is not None:
@@ -1058,6 +1144,32 @@ def _sync_window_ms(node: dict[str, object], args: Sequence[str], where: str) ->
     node["sync_window_ms"] = value
 
 
+def _min_hits(node: dict[str, object], args: Sequence[str], where: str) -> None:
+    """Consecutive qualifying instants before a track may be associated. At least one."""
+    _want(args, 1, where, "min_hits <count>")
+    value = _int(args[0], where)
+    if value < 1:
+        raise PlanSyntaxError(
+            f"{where}: min_hits is {value}; 0 would admit a track on the frame it was first "
+            f"seen"
+        )
+    node["min_hits"] = value
+
+
+def _min_height_fraction(node: dict[str, object], args: Sequence[str], where: str) -> None:
+    """Minimum box height as a fraction of frame height, in `[0, 1)`."""
+    _want(args, 1, where, "min_height_fraction <fraction>")
+    if not _NUMBER.match(args[0]):
+        raise PlanSyntaxError(f"{where}: {args[0]!r} is not a number")
+    value = float(args[0])
+    if not 0.0 <= value < 1.0 or not math.isfinite(value):
+        raise PlanSyntaxError(
+            f"{where}: min_height_fraction is {args[0]}; a fraction of frame height is in "
+            f"[0, 1), and 1.0 admits nothing at all rather than thresholding"
+        )
+    node["min_height_fraction"] = value
+
+
 def _camera(node: dict[str, object], args: Sequence[str], where: str) -> None:
     """One camera of a cross-camera group's roster. Repeatable, in the roster's order."""
     _want(args, 1, where, "camera <id>")
@@ -1109,4 +1221,6 @@ _ATTRIBUTES = {
     "max_instants": _max_instants,
     "group": _word_attr("group"),
     "camera": _camera,
+    "min_hits": _min_hits,
+    "min_height_fraction": _min_height_fraction,
 }

@@ -21,6 +21,7 @@
 #include "shipinfer/pipeline/events/records.h"
 #include "shipinfer/pipeline/graph/mask_area.h"
 #include "shipinfer/pipeline/graph/plan.h"
+#include "shipinfer/pipeline/mtmc/cluster.h"
 
 namespace shipinfer {
 
@@ -81,6 +82,9 @@ namespace shipinfer {
         //: until #222's review found the two rosters differing.
         std::string group;
         std::vector<std::string> cameras;
+        //: The gate's thresholds as the chain states them, absent when it does not -- the
+        //: implementation's own defaults then stand, rather than a second copy of them here.
+        mtmc::ClusterOptions gate;
         std::optional<double> sync_window_ms;
         std::optional<int> max_instants;
         //: EVERY embedder's output. Several, because a chain embeds people and ships
