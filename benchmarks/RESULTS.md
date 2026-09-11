@@ -243,13 +243,48 @@ against 25.9% at `min_hits 2`), which is why it is a separate defect and not thi
 **And the gate sees a third of a frame's rows.** 3 480 observations from 9 538 frames is 0.36 per
 frame, while the two embedders processed 77 777 person crops and 13 124 ship crops — about 9.5
 embedded rows per frame. An observation needs a track id **and** an embedding
-(`graph/stages.cpp`); the track batch is where the rest go, and there is no counter for tracked
-*rows* — only `track_frames_untracked`, which counts frames.
+(`graph/stages.cpp`), and a row only carries an id once the tracker has CONFIRMED it. That is
+the thread the next section pulls, and it is the answer to this whole page's mtmc puzzle.
 
 So the chain is proven end to end, the association runs on real observations when the gate lets
-it, and each of the three findings above is filed with its numbers rather than paraphrased:
-`MTMC-MIN-HITS-CANNOT-BE-MET-BY-A-FREE-RUNNING-FLEET`, `MTMC-ROSTER-NAMES-NO-CAMERA-A-RUN-HAS`
-and `MTMC-OFFERS-A-THIRD-OF-A-FRAMES-ROWS`.
+it, and the roster finding is filed with its numbers rather than paraphrased:
+`MTMC-ROSTER-NAMES-NO-CAMERA-A-RUN-HAS`.
+
+## Footage a tracker can follow, and the chain's first global ids at the defaults it ships
+
+Every measurement above replays **ten unrelated photographs** at 20 fps: `scripts/rtsp_serve.py`
+encodes a directory of JPEGs into one H.264 stream and the server loops it, so a camera's scene
+changes completely every 50 ms. A per-camera tracker confirms a track by agreeing with itself
+across frames, and nothing in that input agrees with anything — which is why a row so rarely
+carried an id, and why an age gate counting *consecutive* instants could never be satisfied.
+
+`benchmarks/harness/pan.py` builds the other kind of input from the same real photographs: a
+1080p window panned across one 4K frame on a path that closes on itself, ~15 px per step, so
+consecutive frames hold the same people a few pixels along. Generated from real data and
+deterministic, which is the rule `crowd.py` states. The same rig as the table above — 12 cameras
+× 20 fps × 40 s, GPUs 0/2/5/6, 24 workers, `--source nvdec` over gstreamer RTSP — at the
+reference's **production defaults**, `min_hits 3` and `min_height_fraction 1/9`:
+
+| fixture | roster | observations/frame | offered | admitted | ids / tracks |
+|---|---|---|---|---|---|
+| ten photographs | 4 declared | 0.41 | 3 868 | **0** | 0 / 0 |
+| ten photographs | the run's 12 | 0.36 | 3 480 | **0** | 0 / 0 |
+| **the pan** | 4 declared | **4.42** | 42 063 | **26 023 (61.9%)** | **13 / 72** |
+| **the pan** | the run's 12 | **4.41** | 41 951 | **24 177 (57.6%)** | **12 / 72** |
+
+**The chain associates across cameras at the configuration the deployment ships.** Nothing was
+tuned for these rows: the gate is the reference's own, the window is the chain's 60 ms, and the
+only thing that changed is that the camera now shows a scene instead of a slideshow. Ten times
+the observations reach the gate, three fifths of them qualify, and 72 per-camera tracks resolve
+to a dozen global identities.
+
+**And the cost appears where the old runs could not see it.** With the gate admitting, the same
+40 s leaves **1 483 of 9 520 events incomplete** (15.6%) against **zero** on the old fixture at
+the same reassembly window — the barrier and the clusterer are doing per-instant work now, and
+the reassembly window has not been re-chosen since they started
+(`MTMC-REAL-WORK-COSTS-A-SIXTH-OF-THE-EVENTS`). The throughput table further up this page was
+measured with `mtmc` admitting nothing, so it is a floor for this chain rather than its rate.
+
 
 The fix for the *throughput* half is placement **affinity**, not more threads — a camera's frames reaching one worker, or
 a per-camera sequencer in front of the tracker — and it trades load balance for ordering, which

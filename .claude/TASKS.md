@@ -2898,7 +2898,7 @@ hook down, for when the operator asked to see something before it is executed.
       `MTMC-MIN-HITS-CANNOT-BE-MET-BY-A-FREE-RUNNING-FLEET`; `benchmarks/RESULTS.md` has the
       table.
 
-- [ ] MTMC-MIN-HITS-CANNOT-BE-MET-BY-A-FREE-RUNNING-FLEET · MEASURED 11 Sep: at the reference's
+- [x] MTMC-MIN-HITS-CANNOT-BE-MET-BY-A-FREE-RUNNING-FLEET · REFUTED 11 Sep. MEASURED: at the reference's
       `min_hits = 3` the gate admits NOTHING on a 12-camera run; at 2 it admits ~25% (969/3 739
       and 847/3 330 in two independent arms); at 1 it admits 100%. It is not the window (200 ms
       still admits 0, with the closes moved from `window` to `advanced`) and not the roster
@@ -2912,6 +2912,11 @@ hook down, for when the operator asked to see something before it is executed.
       should hits be counted over the GROUP's instants (today) or over the instants that
       CONTAINED that camera? Read `shipvision/mtmc/gating.py` and its tests before changing the
       port -- a divergence here is a parity break, not a fix.
+      REFUTED the same day, and the semantics need no change: `min_hits = 3` admits 61.9% of
+      42 063 observations on footage a tracker can follow (`benchmarks/harness/pan.py`), at the
+      same 12 x 20 x 40 s, the same window and the same defaults. The fleet was never the
+      problem; the INPUT was ten unrelated photographs replayed at 20 fps, so no track survived
+      one frame, let alone three consecutive instants. Nothing in the port changes.
 
 - [ ] MTMC-ROSTER-NAMES-NO-CAMERA-A-RUN-HAS · `topology/ship_person_cpu.yaml` declares
       `cameras: [cam-01, cam-02, cam-03, cam-04]` and every bench fleet is `cam00 ... cam11`, so
@@ -2930,7 +2935,7 @@ hook down, for when the operator asked to see something before it is executed.
       roster. The fault is therefore recent and its cause is the precedence, so "declared wins
       over seen" is itself a candidate alongside a bench-specific chain and a refusal at open().
 
-- [ ] MTMC-OFFERS-A-THIRD-OF-A-FRAMES-ROWS · MEASURED 11 Sep: 3 480 observations from 9 538
+- [x] MTMC-OFFERS-A-THIRD-OF-A-FRAMES-ROWS · ANSWERED 11 Sep. MEASURED: 3 480 observations from 9 538
       frames is 0.36 per frame, while the same run's embedders processed 77 777 person crops
       and 13 124 ship crops -- about 9.5 embedded rows per frame. `MtmcStage::do_run` builds one
       observation per TRACK row that also has an embedding, so the rows go missing at the track
@@ -2939,6 +2944,31 @@ hook down, for when the operator asked to see something before it is executed.
       after N frames and the replayed stream is a 10-image loop, so few rows ever carry an id --
       52 distinct tracks in a 40 s, 12-camera run. Count tracked rows first; the number decides
       whether this is a tracker configuration or a scatter defect.
+      ANSWERED: neither. A row carries an id only once the tracker has CONFIRMED it, and the
+      fixture was ten unrelated photographs at 20 fps -- a scene change every 50 ms, so
+      bytetrack confirmed almost nothing. On the pan fixture the same graph offers **4.42
+      observations per frame** (42 063 in 9 517 frames) against 0.36, with no code change. The
+      counter for tracked ROWS is still worth having, but it would have measured the input.
+
+- [ ] MTMC-REAL-WORK-COSTS-A-SIXTH-OF-THE-EVENTS · MEASURED 11 Sep on the pan fixture, which is
+      the first run where `mtmc` does real per-instant work: **1 483 of 9 520 events incomplete
+      (15.6%)**, against ZERO on the old fixture at the same reassembly window, same cameras,
+      same rate, same workers. `reassembly_us_max` 303 ms. Nothing is dropped upstream
+      (`frames_dropped 0`, `queue_rejected 0`), so this is the collector's window against a
+      pipeline that now includes a barrier wait and a clusterer. THE WINDOW HAS NOT BEEN
+      RE-CHOSEN since either landed (`pipeline.reassembly`, `core/settings/`), and every
+      latency number on the page was measured with the gate admitting nothing. Sweep the window
+      against completeness on the pan fixture before changing the default.
+
+- [ ] BENCH-DEFAULT-FIXTURE-IS-A-SLIDESHOW · `scripts/rtsp_serve.py`'s default data is
+      `person_2K`, ten unrelated photographs, and every number on `benchmarks/RESULTS.md` was
+      measured on it. It is a fine detection and throughput fixture and it exercises NO
+      tracking and NO cross-camera identity, which is what took three items and two days to
+      see. THE DECISION: make the pan fixture the default (`SHIPINFER_RTSP_PERSON_DATA` selects
+      it today) and re-base the page, or keep both and say per number which was used. What
+      argues for switching is that the deployment tracks; what argues against is that every
+      historical figure becomes incomparable in one commit. RECOMMENDATION: keep both, make the
+      pan the default for any run that includes `track` or `mtmc`, and mark the page's rows.
 
 - [ ] MTMC-GATE-COMMITS-BEFORE-THE-GRAM-CAN-THROW · `ShipvisionCluster::ids()` is not atomic on
       refusal while the half it wraps promises it is: `identity.h` says "EVERY EMBEDDING IS
