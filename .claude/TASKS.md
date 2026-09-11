@@ -2970,7 +2970,7 @@ hook down, for when the operator asked to see something before it is executed.
       historical figure becomes incomparable in one commit. RECOMMENDATION: keep both, make the
       pan the default for any run that includes `track` or `mtmc`, and mark the page's rows.
 
-- [ ] MTMC-GATE-COMMITS-BEFORE-THE-GRAM-CAN-THROW · `ShipvisionCluster::ids()` is not atomic on
+- [x] MTMC-GATE-COMMITS-BEFORE-THE-GRAM-CAN-THROW · NOT A PORT DEFECT, pinned 11 Sep. `ShipvisionCluster::ids()` is not atomic on
       refusal while the half it wraps promises it is: `identity.h` says "EVERY EMBEDDING IS
       CHECKED BEFORE ANYTHING IS MUTATED, so a refusal leaves the instant unapplied and the
       caller may retry it", but `gate_.filter()` has already done `hits_ = std::move(hits)`
@@ -2983,6 +2983,18 @@ hook down, for when the operator asked to see something before it is executed.
       match the identity map's, so a reader of either finds the same promise. Cheap; it needs
       one API change and a test that retries a refused instant and asserts the runs did not
       double-advance.
+      MEASURED 11 Sep, and it changes who owns the fix: THE REFERENCE DOES THE SAME.
+      `shipvision/mtmc/gating.py::filter` assigns `self._hits = hits` and `MTMC.track` then
+      runs the gram, the clusterer and the assigner, any of which can raise. Run against the
+      submodule: `instant 1 hits=1 admitted=0`, `instant 2 hits=2 admitted=0`,
+      `RETRY of instant 2 hits=3 admitted=1`. So a two-phase `filter` in the port ALONE would
+      be a parity break -- the Python plane calls the reference directly -- and the fix belongs
+      upstream in shipvision, where `filter` would answer the delta and `track` commit it.
+      PINNED INSTEAD, both planes: `csrc/tests/test_mtmc_gate.cpp` asserts a re-submitted
+      instant advances the run, and `tests/pipeline/test_gate_parity.py` asserts the reference
+      still does, so the day upstream fixes it this repository is told rather than left to
+      discover it. No caller retries today: the stage catches the refusal and publishes the
+      frame unidentified.
 
 - [ ] MTMC-GRAM-WANTS-A-REAL-GEMM · `shipvision_cluster.cpp::gram_of` is a scalar triple loop,
       and `matchers/appearance/matcher.h` names exactly this code as the thing not to write:

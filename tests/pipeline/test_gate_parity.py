@@ -53,6 +53,43 @@ class TestTheGoldenIsStillTheReferencesAnswer:
         assert "emit_parity_golden.py --kind gate" in text
 
 
+class TestTheReferenceCommitsBeforeTheInstantIsApplied:
+    """The tripwire for `MTMC-GATE-COMMITS-BEFORE-THE-GRAM-CAN-THROW`.
+
+    `filter` installs its hit map before `MTMC.track` runs the gram, the clusterer and the
+    assigner -- any of which can raise -- so an instant submitted twice advances every run
+    twice. The C++ port does the same and `csrc/tests/test_mtmc_gate.cpp` pins it. Making one
+    plane atomic alone would be the divergence, so the fix is upstream; this fails the day
+    upstream makes it, which is the day to port the change rather than discover it.
+    """
+
+    def test_a_re_submitted_instant_advances_the_run_again(self) -> None:
+        import numpy as np
+        from shipvision.mtmc.frames import TrackKey, TrackObservation
+        from shipvision.mtmc.gating import ObservationGate
+        from shipvision.types import FrameTag, Track
+
+        key = TrackKey(camera_id="cam0", track_id=1)
+        track = Track(
+            track_id=1,
+            box=np.array([0.0, 0.0, 100.0, 300.0]),
+            tag=FrameTag(camera_id="cam0", frame_id=0),
+            embedding=np.array([1.0, 0.0], dtype=np.float32),
+        )
+        instant = [TrackObservation(key=key, track=track, frame_height=1080, frame_width=1920)]
+        gate = ObservationGate(min_hits=3)
+
+        gate.filter(instant)
+        gate.filter(instant)
+
+        assert len(gate.filter(instant)) == 1, (
+            "the reference now withholds a re-submitted instant, which is the upstream fix "
+            "`MTMC-GATE-COMMITS-BEFORE-THE-GRAM-CAN-THROW` asks for -- port it to "
+            "`csrc/shipinfer/pipeline/mtmc/gate.cpp` and update the pin in test_mtmc_gate.cpp"
+        )
+        assert gate.hits(key) == 3
+
+
 class TestTheCppGateReadsTheSameFiles:
     def test_the_binary_names_this_scenario_and_this_golden(self) -> None:
         """A path typo would leave the C++ gate reading a file nobody emits, and it would pass.
