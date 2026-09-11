@@ -752,6 +752,36 @@ namespace {
         check(barrier.instant_stats()[mtmc::kDroppedFailed] == 1, "counted once, per instant");
     }
 
+    void a_capture_clock_that_steps_back_is_refused_and_counted() {
+        // NTP can step CLOCK_REALTIME backwards at any moment, and #222 converged both planes
+        // onto the capture (wall) stamp deliberately -- two clocks would be two sets of global
+        // ids for one clip. A stepped frame matches no open bucket and no resolved span, so it
+        // would open an instant in the PAST and hold a whole window for cameras whose clocks
+        // did not step. Per CAMERA, so a camera merely sitting behind the group never trips it.
+        InstantBarrier barrier(options(0.06, 4));
+
+        barrier.submit("cam0", 100.0, payload_of("a"), kJoin);
+        const InstantOutcome stepped =
+            barrier.submit("cam0", 99.5, payload_of("b"), kJoin);  // 500 ms back, window 60 ms
+
+        check(stepped.reason == mtmc::kMissedBackward,
+              std::string("a step past the window is refused, got: ") + stepped.reason);
+        check(!stepped.associated, "and the frame carries a gap rather than a wrong instant");
+        check(barrier.frame_stats()[mtmc::kMissedBackward] == 1, "counted once");
+
+        const InstantOutcome inside =
+            barrier.submit("cam0", 99.98, payload_of("c"), kJoin);  // 20 ms back, inside it
+        check(
+            inside.reason != mtmc::kMissedBackward,
+            std::string("a stamp INSIDE the window is ordinary jitter, got: ") + inside.reason);
+
+        // A second camera whose clock sits behind the group is not a step: its own stamps are
+        // monotonic, so it joins instants as it always did.
+        const InstantOutcome behind = barrier.submit("cam1", 99.0, payload_of("d"), kJoin);
+        check(behind.reason != mtmc::kMissedBackward,
+              std::string("an offset camera is not a stepped one, got: ") + behind.reason);
+    }
+
     void a_declared_camera_that_never_sends_is_named() {
         // The fault this exists to make visible: an announced camera is waited for whether it
         // exists or not, so a roster naming cameras the fleet does not have makes `complete`
@@ -882,6 +912,7 @@ int main() {
     a_submit_after_close_all_is_refused_rather_than_parked();
     a_failed_association_releases_the_waiters_and_the_closer_gets_the_exception();
     a_declared_camera_that_never_sends_is_named();
+    a_capture_clock_that_steps_back_is_refused_and_counted();
     one_event_per_instant_and_not_one_per_frame();
     every_frame_of_a_group_gets_the_same_answer_or_an_honest_gap();
     std::printf("%d checks, %d failure(s)\n", checks, failures);

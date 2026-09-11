@@ -62,6 +62,7 @@ __all__ = [
     "DROPPED_EXPIRED",
     "DROPPED_FAILED",
     "DROPPED_SHUTDOWN",
+    "MISSED_BACKWARD",
     "MISSED_DUPLICATE",
     "MISSED_LATE",
     "MISSED_WOULD_STARVE",
@@ -124,6 +125,11 @@ MISSED_DUPLICATE = "duplicate"
 #: part in the group's association — only the *answer* is not delivered to this frame.
 #: Dropping the entry instead would degrade the instant for every camera that did wait.
 MISSED_WOULD_STARVE = "would_starve"
+#: This camera's *capture* clock went backwards by more than an instant is wide — measured
+#: against that camera's own newest stamp, so a clock that merely sits behind the group never
+#: trips it. What it catches is a STEP, which NTP can deliver at any moment
+#: (`MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK`).
+MISSED_BACKWARD = "backward"
 
 #: How wide an instant is, in milliseconds — the maximum capture spread of one instant, and
 #: the longest any caller waits. **A proposal, not a measurement** (the phase-C plan's open
@@ -370,6 +376,7 @@ class InstantBarrier:
         "_instant_counts",
         "_live_set",
         "_max_instants",
+        "_newest_capture",
         "_next_instant",
         "_on_event",
         "_recent",
@@ -426,6 +433,9 @@ class InstantBarrier:
         self._announced: set[str] = set()
         #: Cameras that have actually submitted a frame. Only consulted before the first
         #: announcement — see :meth:`camera_added`.
+        #: Each camera's newest capture stamp, for the backward-step test. Bounded by the
+        #: fleet and dropped with the camera.
+        self._newest_capture: dict[str, float] = {}
         self._seen: set[str] = set()
         self._hooked = False
         #: The answer :meth:`_live` gives, recomputed only when the two sets above change, so
@@ -565,6 +575,7 @@ class InstantBarrier:
         with self._cond:
             self._announced.discard(camera_id)
             self._seen.discard(camera_id)
+            self._newest_capture.pop(camera_id, None)
             self._refresh_live()
             live = self._live_set
             woken = False
@@ -613,6 +624,13 @@ class InstantBarrier:
                 self._seen.add(camera_id)
                 self._refresh_live()
 
+            # BEFORE ANY BUCKET, against this camera's OWN newest stamp: a step past the
+            # window matches no open bucket and no resolved span, so it would open an instant
+            # in the past and hold a window for cameras whose clocks did not step.
+            newest = self._newest_capture.get(camera_id)
+            if newest is not None and capture_s < newest - self._window_s:
+                return self._missed(MISSED_BACKWARD, 0)
+
             bucket = self._match(capture_s)
             if bucket is None:
                 late = self._late_instant(capture_s)
@@ -628,6 +646,7 @@ class InstantBarrier:
                 self._seal(bucket, CLOSED_ADVANCED)
                 bucket = self._open(capture_s, now)
 
+            self._newest_capture[camera_id] = max(newest or capture_s, capture_s)
             bucket.reported[camera_id] = capture_s
             bucket.entries.append(InstantEntry(camera_id, payload))
             bucket.first = min(bucket.first, capture_s)

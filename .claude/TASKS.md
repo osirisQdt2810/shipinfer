@@ -2973,7 +2973,7 @@ hook down, for when the operator asked to see something before it is executed.
       (one instant per camera-period of spread) rather than a constant, and the docstring's
       "half a second" is the thing to keep true rather than the 8.
 
-- [ ] MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK · #222 converged the two planes onto the
+- [ ] MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK · (a) DONE 11 Sep, (b) STILL OPEN. #222 converged the two planes onto the
       CAPTURE (wall) stamp, because keying instants on different clocks is two sets of global
       ids for one clip and the sync rule makes that a defect. The risk the old comment argued
       is real and now has nowhere to hide: NTP can step the wall clock, including backwards,
@@ -2988,6 +2988,20 @@ hook down, for when the operator asked to see something before it is executed.
       it through the RPC, so the group shares one process's monotonic clock; (c) accept the
       step and rely on the barrier's `late` counter to make it visible -- which is what today
       does, unlabelled.
+      MEASURED FIRST, as the item asked: this box has NO clock discipline at all -- no chrony,
+      `timedatectl` says `NTP service: inactive` and `System clock synchronized: no`, and the
+      RTC is already ~2 s off system time. So the step cannot be demonstrated here and the
+      choice could not be made from this box's behaviour.
+      (a) IS DONE on both planes: a capture stamp that goes backwards by more than a
+      window, measured against THAT CAMERA's own newest stamp, is refused as `backward` and
+      counted instead of opening an instant in the past that no other camera will ever join.
+      Per camera deliberately: a camera whose clock merely sits behind the group is not a
+      stepped one, and refusing its frames would be a second wrong answer to a fault
+      `silent_cameras` and the `window` reason already report.
+      (b) REMAINS, and it is the fleet's answer rather than a barrier's: the stamp a shard's
+      ingest writes once per frame, carried through the RPC, so a group shares one process's
+      monotonic clock. That belongs with `launch/`'s control plane and needs the proto to carry
+      it; until then (a) makes a step visible on any box rather than silent on all of them.
 
 - [ ] CSRC-MTMC-TWO-GROUPS-PER-SHARD · #222 carried the chain's `group:`/`cameras:` roster onto
       the plan and announces it to the barrier, so the refusal of a SECOND `mtmc` slot no
