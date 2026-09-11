@@ -3645,7 +3645,18 @@ hook down, for when the operator asked to see something before it is executed.
       register's only defence against becoming a suppression list is that each entry is
       somebody's open work.
 
-- [~] **CSRC-GRAPH-HAS-NO-TRACKING · PR 2 of 3 MERGED 10 Sep as #215 (squash `d71af8c`), APPROVE on round 4 after three BLOCKING rounds. PR 3 (`mtmc`) is what remains.** #169 was merged by the operator (`a9867e3`), so
+- [x] **CSRC-GRAPH-HAS-NO-TRACKING · COMPLETE 11 Sep. All six PRs merged: #215 (the `track`
+      stage), #217 (the instant barrier), #219 (the identity map), #220 (the seam and the
+      gate), #221 (the lane unit), #222 (the stage, the plan's node, `global_id`).** The C++
+      plane runs `decode -> detect -> crop -> segment -> embed x2 -> track -> mtmc` end to end
+      and its events carry cross-camera ids. WHAT THE MEASUREMENTS SAID, all on the mandated
+      gstreamer-RTSP route: the chain retires ~260 img/s of TRACKED frames on four A5000s and
+      the rate is FLAT in the worker count (`PIPELINE-WORKERS-NEED-CAMERA-AFFINITY`), and at
+      the gate's production defaults this footage admits NOTHING, so the association runs on
+      an empty instant (`CSRC-MTMC-GATE-OPTIONS`, `BENCH-FOOTAGE-IS-BELOW-THE-MTMC-GATE`).
+      Both are priced, neither is a defect in the port: the gate is the reference's own, and
+      lowering its floor on the same run issues 20 global ids across 52 tracks.
+      ORIGINAL: PR 2 of 3 MERGED 10 Sep as #215 (squash `d71af8c`), APPROVE on round 4 after three BLOCKING rounds. PR 3 (`mtmc`) is what remains.** #169 was merged by the operator (`a9867e3`), so
       PR 2 of 3 is mine to build and needs no stacking.**
       **PR 3 (`mtmc`) SCOPED BY READING THE SUBMODULE, 10 Sep, and it is THREE PRs rather than
       one.** `3rdparty/shipvision/csrc/shipvision/mtmc/frames.h` states the split in its own
@@ -3682,7 +3693,22 @@ hook down, for when the operator asked to see something before it is executed.
           accesses holding the mutex, and a 40-line control program in the same
           `condition_variable::wait_for` shape reproduces them, so they are the toolchain's
           modelling rather than this code.
-        * **3c-iii -- OPEN AS #222 (`feat/the-cpp-graph-associates-instants`, 1 commit, 23
+        * **3c-iii -- MERGED as #222 (11 Sep), APPROVE on round 4 after three BLOCKING
+          rounds, and it closes `MTMC-WINDOW-IS-NOT-CONFIGURABLE`.** Every round found the
+          SAME class of defect one layer further out, which is the lesson worth keeping: a
+          seam that crosses two planes has to be checked at every layer it crosses, not once.
+          Round 1: the two new plan verbs bypassed the file's own typed parsers (`0x10` read
+          as 16 ms on one plane and refused on the other), `_max_instants` hand-rolled an
+          integer parse that took the reader down with a bare `ValueError` on `--5`, and the
+          two planes BUCKETED INSTANTS ON DIFFERENT CLOCKS -- steady here, wall there, so one
+          clip formed two sets of instants. Round 2: the chain's `group:`/`cameras:` roster
+          did not cross either, and the refusal message asserted the chain states no
+          membership when it does; the barrier accreted every camera the shard saw while the
+          other plane waited for the declared four. Round 3: the stage's output reached NO
+          CONSUMER -- `ROW_FIELD_KINDS` had no `MTMC`, `records.cpp` no `Field::GlobalId`, and
+          `RECORD_CONVERTERS` no `global_id` either -- so the run that reported
+          `mtmc_identities 20 52` wrote `global_id: null` on every event.
+          ORIGINAL (3c-iii, as opened as #222 (`feat/the-cpp-graph-associates-instants`, 1 commit, 23
           files), AND IT CLOSES `MTMC-WINDOW-IS-NOT-CONFIGURABLE`:** `MtmcStage` (barrier +
           scatter, keyed by the stage's OUTPUT name), `MtmcStageSpec`/`mtmc_runtime()` with one
           barrier per slot and ONE budget for the process, `sync_window_ms` and `max_instants`
