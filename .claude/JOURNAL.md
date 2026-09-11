@@ -25,6 +25,58 @@ cameras. And the gate sees 0.36 observations per frame while the embedders proce
 per frame: the rows go missing at the track batch, where the only counter is one for frames
 with no ids at all. Both filed with their numbers.
 
+## 2026-09-11 — three of my own claims retracted by measurement, and the target came into reach
+
+**Nine PRs merged (#225-#233) and the day's real output is three retractions.** Each one had
+been written from a real number and a wrong reading, and each was caught by making the next
+measurement rather than by thinking harder:
+
+1. **"The benchmark footage is below the mtmc gate."** #225 made the gate's two thresholds
+   chain-settable, and with them separable the height floor turns out to exclude NOTHING: at
+   `min_hits 1` admitted equals offered exactly, 3 680 of 3 680, at the reference's own 1/9.
+   The first diagnosis had lowered both thresholds in one step. **Two thresholds moved together
+   cannot say which one was binding** -- and the one I named was the one that fitted the story I
+   already had.
+2. **"Identity collapses at saturation because more workers reorder frames."** #230's review
+   refuted it from the table I had just pasted: refusals rise 13x across the arms while admission
+   does not move, and the 24-worker arm is already collapsed. The variable is the input RATE --
+   the queue refuses a quarter of each camera's frames and `min_hits` counts CONSECUTIVE instants.
+3. **"Real mtmc work leaves 15.6% of events incomplete."** `collector_timeouts 0` was printed
+   directly above that claim the whole time. One counter naming WHICH stage never answered said
+   `crop`, for every single one: the run expected `crop` unconditionally and a frame with no
+   detections can never make it runnable. Nothing was lost in any of them.
+
+**And the input was the cause of the whole mtmc story.** Every measurement this project has
+made replayed ten unrelated photographs at N fps, so a per-camera tracker confirmed almost
+nothing -- 0.36 observations per frame reaching the gate against ~9.5 embedded rows.
+`harness/pan.py` pans a 1080p window across one 4K frame; on it the same chain offers 4.42 and
+the gate admits 62% **at the reference's production defaults**, and `run_cpp_bench.sh` now picks
+that fixture from the plan rather than from a flag nobody sets.
+
+**The target.** V167's 3 000 img/s looked 11.5x away this morning on a 260 img/s reading. At the
+design load on footage that can be tracked -- 50 cameras x 20 fps, four A5000s, gstreamer RTSP --
+the chain retires **711.5 tracked img/s** at 15.5 of 48 host cores. Four devices linearly is
+~2 850 on sixteen. What decides it is the HOST: 21 ms of CPU per image is 63 cores at 3 000, and
+the two levers that close that gap are measured -- the blocking-sync default (#214, -39%, still
+the operator's to merge) and the mask fold on the device (#232's kernel is 10 us/crop against
+1.44 ms of host CPU). Identity does not survive that load yet, and saying so is part of the
+answer rather than a footnote.
+
+**V168 arrived mid-session and the loop it asks for was broken at the join:** `profile.sh --cpp`
+launched a binary the build has never produced, and could not start the RTSP servers the mandated
+route needs in the same container. Fixed in #231, with the first profile of the C++ chain beside
+it: the host is the wall, `cudaStreamSynchronize` is 32% of CUDA API time, and device-to-host
+traffic is 81% of memory-op time at the design load against 191 host-to-device copies that are
+engine loads. So the `RAM -> VRAM -> RAM -> VRAM` round trip is gone; what stands where it was is
+every engine output coming home whether a host consumer reads it or not.
+
+**Two review lessons worth keeping.** A class inserted between a decorator and its class steals
+the marker -- `@needs_shipvision` ended up on my new test and left its neighbour bare, which CI
+would have caught and my submodule-bearing host could not. And a diagnostic armed by a routine
+event is a per-frame cost forever: the silent-roster check fired on the first closed window,
+which happens constantly, so it needed a grace period rather than a cleared flag -- and judging
+at the first close also maligned a camera that was merely starting.
+
 ## 2026-09-09 (late night) — four merged, and half an hour when nothing could merge
 
 **#192 landed on round 8, after seven rounds each finding a real `main=DENY → HEAD=ALLOW`
