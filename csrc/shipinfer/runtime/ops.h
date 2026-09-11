@@ -88,4 +88,29 @@ namespace shipinfer {
                                float* dst_device, int dst_h, int dst_w, bool swap_rb,
                                gpuStream_t stream);
 
+    // doc: long what the fold is, why it belongs here, and what it costs on the host today
+    // ONE AREA PER CROP, from a segmentation engine's two outputs, without them leaving the
+    // device. `graph/mask_area.cpp` is the readable twin and stays: it is what the offline tier
+    // and the cross-plane golden check, and a kernel is only trustworthy if a readable
+    // implementation agrees with it.
+    //
+    // WHY IT IS WORTH A KERNEL, profiled 11 Sep on the whole chain: the prototype bank is
+    // `(32, 160, 160)` floats -- 3.1 MB per crop -- and `TrtEngine::execute` copies it to the
+    // host so a loop can reduce it to ONE float. That copy is the bulk of the run's 39.6 GiB of
+    // device-to-host traffic (73.7% of all GPU memory-op time), and the loop costs 1.44 ms of
+    // CPU per crop, which one core sustains 693 of.
+    //
+    // The arithmetic is `mask_area`'s, kept identical on purpose: the strongest candidate row
+    // per crop by score, its `coefficients` mask weights against the prototype planes, a
+    // comparison against the LOGIT of `mask_threshold` (so no sigmoid is computed), and the
+    // count of cells above it scaled by the crop's pixels per cell. A crop whose best row
+    // scores below `score_threshold` is area 0, which is "found nothing" rather than an error.
+    //
+    // One block per crop, `blockDim.x` threads striding the cells, a block reduction at the
+    // end. `areas_device` holds `count` floats.
+    void mask_area_into(const float* rows_device, int candidates, int stride, int prefix,
+                        const float* protos_device, int channels, int cells, int count,
+                        float score_threshold, float mask_threshold, int crop_height,
+                        int crop_width, float* areas_device, gpuStream_t stream);
+
 }  // namespace shipinfer

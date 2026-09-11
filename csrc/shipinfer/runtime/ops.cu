@@ -196,6 +196,51 @@ namespace shipinfer {
         // The BGR crop kernel's geometry, with NV12 sampling at the four taps. Kept beside it
         // rather than templated: the two differ only in how a pixel is fetched, and a reader
         // comparing them line for line is the check that they agree about boxes.
+        // ONE BLOCK PER CROP, threads striding the cells. The per-cell work is a dot product
+        // of `channels` mask coefficients against `channels` prototype planes, which is a
+        // strided read of one float per plane -- the same arithmetic `mask_area.cpp` does on
+        // the host, in the order the host cannot vectorise and a warp does not care about.
+        __global__ void mask_area_kernel(const float* rows, int candidates, int stride,
+                                         int prefix, const float* protos, int channels,
+                                         int cells, float score_threshold, float cut,
+                                         float cell_px, float* areas) {
+            const int crop = static_cast<int>(blockIdx.x);
+            const float* candidate_rows =
+                rows + static_cast<size_t>(crop) * candidates * stride;
+            // The strongest row of this crop: the crop IS one object, so its instance is the
+            // engine's best answer for it rather than the union of everything it saw.
+            int best = 0;
+            for (int c = 1; c < candidates; ++c) {
+                if (candidate_rows[c * stride + 4] > candidate_rows[best * stride + 4])
+                    best = c;
+            }
+            const float* chosen = candidate_rows + static_cast<size_t>(best) * stride;
+            if (chosen[4] < score_threshold) {
+                if (threadIdx.x == 0) areas[crop] = 0.f;  // found nothing: area 0, not an error
+                return;
+            }
+            const float* planes = protos + static_cast<size_t>(crop) * channels * cells;
+            int inside = 0;
+            for (int cell = static_cast<int>(threadIdx.x); cell < cells;
+                 cell += static_cast<int>(blockDim.x)) {
+                float logit = 0.f;
+                for (int m = 0; m < channels; ++m) {
+                    logit += chosen[prefix + m] * planes[static_cast<size_t>(m) * cells + cell];
+                }
+                if (logit >= cut) ++inside;
+            }
+            // A SHARED-MEMORY REDUCTION rather than one atomic per thread: 25 600 cells over
+            // 256 threads is a hundred iterations each, and the atomics would be the kernel.
+            __shared__ int partial[256];
+            partial[threadIdx.x] = inside;
+            __syncthreads();
+            for (unsigned step = blockDim.x / 2; step > 0; step >>= 1) {
+                if (threadIdx.x < step) partial[threadIdx.x] += partial[threadIdx.x + step];
+                __syncthreads();
+            }
+            if (threadIdx.x == 0) areas[crop] = static_cast<float>(partial[0]) * cell_px;
+        }
+
         __global__ void nv12_crop_resize_kernel(const uint8_t* nv12, int src_h, int src_w,
                                                 int stride, size_t uv_offset,
                                                 const float* boxes, int count, float* dst,
@@ -351,6 +396,35 @@ namespace shipinfer {
         nv12_crop_resize_kernel<<<grid, block, 0, stream>>>(nv12_device, src_h, src_w, stride,
                                                             uv_offset, boxes_device, count,
                                                             dst_device, dst_h, dst_w, swap_rb);
+        GPU_CHECK(gpuGetLastError());
+    }
+
+    void mask_area_into(const float* rows_device, int candidates, int stride, int prefix,
+                        const float* protos_device, int channels, int cells, int count,
+                        float score_threshold, float mask_threshold, int crop_height,
+                        int crop_width, float* areas_device, gpuStream_t stream) {
+        if (count <= 0) return;  // no crops is not an error; a frame can segment nothing
+        if (candidates <= 0 || channels <= 0 || cells <= 0 || stride <= prefix) {
+            throw ConfigError(
+                "mask_area_into: candidates, channels and cells must be "
+                "positive and stride must exceed the prefix");
+        }
+        if (!(mask_threshold > 0.f) || !(mask_threshold < 1.f)) {
+            throw ConfigError(
+                "mask_area_into: mask_threshold is a probability in (0, 1), "
+                "so its logit exists; 0 is -inf and 1 divides by zero");
+        }
+        // The LOGIT at which the probability crosses the threshold, so the sigmoid over 25 600
+        // cells per crop is never computed -- the same comparison, one `log`, and the same line
+        // `mask_area.cpp` carries.
+        const float cut = std::log(mask_threshold / (1.f - mask_threshold));
+        const float cell_px = static_cast<float>(crop_height) * static_cast<float>(crop_width) /
+                              static_cast<float>(cells);
+        // 256 THREADS, which the reduction's shared array is sized for. A block per crop, so
+        // the whole batch is one launch.
+        mask_area_kernel<<<static_cast<unsigned>(count), 256, 0, stream>>>(
+            rows_device, candidates, stride, prefix, protos_device, channels, cells,
+            score_threshold, cut, cell_px, areas_device);
         GPU_CHECK(gpuGetLastError());
     }
 
