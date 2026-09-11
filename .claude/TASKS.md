@@ -12,7 +12,7 @@ line names the ledger item that holds the detail, and the exact action.
 | 2 | **DONE 10 Sep — you merged it** (`a9867e3`). The C++ tracking chain is mine again. | `CSRC-GRAPH-HAS-NO-TRACKING`, `V146b` |
 | 3 | **DONE 10 Sep — you merged it** (`b645dbd`). `V124a-PHASE3` is unblocked. | `V124b`, `V124a-PHASE3` |
 | 6 | **Merge #214, or say no** — it flips the blocking-sync knob to ON by default. Opened WITHOUT `automerge` on purpose: a default change moves every future measurement's baseline, so the evidence is mine and the merge is yours. Measured at the design load (host CPU -40%, rows +25%, 3.41x -> 7.17x on the like-for-like ratio) and at a fifth of it (host CPU -44%/-55%, p99 **-72%/-70%**, zero drops). `SHIPINFER_CUDA_BLOCKING_SYNC=0` is the way back. **Round 1 came back BLOCKING (2) and is FIXED at `9a2759a`** -- a default-on knob had turned the A/B's integrity check into a run-aborting guard, and six offline tests reached the real driver through a fixture that fabricates a device count. | `DOES-THE-KNOB-HURT-AT-A-FIFTH-OF-THE-LOAD?`, `WHOSE-LIBCUDART-DOES-THE-PYTHON-FLAG-SET` |
-| 7 | **THE TARGET IS NOT REACHABLE ON THIS CHAIN AND THIS BOX, and the lever is yours to pick.** Measured 11 Sep end to end on the route you mandated (gstreamer RTSP, offline video, `--source nvdec`), 4 GPUs, the full `decode -> ... -> mtmc track` chain: **~260 img/s of TRACKED frames**, flat from 24 workers to 92 — 11.5x short of 3 000. Neither the host (26% of 48 cores) nor the engines (54% of what the instances could use) is the wall. THREE LEVERS, priced: (a) fewer or cheaper models per image — the segmenter alone costs 5.5x for 1.47 invocations because it crops 640x640 per ship; (b) camera affinity or a per-camera sequencer, which is what the 42%-untracked-at-92-workers finding costs us; (c) more devices, and 16 GPUs is ~4x this, still short. I can build any of them; which one is a product decision. | `V167-GSTREAMER-ONLY-3000`, `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` |
+| 7 | **THE TARGET LOOKS REACHABLE ON THE FULL BOX, and the 260 figure was measured on footage that could not be tracked.** Re-measured 11 Sep at the DESIGN LOAD on the route you mandated (gstreamer RTSP from offline video, `--source nvdec`), 4 GPUs, the full `decode -> ... -> mtmc track` chain, on footage a tracker can follow: **711.5 img/s of TRACKED frames** (50 cameras x 20 fps, 954.5 offered, 739.1 accepted, only 3.7% untracked), at 15.5 of 48 host cores. Linearly on 16 GPUs that is ~2 850, i.e. the 3 000 target, and the host budget is what decides it: 21 ms of CPU per image is 63 cores at 3 000, which the blocking-sync default (#214, -39%, YOURS TO MERGE) and the mask fold's kernel (#232, 1.44 ms/crop of host CPU) bring back under 48. WHAT DOES NOT SURVIVE that load is IDENTITY: 0.30% of observations admitted and zero global ids, which is the ordering work, not the throughput. Neither the host (26% of 48 cores) nor the engines (54% of what the instances could use) is the wall. THREE LEVERS, priced: (a) fewer or cheaper models per image — the segmenter alone costs 5.5x for 1.47 invocations because it crops 640x640 per ship; (b) camera affinity or a per-camera sequencer, which is what the 42%-untracked-at-92-workers finding costs us; (c) more devices, and 16 GPUs is ~4x this, still short. I can build any of them; which one is a product decision. | `V167-GSTREAMER-ONLY-3000`, `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` |
 | 4 | **Pull `nvcr.io/nvidia/deepstream` (~6 GB)** onto this box, or say no — the fourth topology's running half needs it; the design half is done. | `T4` |
 | 5 | **shipvision has no LICENSE file at all**, and **where does the NV12 work live?** (the claimed 1021 uncommitted lines are in no checkout I can see). | `SV-LICENSE`, `C9` |
 
@@ -3219,7 +3219,26 @@ hook down, for when the operator asked to see something before it is executed.
       `ship_detector` and `ship_segmenter` only, so on `ship_person_cpu` the two embedders'
       plans are outside the byte-identity guard entirely.
 
-- [!] **V167-GSTREAMER-ONLY-3000 · **OPERATOR: WHICH LEVER?** The chain is measured end to end on the route you mandated and the target is not reachable on four A5000s with this chain -- ~260 img/s of tracked frames against 3 000. Three levers, priced in this item and in `benchmarks/RESULTS.md`: (a) fewer or cheaper models per image, (b) camera affinity or a per-camera sequencer, (c) more devices (16 GPUs is ~4x this, still short). I can build any of them; which one is yours to pick. THE WHOLE CHAIN MEASURED END TO END, 11 Sep, AND THE
+- [!] **V167-GSTREAMER-ONLY-3000 · **OPERATOR: WHICH LEVER?** RE-MEASURED 11 Sep AT THE DESIGN
+      LOAD ON FOOTAGE A TRACKER CAN FOLLOW, and the answer moved: **711.5 tracked img/s on four
+      A5000s**, not ~260. 50 cameras x 20 fps x 40 s, `--source nvdec`, GPUs 0/2/5/6, 92
+      workers, the pan fixture (#228): offered 954.5 img/s, accepted 739.1 (23% refused at the
+      pipeline queue), untracked 3.7%, host 15.5 of 48 cores plus 1.0 for the RTSP servers,
+      frame p50 294 ms / p95 1.12 s. The old 260 was measured at 12 cameras on ten unrelated
+      photographs, where almost nothing tracked at all.
+      SO THE TARGET IS IN REACH ON THE FULL BOX: 711.5 x 4 = ~2 850 on 16 GPUs. What decides it
+      is the HOST budget -- 21 ms of CPU per image is 63 cores at 3 000, and 48 exist. The two
+      levers that close that gap are measured and one is a merge away: the blocking-sync default
+      (#214, -39% host CPU in three regimes, still awaiting the operator) and the mask fold on
+      the device (#232's kernel is 10 us/crop against 1.44 ms of host CPU; the wiring is
+      `ENGINE-COPIES-EVERY-OUTPUT-HOME`).
+      WHAT DOES NOT SURVIVE THAT LOAD IS IDENTITY: 170 of 56 050 observations admitted, zero
+      global ids, because 23% of each camera's frames are refused at the queue and `min_hits`
+      counts CONSECUTIVE instants. That is `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY`'s territory
+      and it is the honest caveat on any "3 000 img/s" claim: frames, yes; identities, not yet.
+      PREVIOUS READING, kept because the numbers in it are real and the conclusion was not: the
+      target is not reachable on four A5000s with this chain -- ~260 img/s of tracked frames
+      against 3 000. Three levers, priced in this item and in `benchmarks/RESULTS.md`: (a) fewer or cheaper models per image, (b) camera affinity or a per-camera sequencer, (c) more devices (16 GPUs is ~4x this, still short). I can build any of them; which one is yours to pick. THE WHOLE CHAIN MEASURED END TO END, 11 Sep, AND THE
       THROUGHPUT NUMBER THIS LEDGER HAS BEEN QUOTING WAS COUNTING FRAMES THE TRACKER
       REFUSED.** `decode -> detect -> crop -> segment -> embed x2 -> track -> mtmc`, over
       gstreamer RTSP from the offline H.264 (`--source nvdec`), 4 GPUs (0/2/5/6), 12 cameras
