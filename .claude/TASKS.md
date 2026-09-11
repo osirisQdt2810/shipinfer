@@ -3026,8 +3026,11 @@ hook down, for when the operator asked to see something before it is executed.
       knows both lists, and a group that never completes is a silent configuration fault today.
       NO LONGER SILENT, 11 Sep (#233): both barriers answer `silent_cameras()` -- announced
       minus seen -- the bench prints `mtmc_cameras_silent <slot> cam-a,cam-b` when the set is
-      non-empty, and the Python element warns once, naming the cameras, the first time an
-      instant closes on its window while one of them has never sent. WHAT IS STILL OPEN is
+      non-empty, and the Python element warns once, naming the cameras, once 100 windows have
+      closed with one of them still never having sent. The grace period is the review's
+      finding: judging at the FIRST close both maligned a camera that was merely starting and
+      left the check running per frame forever on a healthy fleet, because `CLOSED_WINDOW` is
+      routine (`window 265` beside `complete 16` in this PR's own run). WHAT IS STILL OPEN is
       which roster a group waits for, and it is now a stated divergence rather than a guess:
       `MTMC-THE-TWO-PLANES-DISAGREE-ABOUT-THE-ROSTER`.
 

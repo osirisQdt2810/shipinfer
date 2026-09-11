@@ -106,6 +106,12 @@ __all__ = [
 
 _LOG = get_logger("topology.mtmc")
 
+#: Window-closing instants before the roster is judged silent -- a few seconds of a real fleet.
+#: A camera the runner has just announced has not sent its first frame yet, so judging at the
+#: FIRST close maligns one that is merely starting; the fault this names never sends at all. The
+#: check repeats every threshold closes, so a camera that goes silent later is still named.
+_SILENT_AFTER_WINDOW_CLOSES = 100
+
 # -- the element's own vocabulary ---------------------------------------------------------
 #
 # The barrier owns the rest of it: what happened to an *instant* (`complete`, `window`,
@@ -381,9 +387,11 @@ class ShipvisionMtmc(Element):
         #: Latched so the under-sized-group warning is one line per *crossing* rather than
         #: one per camera announcement.
         self._starved_group = False
-        #: Whether any instant has given up on its window. The silent-roster check below waits
-        #: for that, because every declared camera is silent until its first frame arrives.
-        self._closed_on_window = False
+        #: Instants that gave up on their window. The silent-roster check waits for
+        #: `_SILENT_AFTER_WINDOW_CLOSES` of them, because a declared camera is silent until its
+        #: first frame arrives and a check at the first close would malign one that is starting.
+        self._window_closes = 0
+        self._judge_roster_at = _SILENT_AFTER_WINDOW_CLOSES
         #: Latched: one line per open(), not one per instant that times out.
         self._warned_silent = False
         # Resolved once at open, so the per-frame path walks no module dictionaries.
@@ -473,7 +481,8 @@ class ShipvisionMtmc(Element):
         )
         self._reported_cameras = -1
         self._starved_group = False
-        self._closed_on_window = False
+        self._window_closes = 0
+        self._judge_roster_at = _SILENT_AFTER_WINDOW_CLOSES
         self._warned_silent = False
         self._note_cameras()
         if context.workers is None and self._barrier.budget.permits:
@@ -636,8 +645,8 @@ class ShipvisionMtmc(Element):
         """
         # PER FRAME, and not from `_note_cameras`: cameras announce before the first frame on
         # a static fleet, so a check that only ran on an announcement would never fire for the
-        # deployment that has this fault. Two bool reads in the common case -- the set
-        # difference happens at most once per `open`.
+        # deployment that has this fault. Two bool reads in the common case; the barrier is
+        # asked at most once per window-closing instant, which `_note_silent_roster` explains.
         self._note_silent_roster()
         tracks = item.meta.get("tracks")
         if tracks is None:
@@ -799,18 +808,25 @@ class ShipvisionMtmc(Element):
         """
         self._metrics.instant(reason)
         if reason == CLOSED_WINDOW:
-            self._closed_on_window = True
+            self._window_closes += 1
 
     def _note_silent_roster(self) -> None:
         """Say it once when the group waited out a window for a camera that has never sent.
 
-        Waits for a window to have closed, because every declared camera is silent until its
-        first frame: a line at `open()` would fire on every healthy run. Measured on the C++
-        plane 11 Sep -- a chain declaring `cam-01 … cam-04` against a fleet of `cam00 … cam11`
-        closed not ONE instant complete in six runs, and nothing said why.
+        Waits for `_SILENT_AFTER_WINDOW_CLOSES` windows to have closed, because a declared
+        camera is silent until its first frame: judging sooner would malign one that is merely
+        starting. Measured on the C++ plane 11 Sep -- a chain declaring `cam-01 … cam-04`
+        against a fleet of `cam00 … cam11` closed not ONE instant complete in six runs.
         """
-        if self._warned_silent or not self._closed_on_window or self._barrier is None:
+        if self._warned_silent or self._barrier is None:
             return
+        # TWO INTEGER COMPARES when there is nothing to report. `CLOSED_WINDOW` is routine on a
+        # healthy fleet -- `window 265` beside `complete 16` in the run that found this -- so a
+        # trigger armed until a camera WAS silent took the barrier's central lock and built
+        # three collections on every frame, forever, in the deployment with nothing wrong.
+        if self._window_closes < self._judge_roster_at:
+            return
+        self._judge_roster_at = self._window_closes + _SILENT_AFTER_WINDOW_CLOSES
         silent = sorted(self._barrier.silent_cameras)
         if not silent:
             return
