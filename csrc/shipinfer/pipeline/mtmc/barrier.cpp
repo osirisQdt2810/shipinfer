@@ -77,15 +77,17 @@ namespace shipinfer::mtmc {
                                    Clock clock, OnEvent on_event)
         : window_s_(options.sync_window_s),
           workers_(options.workers),
-          max_instants_(options.max_instants),
+          configured_max_instants_(options.max_instants),
+          max_instants_(options.max_instants.value_or(kDefaultMaxInstants)),
           budget_(budget ? std::move(budget)
                          : std::make_shared<WaiterBudget>(std::max(0, options.workers - 1))),
           clock_(clock ? std::move(clock) : Clock(steady_seconds)),
           on_event_(std::move(on_event)),
           // Four windows of history, floored at eight: long enough that a frame arriving a
           // few instants late is called LATE rather than opening a new instant, short enough
-          // that the map is not a leak.
-          recent_limit_(static_cast<size_t>(std::max(8, options.max_instants * 4))) {
+          // that the map is not a leak. It follows the bound, so it grows with the fleet too
+          // -- `refresh_live` recomputes both together.
+          recent_limit_(static_cast<size_t>(std::max(8, max_instants_ * 4))) {
         if (!(window_s_ > 0.0)) {
             throw ConfigError("sync_window_s must be positive, got " +
                               std::to_string(window_s_) +
@@ -94,7 +96,7 @@ namespace shipinfer::mtmc {
         }
         if (max_instants_ < 1) {
             throw ConfigError("max_instants must be at least 1, got " +
-                              std::to_string(max_instants_) +
+                              std::to_string(*configured_max_instants_) +
                               "; zero open instants means every frame evicts itself");
         }
     }
@@ -138,6 +140,17 @@ namespace shipinfer::mtmc {
 
     void InstantBarrier::refresh_live() {
         live_ = hooked_ ? announced_ : seen_;
+        // THE BOUND FOLLOWS THE FLEET unless the chain named one: every camera keeps one
+        // instant open and seals more as it advances, so a bound below the fleet's size
+        // evicts buckets the group is still filling rather than a clock that is wrong.
+        if (configured_max_instants_) return;
+        max_instants_ = std::max<int>(kDefaultMaxInstants, static_cast<int>(live_.size()));
+        recent_limit_ = static_cast<size_t>(std::max(8, max_instants_ * 4));
+    }
+
+    int InstantBarrier::max_instants() const {
+        std::lock_guard<std::mutex> guard(lock_);
+        return max_instants_;
     }
 
     void InstantBarrier::camera_added(const std::string& camera_id) {

@@ -38,6 +38,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -111,9 +112,18 @@ namespace shipinfer::mtmc {
     //: be at least the group's arrival spread, and 60 ms is a comfortable margin over the
     //: ~1 ms genlock skew of a wired group. `topology/barrier.py`'s own default.
     inline constexpr double kDefaultSyncWindowMs = 60.0;
-    //: How many instants may be open before the oldest is evicted. Eight is half a second at
-    //: the default window: enough to absorb a camera a few frames behind, far too few to hide
-    //: a clock that is minutes out.
+    // doc: long why the bound is a floor and the fleet is the number, with the measurement
+    //: The FLOOR on how many instants may be open before the oldest is evicted. Eight is half
+    //: a second at the default window: enough to absorb a camera a few frames behind, far too
+    //: few to hide a clock that is minutes out -- and, on its own, far too few for a fleet.
+    //: Every camera holds an instant of its own open -- the one its last frame landed in --
+    //: plus whatever it has SEALED by moving on and the window has not yet retired. So the
+    //: number legitimately open scales with the FLEET, and a bound below that evicts buckets
+    //: the group is still filling rather than the stale clock eviction exists for. Hence the
+    //: floor and the live set, unless the chain names a number. MEASURED 11 Sep at the design
+    //: load (50 cameras x 20 fps, `benchmarks/RESULTS.md`): at 8 the run evicted 20-28% of its
+    //: instants and admitted 97-545 observations; from 16 up it evicts NOTHING and admits
+    //: ~2 200. The live set is 50 there, which is three times the knee.
     inline constexpr int kDefaultMaxInstants = 8;
 
     // One camera's contribution to an instant: who, and whatever the caller put in.
@@ -201,7 +211,11 @@ namespace shipinfer::mtmc {
         //: The runner's worker count. The budget gets `workers - 1` permits, so a
         //: single-worker runner never waits.
         int workers = 1;
-        int max_instants = kDefaultMaxInstants;
+        //: UNSET follows the fleet: `max(kDefaultMaxInstants, live cameras)`, recomputed as
+        //: cameras arrive. A number here is EXACT and overrides that, both ways -- which is
+        //: what makes eviction testable at all, and what lets an operator who has measured
+        //: their own spread say so.
+        std::optional<int> max_instants;
     };
 
     class InstantBarrier {
@@ -223,6 +237,8 @@ namespace shipinfer::mtmc {
         int waiters() const;
         std::set<std::string> live() const;
         size_t open_instants() const;
+        //: The bound in force now -- the chain's number, or the live set against the floor.
+        int max_instants() const;
         std::map<std::string, uint64_t> instant_stats() const;
         std::map<std::string, uint64_t> frame_stats() const;
 
@@ -300,6 +316,8 @@ namespace shipinfer::mtmc {
 
         double window_s_;
         int workers_;
+        //: The chain's, if it named one. Empty means `refresh_live` owns `max_instants_`.
+        std::optional<int> configured_max_instants_;
         int max_instants_;
         std::shared_ptr<WaiterBudget> budget_;
         Clock clock_;

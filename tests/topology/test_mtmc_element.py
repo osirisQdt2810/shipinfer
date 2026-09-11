@@ -46,7 +46,7 @@ from shipinfer.launch.control import CameraSpec
 from shipinfer.runners.inprocess import InprocessRunner
 from shipinfer.topology import ChainSpec, Topology
 from shipinfer.topology import bridge as bridge_module
-from shipinfer.topology.barrier import WaiterBudget
+from shipinfer.topology.barrier import DEFAULT_MAX_INSTANTS, WaiterBudget
 from shipinfer.topology.base import (
     CameraGroup,
     ChainItem,
@@ -832,6 +832,32 @@ class TestTwoMtmcSlotsCannotParkEveryWorkerBetweenThem:
 
 
 @needs_shipvision
+class TestTheInstantBoundReachesTheBarrier:
+    def test_an_unnamed_bound_follows_the_group(self) -> None:
+        """The element must pass the absence through rather than resolve it to the floor: the
+        bound is the barrier's to derive, and a chain that says nothing about `max_instants`
+        on a fifty-camera group is the deployment's own configuration."""
+        element = opened()
+        try:
+            assert element.barrier.max_instants == DEFAULT_MAX_INSTANTS
+            for index in range(20):
+                element.camera_added(f"cam-{index}")
+
+            assert element.barrier.max_instants == 20
+        finally:
+            element.close()
+
+    def test_a_named_bound_reaches_the_barrier_unchanged(self) -> None:
+        element = opened({"max_instants": 3})
+        try:
+            for index in range(20):
+                element.camera_added(f"cam-{index}")
+
+            assert element.barrier.max_instants == 3
+        finally:
+            element.close()
+
+
 class TestTheCameraLifecycle:
     def test_an_added_camera_is_waited_for(self, element) -> None:
         element.camera_added("cam-a")

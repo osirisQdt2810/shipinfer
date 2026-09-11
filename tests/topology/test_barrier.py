@@ -44,6 +44,7 @@ from shipinfer.topology.barrier import (
     CLOSED_ADVANCED,
     CLOSED_COMPLETE,
     CLOSED_WINDOW,
+    DEFAULT_MAX_INSTANTS,
     DEFAULT_SYNC_WINDOW_MS,
     DROPPED_EVICTED,
     DROPPED_EXPIRED,
@@ -462,6 +463,42 @@ class TestTheBucketsAreBounded:
 
         assert held.open_instants == 3
         assert held.instant_stats()[DROPPED_EVICTED] == 3
+
+    def test_an_unnamed_bound_follows_the_fleet(self) -> None:
+        """The default path, and the one a deployment takes: eviction is for a stale clock,
+        and a constant below the fleet's size spends it on buckets the group is still
+        filling. Measured at the design load on the C++ twin — `benchmarks/RESULTS.md`."""
+        held = barrier(workers=1)
+
+        assert held.max_instants == DEFAULT_MAX_INSTANTS
+        for index in range(20):
+            held.camera_added(f"cam-{index}")
+
+        assert held.max_instants == 20
+        held.drop_camera("cam-19")
+        assert held.max_instants == 19
+
+    def test_a_fleet_larger_than_the_floor_evicts_nothing_it_is_still_filling(self) -> None:
+        held = barrier(workers=1)
+        held.camera_added("cam-absent")
+        for index in range(12):
+            held.camera_added(f"cam-{index}")
+        for index in range(12):
+            # A capture of its own, so no two cameras share an instant and none completes.
+            held.submit(f"cam-{index}", float(index) * WIDE_S, "p", associate=flat)
+
+        assert held.open_instants == 12
+        assert DROPPED_EVICTED not in held.instant_stats()
+
+    @pytest.mark.parametrize("named", [3, 64])
+    def test_a_bound_the_chain_names_is_exact(self, named: int) -> None:
+        """Both directions. A floor that silently raised an operator's number would make
+        eviction untestable — including for the sweep that chose the default."""
+        held = barrier(workers=1, max_instants=named)
+        for index in range(12):
+            held.camera_added(f"cam-{index}")
+
+        assert held.max_instants == named
 
     def test_eviction_takes_the_instant_that_has_been_open_longest(self) -> None:
         """By open order, which is deadline order — every deadline is one window after its

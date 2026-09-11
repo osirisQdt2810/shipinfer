@@ -156,9 +156,10 @@ BACKWARD_REFUSALS_BEFORE_ADOPTING = 1
 #: instant just closed. Measured, one 15 fps camera among eight at 20 fps: 80% coverage. A
 #: group is one frame rate.
 DEFAULT_SYNC_WINDOW_MS = 60.0
-#: How many instants may be open at once before the oldest is evicted. Eight is half a second
-#: at the default window: enough to absorb one camera running a few frames behind, far too
-#: few to hide a clock that is minutes out.
+#: The **floor** on how many instants may be open before the oldest is evicted; an unset
+#: ``max_instants`` follows the fleet — ``max(DEFAULT_MAX_INSTANTS, live cameras)``. Every
+#: camera holds one instant open and seals more as it advances, so a constant below the
+#: fleet's size evicts buckets the group is still filling. Measured: `benchmarks/RESULTS.md`.
 DEFAULT_MAX_INSTANTS = 8
 
 
@@ -365,7 +366,11 @@ class InstantBarrier:
             thread there is on a single-worker runner.
         budget: the process-wide waiter budget. **A supplied budget wins over** ``workers``,
             which is only ever a way to size the private one.
-        max_instants: how many buckets may be open before the oldest is evicted.
+        max_instants: how many buckets may be open before the oldest is evicted. ``None``
+            follows the fleet — :data:`DEFAULT_MAX_INSTANTS` or the live set, whichever is
+            larger, recomputed as cameras arrive. A number is exact in both directions, which
+            is what keeps eviction testable and lets an operator who measured their own
+            arrival spread say so.
         on_event: called once per *instant-level* event, under the lock, so it must be a counter
             increment and nothing else. Frame-level outcomes are not reported here — one closed
             instant resolves many frames, so counting instants per frame reports the wrong
@@ -390,6 +395,7 @@ class InstantBarrier:
         "_hooked",
         "_instant_counts",
         "_live_set",
+        "_configured_max_instants",
         "_max_instants",
         "_newest_capture",
         "_next_instant",
@@ -408,7 +414,7 @@ class InstantBarrier:
         sync_window_s: float,
         workers: int | None,
         budget: WaiterBudget | None = None,
-        max_instants: int = DEFAULT_MAX_INSTANTS,
+        max_instants: int | None = None,
         on_event: Callable[[str], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -417,7 +423,7 @@ class InstantBarrier:
                 f"sync_window_s must be positive, got {sync_window_s}; a zero window makes "
                 f"every frame its own instant and cross-camera association a no-op"
             )
-        if max_instants < 1:
+        if max_instants is not None and max_instants < 1:
             raise ConfigurationError(f"max_instants must be at least 1, got {max_instants}")
         if workers is not None and workers < 1:
             raise ConfigurationError(
@@ -431,7 +437,12 @@ class InstantBarrier:
         # spelling them differently would be a second code path.
         self._workers = 1 if workers is None else int(workers)
         self._budget = WaiterBudget(self._workers - 1) if budget is None else budget
-        self._max_instants = int(max_instants)
+        self._configured_max_instants = None if max_instants is None else int(max_instants)
+        self._max_instants = (
+            DEFAULT_MAX_INSTANTS
+            if self._configured_max_instants is None
+            else self._configured_max_instants
+        )
         self._on_event = on_event
         self._clock = clock
         self._cond = threading.Condition(threading.Lock())
@@ -496,6 +507,12 @@ class InstantBarrier:
         """
         with self._cond:
             return self._live_set
+
+    @property
+    def max_instants(self) -> int:
+        """The bound in force now — the chain's number, or the live set against the floor."""
+        with self._cond:
+            return self._max_instants
 
     @property
     def silent_cameras(self) -> frozenset[str]:
@@ -745,8 +762,17 @@ class InstantBarrier:
     # -- internals (lock held) ---------------------------------------------------------
 
     def _refresh_live(self) -> None:
-        """Recompute the cached live set. Called only when one of the two sets changed."""
+        """Recompute the cached live set, and the bound that follows it.
+
+        The bound is the fleet's unless the chain named one: eviction is for a stale clock,
+        and a constant below the fleet's size spends it on buckets the group is still filling
+        (:data:`DEFAULT_MAX_INSTANTS`).
+        """
         self._live_set = frozenset(self._announced if self._hooked else self._seen)
+        if self._configured_max_instants is not None:
+            return
+        self._max_instants = max(DEFAULT_MAX_INSTANTS, len(self._live_set))
+        self._recent_limit = max(8, self._max_instants * 4)
 
     def _match(self, capture_s: float) -> _Bucket | None:
         """The open instant this capture belongs to: the newest whose span it stays inside.

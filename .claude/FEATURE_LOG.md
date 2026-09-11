@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-11 — the instant bound follows the fleet, not a four-camera group's number
+
+`max_instants` defaulted to 8 on both planes and the design load associated nothing: at 50
+cameras the barrier evicted 20-28% of every instant it opened, admitted 97-545 observations and
+resolved ZERO global ids. Swept at that load with one plan line changing, the knee is 16 and
+nothing above it buys anything -- 16/32/64/128 evict exactly nothing and admit 527-2 258. Every
+camera holds one instant open and seals more as it advances, so the number legitimately open
+scales with the fleet, and a constant below it spends eviction on buckets the group is still
+filling. Unset, the bound is now `max(8, live cameras)`, recomputed in `refresh_live` as
+cameras arrive; a named number stays exact in both directions, which keeps eviction testable.
+`mtmc_max_instants` joins the bench counters. NOT a throughput knob: three runs an arm say the
+~10% gap in frames accepted is variance, where the first pair alone read as +18%.
+
+---
+
 ## 2026-09-11 — a chain that tracks gets footage it can track, without being told
 
 `run_cpp_bench.sh` reads the plan it has just written: a `track` or `mtmc` node and no
