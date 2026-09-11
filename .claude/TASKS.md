@@ -2719,7 +2719,7 @@ hook down, for when the operator asked to see something before it is executed.
       which is what stops the port drifting the first time either side is edited. A verified
       port whose verification is not in the tree is a verified port for exactly one afternoon.
 
-- [~] MTMC-WINDOW-IS-NOT-CONFIGURABLE · **OPEN AS PART OF #222**: `sync_window_ms` and
+- [x] MTMC-WINDOW-IS-NOT-CONFIGURABLE · **MERGED WITH #222 (11 Sep)**: `sync_window_ms` and
       `max_instants` are on the `mtmc` node on both planes now, refused rather than clamped
       when zero or non-finite, and the golden plan carries `sync_window_ms 60.0`. MEASURED with
       it: 200 ms instead of 60 moves the barrier's closes from `window` to `advanced` (15 vs
