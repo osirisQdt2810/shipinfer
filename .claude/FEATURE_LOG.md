@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-10 — the cross-camera seam, and the gate in front of it
+
+`ClusterTracker` (`pipeline/mtmc/cluster.{h,cpp}`) is the shape `tracking/associator.h` is, for
+the same two build lines: a header reaching `3rdparty/shipvision` drags that lane into every
+includer, and `--offline` refuses a closure touching `core/platform.h`. ITS INPUT IS A WHOLE
+INSTANT: `shipvision.mtmc` refuses less, because one camera at a time turns cross-camera
+association into within-camera deduplication. `create_cluster_tracker` caches per (impl, slot)
+-- a second instance for one slot would issue a contradictory set of ids -- and a lane-less
+build blames the LANE, not a correct name. `ObservationGate` decides which tracks enter the
+(n, n) matrix: HEIGHT FIRST, then age over qualifying frames only, and its hit map is REPLACED
+rather than pruned, so "consecutive" means consecutive. Both orders are what a port gets wrong
+silently: unit checks and a reference golden pin each, and swapping either fails both.
+
+---
+
 ## 2026-09-10 — cross-camera global ids on the C++ plane, held to the reference
 
 `GlobalIdAssigner` (`pipeline/mtmc/identity.{h,cpp}`), the twin of
@@ -12,7 +27,7 @@ edits, typo fixes and pure docs.
 on it: an identity map keyed on (camera, track) "is Python's to own -- it is the stateful half"
 (`mtmc/frames.h`). The library ships the stateless (n, n) passes; turning a cluster label into
 an id that persists is the caller's, so a C++ `mtmc` stage cannot exist without it. Lane-free
-and CUDA-free, so it compiles offline and its goldens run on a plain runner. Two gates: 46
+and CUDA-free, so it compiles offline and its goldens run on a plain runner. Two gates: 48
 checks on its own invariant and a parity binary against the reference's answers. THE TIE-BREAK
 HAD NO DISCRIMINATING SCENARIO -- largest-cluster-first, ties by first appearance, and a
 `stable_sort` -> `sort` mutation passed everything because libstdc++'s sort is incidentally

@@ -31,6 +31,9 @@ for entry in (str(ROOT), str(ROOT / "src")):
 from benchmarks.parity.drive_events import GOLDEN as EVENT_GOLDEN  # noqa: E402
 from benchmarks.parity.drive_events import load as load_event  # noqa: E402
 from benchmarks.parity.drive_events import render as render_event  # noqa: E402
+from benchmarks.parity.drive_gate import GOLDEN as GATE_GOLDEN  # noqa: E402
+from benchmarks.parity.drive_gate import load as load_gate  # noqa: E402
+from benchmarks.parity.drive_gate import render_gate  # noqa: E402
 from benchmarks.parity.drive_identity import GOLDEN as IDENTITY_GOLDEN  # noqa: E402
 from benchmarks.parity.drive_identity import load as load_identity  # noqa: E402
 from benchmarks.parity.drive_identity import render_identity  # noqa: E402
@@ -58,9 +61,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scenario", required=True, help="a name under scenarios/, or a path")
     parser.add_argument(
         "--kind",
-        choices=("ingest", "queue", "event", "plan", "record", "mask", "identity"),
+        choices=("ingest", "queue", "event", "plan", "record", "mask", "identity", "gate"),
         default="ingest",
-        help="which seam: the camera actors, the request queue (scenarios/queues/), one\n        perception event (scenarios/events/), a resolved chain (scenarios/plans/), or\n        one frame's stage outputs through the production record builder\n        (scenarios/records/), or a segmentation engine's two outputs through the mask\n        fold (scenarios/masks/), or the cross-camera identity map the reference answers a\n        scenario with (scenarios/identity/)",
+        help="which seam: the camera actors, the request queue (scenarios/queues/), one\n        perception event (scenarios/events/), a resolved chain (scenarios/plans/), or\n        one frame's stage outputs through the production record builder\n        (scenarios/records/), or a segmentation engine's two outputs through the mask\n        fold (scenarios/masks/), or the cross-camera identity map the reference answers a\n        scenario with (scenarios/identity/), or which observations the gate admits\n        (scenarios/gate/)",
     )
     parser.add_argument("--out", type=Path, help="write the trace here instead of stdout")
     parser.add_argument(
@@ -71,6 +74,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--force", action="store_true", help="overwrite an existing golden")
     args = parser.parse_args(argv)
+
+    if args.kind == "gate":
+        # Which observations qualify, instant by instant. Same shape as `identity`.
+        text = render_gate(load_gate(args.scenario))
+        name = Path(args.scenario).stem
+        return _emit(text, GATE_GOLDEN / f"{name}.txt", args, tally=_lines(text, "line"))
 
     if args.kind == "identity":
         # Scenarios in, the reference's ids out. Like `plan`: no trace and nothing to sample,
