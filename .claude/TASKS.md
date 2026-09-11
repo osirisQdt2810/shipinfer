@@ -2792,6 +2792,30 @@ hook down, for when the operator asked to see something before it is executed.
       takes the noun and the lane -- is cheaper than a third copy, and until then the two can
       drift independently, which is the real cost. Whoever adds the third writes the template.
 
+- [!] API-WEDGED-REPORT-FLAKE-IS-NOT-A-TIMEOUT · `tests/api/test_streams.py::
+      TestNothingBlockingRunsOnTheEventLoop::test_a_wedged_report_is_a_504_and_the_next_request_still_answers`
+      fails on CI's **py3.10** leg and passes locally on the same interpreter (3.10.12), three
+      for three in isolation and in the full suite. It has now failed three times on #222 and
+      blocked an APPROVED diff twice.
+      WHAT I GOT WRONG: #223 widened the RENDEZVOUS wait (`entered.wait(5.0)` -> 30 s) on the
+      reasoning that a thread start was being starved by the parallel C++ jobs. It failed again
+      at 30 s, so that was not the cause and the fix bought nothing -- I am recording that rather
+      than leaving the PR body's claim standing.
+      WHAT IS RULED OUT: no exception reaches the posting thread (CI shows no captured stderr and
+      no traceback, only the timed-out wait); the handler's own deadline is not it either --
+      `anyio.fail_after` cannot interrupt the wedged `health()`, which runs in a worker thread,
+      and a local probe at `_ADD_TIMEOUT_S = 0.001` still passes; and it is not order-dependence,
+      since the full local suite passes.
+      WHAT IS LEFT, and it needs a decision: the test drives one starlette `TestClient` from TWO
+      threads (the POST from a worker, the GET from the main thread), which starlette does not
+      document as safe. Either that is the bug in the test -- and the property it measures
+      ("nothing blocking runs on the event loop") wants a different shape, e.g. two clients over
+      one app, or an async test driving both requests as tasks -- or it is a real defect in the
+      portal's dispatch under load, which would matter in production. THE QUESTION FOR YOU: this
+      is an API-suite investigation with no bearing on the mtmc chain or the target, so I am
+      parking it rather than spending an afternoon on it while #222 waits. Say if you want it
+      chased now; otherwise the next person to touch `api/streams.py` owns it.
+
 - [ ] MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK · #222 converged the two planes onto the
       CAPTURE (wall) stamp, because keying instants on different clocks is two sets of global
       ids for one clip and the sync rule makes that a defect. The risk the old comment argued
