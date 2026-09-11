@@ -84,14 +84,36 @@ def test_a_plan_with_a_tracker_and_nothing_else_gets_the_pan(tmp_path: Path) -> 
     assert selects_the_pan(plan)
 
 
-def test_an_explicit_fixture_always_wins() -> None:
+@pytest.mark.parametrize(
+    "variable",
+    [
+        # The RTSP arm's, and the replay arm's. BOTH, because neither arm reads the other's
+        # name: an operator who set the replay one and got the pan anyway would have no escape
+        # hatch that works on the source they are running.
+        "SHIPINFER_RTSP_PERSON_DATA",
+        "SHIPINFER_RTSP_SHIP_DATA",
+        "SHIPINFER_BENCH_PERSON_FRAMES",
+        "SHIPINFER_BENCH_SHIP_FRAMES",
+    ],
+)
+def test_an_explicit_fixture_always_wins(variable: str) -> None:
     """An operator who names the data gets it, tracking chain or not — the measurement that
     compares the two fixtures on one chain is only possible that way."""
     text = RUNNER.read_text(encoding="utf-8")
     guard = text[text.index("grep -qE") : text.index("export SHIPINFER_RTSP_PERSON_DATA")]
 
-    assert '[ -z "${SHIPINFER_RTSP_PERSON_DATA:-}" ]' in guard
-    assert '[ -z "${SHIPINFER_RTSP_SHIP_DATA:-}" ]' in guard
+    assert f'[ -z "${{{variable}:-}}" ]' in guard
+
+
+def test_a_half_written_fixture_is_never_served() -> None:
+    """ "Is the directory non-empty" cannot tell a finished fixture from an interrupted one, and
+    `rtsp_serve.py` then caches the short encode by directory name with no content check — so it
+    would outlive even a manual `rm -rf` of the frames."""
+    text = RUNNER.read_text(encoding="utf-8")
+    block = text[text.index("for pair in") : text.index("export SHIPINFER_RTSP_PERSON_DATA")]
+
+    assert '--out "$out.partial"' in block, "the generator writes under the served name"
+    assert 'mv "$out.partial" "$out"' in block, "nothing moves the finished fixture into place"
 
 
 def test_the_generator_is_only_run_when_the_directory_is_empty() -> None:

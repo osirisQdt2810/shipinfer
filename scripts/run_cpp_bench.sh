@@ -97,22 +97,35 @@ fi
 #
 # So the fixture follows the CHAIN rather than a flag nobody sets: a plan with a `track` or
 # `mtmc` node gets the pan, everything else keeps the photographs, and an explicit
-# `SHIPINFER_RTSP_*_DATA` always wins. The detection-only numbers on `benchmarks/RESULTS.md`
+# any explicit data -- `SHIPINFER_RTSP_*_DATA` for the RTSP arm, `SHIPINFER_BENCH_*_FRAMES` for
+# the replay one -- always wins. Both, because the replay arm never reads the RTSP names: an
+# operator who set the replay one and got the pan would have no escape hatch that works.
+# The detection-only numbers on `benchmarks/RESULTS.md`
 # stay comparable with their own history, and a chain whose point is identity stops being
 # measured on input that cannot have any.
 PERSON_FRAMES="${SHIPINFER_BENCH_PERSON_FRAMES:-/work/benchmarks/baseline/data/person_2K}"
 SHIP_FRAMES="${SHIPINFER_BENCH_SHIP_FRAMES:-/work/benchmarks/baseline/data/ship_2K}"
 if grep -qE "^node [a-z_0-9]+ (track|mtmc) " "$PLAN" &&
-   [ -z "${SHIPINFER_RTSP_PERSON_DATA:-}" ] && [ -z "${SHIPINFER_RTSP_SHIP_DATA:-}" ]; then
+   [ -z "${SHIPINFER_RTSP_PERSON_DATA:-}" ] && [ -z "${SHIPINFER_RTSP_SHIP_DATA:-}" ] &&
+   [ -z "${SHIPINFER_BENCH_PERSON_FRAMES:-}" ] && [ -z "${SHIPINFER_BENCH_SHIP_FRAMES:-}" ]; then
   for pair in "person:person_4K" "ship:ship_4K"; do
     name="${pair%%:*}"
     src="$REPO/benchmarks/baseline/data/${pair##*:}"
     out="$REPO/.artifacts/pan/$name"
     # GENERATED ONCE and reused: `pan_frames` refuses a non-empty directory rather than mixing
     # two laps, so the guard is "is it there" and not "--force".
+    #
+    # INTO `.partial` AND THEN MOVED, because "is it there" cannot tell a finished fixture from
+    # an interrupted one: a Ctrl-C or a full disk partway through 400 frames would leave a short
+    # lap that every later run skips over and serves -- and `rtsp_serve.py` caches the encoded
+    # `.h264` by directory name with no content check, so the short encode would outlive even a
+    # manual `rm -rf` of the frames. A half-written fixture is never visible under the served
+    # name this way.
     if [ -z "$(ls -A "$out" 2>/dev/null)" ]; then
       echo "pan fixture: generating $out from $(basename "$src")" >&2
-      python "$REPO/scripts/make_pan_fixture.py" --src "$src" --out "$out" --frames 400
+      rm -rf "$out.partial"
+      python "$REPO/scripts/make_pan_fixture.py" --src "$src" --out "$out.partial" --frames 400
+      mv "$out.partial" "$out"
     fi
   done
   export SHIPINFER_RTSP_PERSON_DATA=/work/.artifacts/pan/person

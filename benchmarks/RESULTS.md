@@ -301,17 +301,40 @@ placement and the waiter budget has to cover it.
 |---|---|---|---|---|---|---|
 | 954.5 img/s | 739.1 img/s | 23% | 3.7% | **711.5** | 15.5 of 48 (+1.0 for the RTSP servers) | 294 ms / 1.12 s |
 
-**711.5 tracked img/s on four A5000s**, which is 2.7× the ~260 this page reported before the
-fixture could be tracked at all — and the difference is the fixture, not the code. The fleet
-delivered 95% of the 1 000 img/s it was asked for; a quarter of that is refused at the pipeline
-queue, evenly, and what gets through is tracked.
+**711.5 tracked img/s on four A5000s**, and TWO things moved between that and the ~260 this
+page used to report, so the page separates them rather than crediting one:
+
+| same four GPUs, same 92 workers | fixture | load | tracked img/s |
+|---|---|---|---|
+| the flat-rate table above | slideshow | 12 × 200 fps | 257.3 |
+| the saturation table below | **pan** | 12 × 200 fps | 544.4 |
+| this row | **pan** | **50 × 20 fps** | **711.5** |
+
+**The fixture is worth 2.1×** (257.3 → 544.4, footage the only variable) and the remaining 1.3×
+is the load SHAPE: at 200 fps per camera the tracker still refuses 37.3% of frames on the same
+pan fixture, which is the reordering ceiling below rather than anything about the footage. The
+fleet delivered 95% of the 1 000 img/s it was asked for; a quarter of that is refused at the
+pipeline queue, evenly, and what gets through is tracked.
+
+The run's own counters, so the row is evidence rather than a summary of it:
+
+```
+frames_read 38182   frames_accepted 29565   queue_rejected 8645
+track_frames_untracked track 1105
+events_complete 29565   events_incomplete 0
+mtmc_observations mtmc offered 56050   admitted 170
+mtmc_identities mtmc 0 0
+frame_us_p50 294454   frame_us_p95 1118620
+```
 
 **What decides the 3 000 target is the host, not the devices.** 15.5 cores for 739 img/s is
 21 ms of CPU per image: 63 cores at 3 000, and this box has 48. Two measured levers bring that
 under the line — the blocking-sync default (−39% host CPU, #214) and the mask fold on the device
 (1.44 ms of CPU per crop today, 10 µs as a kernel) — and four devices at this rate extrapolate to
-~2 850 on sixteen. So the figure to quote is **711.5 tracked img/s per four A5000s**, with the
-host budget as the thing that has to be fixed for the full box to reach the target.
+~2 850 on sixteen. So the figure to quote **at the design rate** is **711.5 tracked img/s per
+four A5000s**, with the host budget as the thing that has to be fixed for the full box to reach
+the target — and it is not the same number as the saturation ceiling below, which is what this
+chain does when it is pushed to ten times that rate.
 
 **Identity does not survive this load, and that is a separate ceiling.** 170 of 56 050
 observations admitted, zero global ids: a quarter of each camera's frames are refused at the
@@ -340,8 +363,10 @@ frames. Read the column as "frames with no detections", or re-run the three arms
 **The tracked rate is a ceiling and the workers do not move it.** Retired frames scale (399.7 →
 867.9) while the **tracked** rate saturates at ~550: 48 workers to 92 buys 209 more retired
 img/s and *no* more frames carrying ids, while the tracker's refusals rise 2.8% → 16.2% → 37.3%.
-So the honest figure for this chain on four A5000s is **~550 tracked img/s**, and the devices are
-not what stops it.
+So the honest figure for this chain on four A5000s **at ten times the design rate** is **~550
+tracked img/s**, and the devices are not what stops it. At the design rate itself it is 711.5
+(the section above): two loads, two numbers, and neither is "the box's figure" without its load
+beside it.
 
 **Identity collapses here, and the worker count is NOT why.** 0.17 / 0.34 / 0.38% of observations
 admitted, against **57.6%** at the design rate on the same footage, the same roster and the same
