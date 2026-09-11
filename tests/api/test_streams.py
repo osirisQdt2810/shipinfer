@@ -20,6 +20,8 @@ What is under test is mostly the **mapping**, because that is what a client acts
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import threading
 import time
@@ -796,7 +798,7 @@ class TestNothingBlockingRunsOnTheEventLoop:
 
         assert watcher.loop_thread not in watcher.calls["health"]
 
-    def test_a_wedged_report_is_a_504_and_the_next_request_still_answers(
+    async def test_a_wedged_report_is_a_504_and_the_next_request_still_answers(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """One controller call that never returns must cost one request, not the server.
@@ -805,40 +807,63 @@ class TestNothingBlockingRunsOnTheEventLoop:
         cannot time out at all -- ``fail_after`` cannot interrupt a blocking call on the
         thread the loop is running on -- and the ``GET /health`` beside it is not even
         dispatched until the wedge lets go.
+
+        Two TASKS rather than two threads -- see the comment below.
         """
+        # THE SHAPE IS THE FIX. One starlette `TestClient` driven from a worker thread and
+        # the main thread at once failed on CI's py3.10 leg four times while passing locally,
+        # with no exception in the thread and a 30 s rendezvous; starlette does not document
+        # that as safe, and this property wants concurrency on the LOOP anyway.
+
+        # IMPORTED HERE: a top-level `import httpx` runs BEFORE this file's own
+        # `importorskip` and interrupts COLLECTION on a host without the extra, taking the
+        # whole offline tier down rather than skipping one file. isort hoists a module-level
+        # import back into the block however it is commented; a local one it leaves alone.
+        import httpx
+
         monkeypatch.setattr(streams_module, "_ADD_TIMEOUT_S", 0.05)
         watcher = ThreadWatchingCameras(wedge_first_health=True)
-        posted: dict[str, int] = {}
+        app = create_app(cameras=watcher)
 
-        with client_over(watcher) as client:
-
-            def post() -> None:
-                posted["status"] = client.post("/streams", json={"url": "rtsp://a"}).status_code
-
-            caller = threading.Thread(target=post, name="posting")
-            caller.start()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            post = asyncio.create_task(client.post("/streams", json={"url": "rtsp://a"}))
             try:
-                # A RENDEZVOUS, NOT THE CLAIM: it waits for the posting thread to reach the
-                # wedged report, while what the test measures is `elapsed` below --
-                # milliseconds against ten seconds, unchanged. Five seconds for a thread start
-                # failed twice on runners that were also building the C++ tiers.
-                assert watcher.entered.wait(30.0), "the POST never asked for a report"
-                started = time.monotonic()
-                assert client.get("/health").status_code == 200
-                # Still wedged: the POST has to give up on its own deadline, not because the
-                # test let the report go. That is the whole claim.
-                caller.join(5.0)
+                # THE CLOCK IS STAMPED IN THE WORKER THREAD, at wedge entry, which is the
+                # difference between this test and an expensive sleep: stamped after the
+                # `await`, a parked loop delays the STAMP instead of showing up in it, and the
+                # rewrite passed under the regression (#224's review reproduced that).
+                def reach_the_wedge() -> float:
+                    assert watcher.entered.wait(30.0), "the POST never asked for a report"
+                    return time.monotonic()
+
+                loop = asyncio.get_running_loop()
+                started = await asyncio.wait_for(
+                    loop.run_in_executor(None, reach_the_wedge), timeout=35.0
+                )
+                # THE CLAIM: answered while the first report is still held.
+                health = await asyncio.wait_for(client.get("/health"), timeout=5.0)
+                assert health.status_code == 200
+                # And the POST gives up on its OWN deadline rather than because the test let
+                # the report go.
+                answer = await asyncio.wait_for(asyncio.shield(post), timeout=5.0)
                 elapsed = time.monotonic() - started
-                assert not caller.is_alive(), "the POST outlived its own deadline"
-                # Both answers came back while the first report was still held. The bound is
-                # loose on purpose -- what it has to tell apart is milliseconds from the ten
-                # seconds the wedge holds for, and a shared box is allowed to be slow.
+                assert answer.status_code == 504
+                # 2 s, which is the bound the threaded shape used: what it has to tell apart
+                # is milliseconds from the ten seconds the wedge holds, and the injection
+                # probe fails it at ~10 s. Widening it was a consequence of the broken clock
+                # above rather than a runner-slack argument, so it goes back.
                 assert elapsed < 2.0, "a request waited on the wedged report"
             finally:
                 watcher.release.set()
-                caller.join(10.0)
-
-        assert posted == {"status": 504}
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(asyncio.shield(post), timeout=10.0)
+                # CANCELLED if it is still pending, rather than left to run into the next
+                # test with `suppress` hiding it (#224's review).
+                if not post.done():
+                    post.cancel()
+                    with contextlib.suppress(BaseException):
+                        await post
 
 
 class TestRemovingACamera:
