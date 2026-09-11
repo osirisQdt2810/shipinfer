@@ -131,8 +131,12 @@ def test_a_half_written_fixture_is_never_served() -> None:
     text = RUNNER.read_text(encoding="utf-8")
     block = text[text.index("for pair in") : text.index("export SHIPINFER_RTSP_PERSON_DATA")]
 
-    assert '--out "$out.partial"' in block, "the generator writes under the served name"
-    assert 'mv "$out.partial" "$out"' in block, "nothing moves the finished fixture into place"
+    assert '--out "$partial"' in block, "the generator writes under the served name"
+    # `mv -T`, not `mv`: a plain move puts this lap INSIDE a directory another run finished
+    # first, and the served name then holds `person/person.partial.123/...` -- which is the
+    # half-written fixture this test is named for, arriving by a different road.
+    assert 'mv -T "$partial" "$out"' in block, "nothing moves the finished fixture into place"
+    assert 'rm -rf "$partial"' in block.split("mv -T")[1], "the loser of the race keeps its lap"
 
 
 def test_the_generator_is_only_run_when_the_directory_is_empty() -> None:

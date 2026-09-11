@@ -123,12 +123,19 @@ if grep -qE "^node [^ ]+ (track|mtmc) " "$PLAN" &&
     # name this way.
     if [ -z "$(ls -A "$out" 2>/dev/null)" ]; then
       echo "pan fixture: generating $out from $(basename "$src")" >&2
-      rm -rf "$out.partial"
-      # WHAT 400 COSTS on the replay arm: `replay.h` decodes every file in the folder and
-      # page-locks it, so 400 x 1920x1080 BGR is ~2.5 GB pinned per library, ~5 GB across the
-      # two, against ~62 MB for the ten photographs. The RTSP arm encodes once and streams.
-      python "$REPO/scripts/make_pan_fixture.py" --src "$src" --out "$out.partial" --frames 400
-      mv "$out.partial" "$out"
+      # THE PARTIAL CARRIES THIS SHELL'S PID, because two runs that start together both see an
+      # empty directory: a shared partial name has each `rm -rf` deleting the other's
+      # in-flight generation, and the loser's `mv` then buries its lap INSIDE the winner's.
+      partial="$out.partial.$$"
+      rm -rf "$partial"
+      # WHAT 400 COSTS ON THE REPLAY ARM, measured rather than estimated (11 Sep, 12 cameras
+      # x 20 fps x 20 s): the bench's peak RSS is 5.62 GiB against 1.04 GiB on the ten
+      # photographs -- `replay.h` decodes and page-locks every file, and 400 x 1920x1080 BGR
+      # is ~2.5 GiB a library. Startup 2.23 s against 2.07 s; the RTSP arm pays neither.
+      python "$REPO/scripts/make_pan_fixture.py" --src "$src" --out "$partial" --frames 400
+      # -T REPLACES the empty directory rather than moving into it, and a failure means the
+      # other run won: discard this lap rather than serve `person/person.partial.123/...`.
+      mv -T "$partial" "$out" 2>/dev/null || rm -rf "$partial"
     fi
   done
   export SHIPINFER_RTSP_PERSON_DATA=/work/.artifacts/pan/person

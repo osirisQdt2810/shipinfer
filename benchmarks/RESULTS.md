@@ -272,6 +272,15 @@ reference's **production defaults**, `min_hits 3` and `min_height_fraction 1/9`:
 | **the pan** | 4 declared | **4.42** | 42 063 | **26 023 (61.9%)** | **13 / 72** |
 | **the pan** | the run's 12 | **4.41** | 41 951 | **24 177 (57.6%)** | **12 / 72** |
 
+**What the better fixture costs, on the arm that pays for it.** `--source replay` decodes the
+whole folder into page-locked host memory once, so 400 frames of 1920×1080 are ~2.5 GiB a
+library where ten photographs were ~62 MB. Measured on the default entry point (12 cameras ×
+20 fps × 20 s, the bench process's own peak RSS): **5.62 GiB against 1.04 GiB**, +4.6 GiB, with
+startup 2.23 s against 2.07 s and the same frames accepted (4 800 / 4 795). The RTSP arm —
+every table on this page — encodes once and streams, and pays neither. On a shared box that is
+the number to know before running the replay arm; `ReplayLibrary` takes a frame limit if a
+smaller lap will do.
+
 **The chain associates across cameras at the configuration the deployment ships.** Nothing was
 tuned for these rows: the gate is the reference's own, the window is the chain's 60 ms, and the
 only thing that changed is that the camera now shows a scene instead of a slideshow. Ten times
