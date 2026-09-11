@@ -3019,7 +3019,7 @@ hook down, for when the operator asked to see something before it is executed.
       `ship_detector` and `ship_segmenter` only, so on `ship_person_cpu` the two embedders'
       plans are outside the byte-identity guard entirely.
 
-- [~] **V167-GSTREAMER-ONLY-3000 · THE WHOLE CHAIN MEASURED END TO END, 11 Sep, AND THE
+- [!] **V167-GSTREAMER-ONLY-3000 · **OPERATOR: WHICH LEVER?** The chain is measured end to end on the route you mandated and the target is not reachable on four A5000s with this chain -- ~260 img/s of tracked frames against 3 000. Three levers, priced in this item and in `benchmarks/RESULTS.md`: (a) fewer or cheaper models per image, (b) camera affinity or a per-camera sequencer, (c) more devices (16 GPUs is ~4x this, still short). I can build any of them; which one is yours to pick. THE WHOLE CHAIN MEASURED END TO END, 11 Sep, AND THE
       THROUGHPUT NUMBER THIS LEDGER HAS BEEN QUOTING WAS COUNTING FRAMES THE TRACKER
       REFUSED.** `decode -> detect -> crop -> segment -> embed x2 -> track -> mtmc`, over
       gstreamer RTSP from the offline H.264 (`--source nvdec`), 4 GPUs (0/2/5/6), 12 cameras
@@ -3143,7 +3143,7 @@ hook down, for when the operator asked to see something before it is executed.
       (3) the C++ plane still has no `mtmc`, so "decode -> mtmc track" cannot be measured end
       to end until PR 3 lands (the barrier half is built and green).
 
-- [~] **V165-WHOLE-PIPELINE-4500 · THE TARGET IS NOW ABSOLUTE AND IT IS THE WHOLE CHAIN.**
+- [!] **V165-WHOLE-PIPELINE-4500 · SAME QUESTION AS `V167-GSTREAMER-ONLY-3000`, which carries the numbers: the chain is measured, the target needs a lever and the lever is a product decision.** THE TARGET IS NOW ABSOLUTE AND IT IS THE WHOLE CHAIN.**
       4 500 img/s from `decode -> ... -> mtmc track`, not a multiple of anything -- so the
       offer-bound baseline stops being the denominator. The operator also asked the right
       question about my numbers, and the answer is a COUNT rather than an excuse.
@@ -3210,7 +3210,7 @@ hook down, for when the operator asked to see something before it is executed.
       done per row (`SEGMENT-NO-CLASSES-ASYMMETRY`), and 4 500 img/s at 11.74 invocations is
       52 700 invocations/s, which four A5000s do not do.
 
-- [~] **FPS-ON-FOUR-GPUS · MEASURED 10 Sep. The absolute numbers hold; every RATIO in this
+- [!] **FPS-ON-FOUR-GPUS · RE-MEASURED 11 Sep on the full chain (see `V167-GSTREAMER-ONLY-3000`): four GPUs retire ~260 img/s TRACKED, and four buy nothing over three. Waiting on the same lever question.** MEASURED 10 Sep. The absolute numbers hold; every RATIO in this
       item was wrong because the baseline is OFFER-BOUND and does no inference (0-8% GPU,
       9 815 img/s on ONE gpu against 9 953 on four). Instrument open as #216; the page's
       false 'capacity, not a floor' claim and the comparand question are what remain.**
