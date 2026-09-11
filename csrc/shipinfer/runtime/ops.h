@@ -106,8 +106,14 @@ namespace shipinfer {
     // count of cells above it scaled by the crop's pixels per cell. A crop whose best row
     // scores below `score_threshold` is area 0, which is "found nothing" rather than an error.
     //
-    // One block per crop, `blockDim.x` threads striding the cells, a block reduction at the
-    // end. `areas_device` holds `count` floats.
+    // One block per crop, threads striding the cells, a block reduction at the end.
+    // `areas_device` holds `count` floats.
+    //
+    // THE ROW LAYOUT IT ASSUMES, because two of these are not parameters: column 4 of a
+    // detection row is its SCORE, and `stride - prefix` must EQUAL `channels` -- the kernel
+    // reads `channels` coefficients starting at `prefix`, so a shorter row would read the next
+    // candidate's box and, for the last crop, walk off the allocation. Refused rather than
+    // trusted, with the same reason `mask_area.cpp` gives.
     void mask_area_into(const float* rows_device, int candidates, int stride, int prefix,
                         const float* protos_device, int channels, int cells, int count,
                         float score_threshold, float mask_threshold, int crop_height,

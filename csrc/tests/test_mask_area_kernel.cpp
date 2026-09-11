@@ -9,6 +9,7 @@
 // Container tier: this links CUDA, so `scripts/build_csrc.py --offline` does not build it and
 // the offline job never runs it.
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -197,6 +198,65 @@ namespace {
                   (message.empty() ? "(nothing)" : message));
     }
 
+    void a_row_too_short_for_the_bank_is_refused() {
+        // The input the readable twin exists to refuse -- a 64-plane bank against
+        // 32-coefficient rows, which is a re-export or a chain naming the wrong output slot.
+        // `mask_area.cpp` throws; without the same refusal here the kernel would read the NEXT
+        // candidate row's box as coefficients and, for the last crop, off the allocation.
+        DeviceBuffer one(sizeof(float));
+        std::string message;
+        try {
+            mask_area_into(one.as<float>(), kCandidates, kStride, kPrefix, one.as<float>(),
+                           kChannels * 2, kCells, 1, 0.25f, 0.5f, 640, 640, one.as<float>(),
+                           nullptr);
+        } catch (const ConfigError& error) {
+            message = error.what();
+        }
+        check(message.find("truncated or overrun") != std::string::npos,
+              "a basis the rows cannot fill is refused, got: " +
+                  (message.empty() ? "(nothing)" : message));
+    }
+
+    void it_runs_on_the_stream_it_was_given() {
+        // Every other check passes `nullptr` (the default stream); the instance thread will
+        // hand it its own, so one check pins that the launch honours it.
+        const int crops = 3;
+        const InferenceResponse response = response_of(crops);
+        const MaskAreaSpec spec = spec_of();
+        gpuStream_t stream = nullptr;
+        GPU_CHECK(gpuStreamCreate(&stream));
+
+        const OutputTensor& rows = response.outputs[0];
+        const OutputTensor& protos = response.outputs[1];
+        DeviceBuffer rows_device(rows.data.size() * sizeof(float));
+        DeviceBuffer protos_device(protos.data.size() * sizeof(float));
+        DeviceBuffer areas_device(static_cast<size_t>(crops) * sizeof(float));
+        GPU_CHECK(gpuMemcpyAsync(rows_device.get(), rows.data.data(),
+                                 rows.data.size() * sizeof(float), gpuMemcpyHostToDevice,
+                                 stream));
+        GPU_CHECK(gpuMemcpyAsync(protos_device.get(), protos.data.data(),
+                                 protos.data.size() * sizeof(float), gpuMemcpyHostToDevice,
+                                 stream));
+        mask_area_into(rows_device.as<float>(), kCandidates, kStride, kPrefix,
+                       protos_device.as<float>(), kChannels, kCells, crops,
+                       spec.score_threshold, spec.mask_threshold, spec.crop_height,
+                       spec.crop_width, areas_device.as<float>(), stream);
+        std::vector<float> areas(static_cast<size_t>(crops), -1.f);
+        GPU_CHECK(gpuMemcpyAsync(areas.data(), areas_device.get(), areas.size() * sizeof(float),
+                                 gpuMemcpyDeviceToHost, stream));
+        GPU_CHECK(gpuStreamSynchronize(stream));
+        GPU_CHECK(gpuStreamDestroy(stream));
+
+        const OutputTensor host = mask_area(response, spec);
+        bool agreed = true;
+        for (size_t i = 0; i < areas.size(); ++i) {
+            agreed = agreed && std::fabs(host.data[i] - areas[i]) <=
+                                   static_cast<float>(spec.crop_height) *
+                                       static_cast<float>(spec.crop_width) / kCells;
+        }
+        check(agreed, "the same answer, ordered on the caller's own stream");
+    }
+
     void no_crops_is_not_an_error() {
         DeviceBuffer one(sizeof(float));
         mask_area_into(one.as<float>(), kCandidates, kStride, kPrefix, one.as<float>(),
@@ -253,6 +313,8 @@ int main() {
     a_crop_whose_best_row_is_below_the_floor_is_area_zero();
     the_mask_threshold_moves_both_sides_together();
     a_threshold_with_no_logit_is_refused();
+    a_row_too_short_for_the_bank_is_refused();
+    it_runs_on_the_stream_it_was_given();
     no_crops_is_not_an_error();
     what_it_costs_at_the_shipped_shapes();
     std::printf("%d checks, %d failure(s)\n", checks, failures);

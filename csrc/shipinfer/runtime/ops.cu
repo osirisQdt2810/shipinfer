@@ -193,9 +193,13 @@ namespace shipinfer {
             }
         }
 
-        // The BGR crop kernel's geometry, with NV12 sampling at the four taps. Kept beside it
-        // rather than templated: the two differ only in how a pixel is fetched, and a reader
-        // comparing them line for line is the check that they agree about boxes.
+        //: The fold's block size, used by the launch AND by the reduction's shared array --
+        //: two places that must agree, and a power of two because the reduction halves.
+        constexpr int kMaskAreaThreads = 256;
+        //: Which column of a detection row carries the score. `mask_area.cpp` declares it
+        //: beside its prefix for the same reason: `prefix` is a parameter and this is not.
+        constexpr int kScoreColumn = 4;
+
         // ONE BLOCK PER CROP, threads striding the cells. The per-cell work is a dot product
         // of `channels` mask coefficients against `channels` prototype planes, which is a
         // strided read of one float per plane -- the same arithmetic `mask_area.cpp` does on
@@ -207,15 +211,24 @@ namespace shipinfer {
             const int crop = static_cast<int>(blockIdx.x);
             const float* candidate_rows =
                 rows + static_cast<size_t>(crop) * candidates * stride;
-            // The strongest row of this crop: the crop IS one object, so its instance is the
-            // engine's best answer for it rather than the union of everything it saw.
-            int best = 0;
-            for (int c = 1; c < candidates; ++c) {
-                if (candidate_rows[c * stride + 4] > candidate_rows[best * stride + 4])
-                    best = c;
+            // ONE THREAD, not all of them. The strongest row of this crop -- the crop IS one
+            // object, so its instance is the engine's best answer for it rather than the union
+            // of everything it saw -- and every thread computing the same argmax was 300
+            // strided loads each at the shipped shapes, for one answer the block shares.
+            __shared__ int best;
+            if (threadIdx.x == 0) {
+                int strongest = 0;
+                for (int c = 1; c < candidates; ++c) {
+                    if (candidate_rows[c * stride + kScoreColumn] >
+                        candidate_rows[strongest * stride + kScoreColumn]) {
+                        strongest = c;
+                    }
+                }
+                best = strongest;
             }
+            __syncthreads();
             const float* chosen = candidate_rows + static_cast<size_t>(best) * stride;
-            if (chosen[4] < score_threshold) {
+            if (chosen[kScoreColumn] < score_threshold) {
                 if (threadIdx.x == 0) areas[crop] = 0.f;  // found nothing: area 0, not an error
                 return;
             }
@@ -231,7 +244,7 @@ namespace shipinfer {
             }
             // A SHARED-MEMORY REDUCTION rather than one atomic per thread: 25 600 cells over
             // 256 threads is a hundred iterations each, and the atomics would be the kernel.
-            __shared__ int partial[256];
+            __shared__ int partial[kMaskAreaThreads];
             partial[threadIdx.x] = inside;
             __syncthreads();
             for (unsigned step = blockDim.x / 2; step > 0; step >>= 1) {
@@ -241,6 +254,9 @@ namespace shipinfer {
             if (threadIdx.x == 0) areas[crop] = static_cast<float>(partial[0]) * cell_px;
         }
 
+        // The BGR crop kernel's geometry, with NV12 sampling at the four taps. Kept beside it
+        // rather than templated: the two differ only in how a pixel is fetched, and a reader
+        // comparing them line for line is the check that they agree about boxes.
         __global__ void nv12_crop_resize_kernel(const uint8_t* nv12, int src_h, int src_w,
                                                 int stride, size_t uv_offset,
                                                 const float* boxes, int count, float* dst,
@@ -409,6 +425,19 @@ namespace shipinfer {
                 "mask_area_into: candidates, channels and cells must be "
                 "positive and stride must exceed the prefix");
         }
+        // THE TWIN'S OWN REFUSAL, and the reason it is not a niceness check: the kernel reads
+        // `chosen[prefix + m]` for m in [0, channels), so a row that carries fewer coefficients
+        // than there are planes walks into the NEXT candidate row -- and for the last crop's
+        // best row, off the allocation. `mask_area.cpp` throws here ("one of the two outputs is
+        // not the one this stage was configured for"), so without this the two implementations
+        // disagree on exactly the input the readable one exists to refuse. `!=` rather than
+        // `<`, to match it: more coefficients than planes is the same mismatch.
+        if (stride - prefix != channels) {
+            throw ConfigError(
+                "mask_area_into: the rows carry " + std::to_string(stride - prefix) +
+                " mask coefficient(s) and the bank has " + std::to_string(channels) +
+                " plane(s); the basis would be truncated or overrun");
+        }
         if (!(mask_threshold > 0.f) || !(mask_threshold < 1.f)) {
             throw ConfigError(
                 "mask_area_into: mask_threshold is a probability in (0, 1), "
@@ -422,7 +451,7 @@ namespace shipinfer {
                               static_cast<float>(cells);
         // 256 THREADS, which the reduction's shared array is sized for. A block per crop, so
         // the whole batch is one launch.
-        mask_area_kernel<<<static_cast<unsigned>(count), 256, 0, stream>>>(
+        mask_area_kernel<<<static_cast<unsigned>(count), kMaskAreaThreads, 0, stream>>>(
             rows_device, candidates, stride, prefix, protos_device, channels, cells,
             score_threshold, cut, cell_px, areas_device);
         GPU_CHECK(gpuGetLastError());
