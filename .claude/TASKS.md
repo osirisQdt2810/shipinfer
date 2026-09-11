@@ -2806,7 +2806,7 @@ hook down, for when the operator asked to see something before it is executed.
       three CONSECUTIVE instants. So affinity's worth has to be measured as admission at a load
       the queue does not decimate -- 12 x 20 fps with workers swept -- and not from these rows.
 
-- [ ] MASK-FOLD-BELONGS-ON-THE-DEVICE · PROFILED 11 Sep and it is the largest host item after
+- [ ] MASK-FOLD-BELONGS-ON-THE-DEVICE · HALF DONE 11 Sep (the kernel). PROFILED 11 Sep and it is the largest host item after
       the engines. `ship_segmenter` answers `(300, 38)` rows and a `(32, 160, 160)` prototype
       bank per crop; `TrtEngine::execute` copies BOTH to host memory and
       `graph/mask_area.cpp` reduces the bank to ONE float -- the mask's area. Measured at the
@@ -2820,6 +2820,19 @@ hook down, for when the operator asked to see something before it is executed.
       parity test needs), and the Python plane's `PoolSegment._reduced` needs the same seam so
       the two planes still agree. MEASURE the fold's own time against the 1.44 ms, and the
       chain's host CPU against 4.55 cores at 240 img/s.
+      THE KERNEL EXISTS AND AGREES (11 Sep, #232): `runtime/ops.cu::mask_area_into`, one block
+      per crop, pinned against `graph/mask_area.cpp` on a real device -- equal areas, the
+      score floor, the mask threshold moving both sides together, and the two refusals.
+      MEASURED at the shipped shapes: **10.0 us/crop against the host fold's 1 442**, 144x.
+      WHAT REMAINS IS WHERE IT RUNS, and it is not the stage: `TrtEngine`'s device output
+      buffers are overwritten by the NEXT batch on that instance, and `ObjectStage`'s `combine`
+      runs after `infer()` has returned and the instance is free again -- so folding there is a
+      use-after-overwrite race. The fold has to happen while the instance still owns the batch
+      (an optional device-side reduction on the request, run by the instance thread after
+      `execute` and before the response is published), which is the same seam
+      `ENGINE-COPIES-EVERY-OUTPUT-HOME` needs and is where the 3.1 MB per crop stops being
+      copied. The Python plane needs the same move in `PoolSegment._reduced` (V88), where the
+      equivalent is reducing with torch before `.cpu()`.
 
 - [ ] ENGINE-COPIES-EVERY-OUTPUT-HOME · `backends/tensorrt/engine.cpp` ends every `execute`
       with one `gpuMemcpyAsync(host_outputs_[i], output_buffers_[i], ..., DeviceToHost)` per

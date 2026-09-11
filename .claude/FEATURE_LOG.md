@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-11 — the mask fold has a kernel, and it is 144x the host loop
+
+The profile said the segmenter's `(32, 160, 160)` prototype bank is copied home per crop -- 3.1 MB
+-- so a host loop can reduce it to one float, at 1.44 ms of CPU per crop.
+`runtime/ops.cu::mask_area_into` does the same arithmetic on the device: one block per crop,
+threads striding the cells, the dot product of 32 coefficients against 32 planes, a comparison
+against the LOGIT of `mask_threshold` so no sigmoid is computed, and a shared-memory reduction.
+`graph/mask_area.cpp` STAYS as the readable twin -- what the offline tier and the cross-plane
+golden check, and what makes the kernel trustworthy. `test_mask_area_kernel` pins them together
+on a real device and prints the cost: **10.0 us/crop against 1 442**. Not wired into the graph
+yet, for a reason worth knowing: the engine's device buffers are overwritten by the next batch,
+so the fold has to run while the instance still owns it, not in the stage after `infer()`.
+
+---
+
 ## 2026-09-11 — the profiler reaches the benchmarked route, and the first profile of the chain
 
 V168 makes optimisation a loop -- benchmark, then profile -- and the join was broken:
