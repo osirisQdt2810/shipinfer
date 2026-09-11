@@ -88,4 +88,35 @@ namespace shipinfer {
                                float* dst_device, int dst_h, int dst_w, bool swap_rb,
                                gpuStream_t stream);
 
+    // doc: long what the fold is, why it belongs here, and what it costs on the host today
+    // ONE AREA PER CROP, from a segmentation engine's two outputs, without them leaving the
+    // device. `graph/mask_area.cpp` is the readable twin and stays: it is what the offline tier
+    // and the cross-plane golden check, and a kernel is only trustworthy if a readable
+    // implementation agrees with it.
+    //
+    // WHY IT IS WORTH A KERNEL, profiled 11 Sep on the whole chain: the prototype bank is
+    // `(32, 160, 160)` floats -- 3.1 MB per crop -- and `TrtEngine::execute` copies it to the
+    // host so a loop can reduce it to ONE float. That copy is the bulk of the run's 39.6 GiB of
+    // device-to-host traffic (73.7% of all GPU memory-op time), and the loop costs 1.44 ms of
+    // CPU per crop, which one core sustains 693 of.
+    //
+    // The arithmetic is `mask_area`'s, kept identical on purpose: the strongest candidate row
+    // per crop by score, its `coefficients` mask weights against the prototype planes, a
+    // comparison against the LOGIT of `mask_threshold` (so no sigmoid is computed), and the
+    // count of cells above it scaled by the crop's pixels per cell. A crop whose best row
+    // scores below `score_threshold` is area 0, which is "found nothing" rather than an error.
+    //
+    // One block per crop, threads striding the cells, a block reduction at the end.
+    // `areas_device` holds `count` floats.
+    //
+    // THE ROW LAYOUT IT ASSUMES, because two of these are not parameters: column 4 of a
+    // detection row is its SCORE, and `stride - prefix` must EQUAL `channels` -- the kernel
+    // reads `channels` coefficients starting at `prefix`, so a shorter row would read the next
+    // candidate's box and, for the last crop, walk off the allocation. Refused rather than
+    // trusted, with the same reason `mask_area.cpp` gives.
+    void mask_area_into(const float* rows_device, int candidates, int stride, int prefix,
+                        const float* protos_device, int channels, int cells, int count,
+                        float score_threshold, float mask_threshold, int crop_height,
+                        int crop_width, float* areas_device, gpuStream_t stream);
+
 }  // namespace shipinfer
