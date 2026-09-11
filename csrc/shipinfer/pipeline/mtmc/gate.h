@@ -16,6 +16,10 @@
 // usable frame with the gate already satisfied.
 //
 // Pure: no lane, no device, no submodule -- so it builds and is tested in the offline tier.
+// NOT THREAD-SAFE, deliberately, and `identity.h` says the same for the same reason: `hits_`
+// is carried across `filter` calls, so this is state and not a pure function. The stage that
+// owns it holds the barrier's lock across one whole instant, which is the level where one
+// instant is one atomic step.
 #pragma once
 
 #include <cstdint>

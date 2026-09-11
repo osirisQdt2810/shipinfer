@@ -159,6 +159,16 @@ EXTERNAL: dict[str, ExternalLane] = {
             "shipinfer/pipeline/tracking/bytetrack.cpp",
             "tests/test_tracking_shard.cpp",
             "tests/test_tracking_associator.cpp",
+            # The cross-camera tracker behind the `ClusterTracker` seam. `mtmc/cluster.cpp`,
+            # `gate.cpp` and `identity.cpp` are deliberately NOT here -- lane-free, so they
+            # compile everywhere: that is what lets the seam name the LANE in a binary without
+            # one, and puts the two stateful pieces in the offline tier with their goldens.
+            "shipinfer/pipeline/mtmc/shipvision_cluster.cpp",
+            # NAMED `test_tracking_*` because `cpp.yml`'s lane job globs exactly that, and
+            # a lane binary CI builds but never runs is the `CSRC-BENCH-UNCOMPILED` shape --
+            # found by #221's review. The durable fix is the glob
+            # (`CPP-LANE-JOB-GLOBS-ONE-PREFIX`); the convention is what makes this one run now.
+            "tests/test_tracking_cluster_parity.cpp",
         ),
         packages=(),
         include_root="3rdparty/shipvision/csrc",
@@ -167,6 +177,13 @@ EXTERNAL: dict[str, ExternalLane] = {
             "3rdparty/shipvision/csrc/shipvision/mot/association.cpp",
             "3rdparty/shipvision/csrc/shipvision/mot/kalman.cpp",
             "3rdparty/shipvision/csrc/shipvision/mot/pool.cpp",
+            "3rdparty/shipvision/csrc/shipvision/mtmc/matcher.cpp",
+            "3rdparty/shipvision/csrc/shipvision/mtmc/clustering/agglomerative.cpp",
+            "3rdparty/shipvision/csrc/shipvision/mtmc/matchers/appearance/matcher.cpp",
+            "3rdparty/shipvision/csrc/shipvision/mtmc/matchers/spatial/matcher.cpp",
+            "3rdparty/shipvision/csrc/shipvision/mtmc/matchers/spatial/utils.cpp",
+            "3rdparty/shipvision/csrc/shipvision/mtmc/matchers/gated/matcher.cpp",
+            "3rdparty/shipvision/csrc/shipvision/mtmc/topology/homography.cpp",
         ),
         hint=(
             "run `git submodule update --init 3rdparty/shipvision`. CI checks it out by name "

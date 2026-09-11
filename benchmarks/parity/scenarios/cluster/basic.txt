@@ -1,0 +1,44 @@
+# The WHOLE cross-camera composition, instant by instant, read by both planes: gate, then gram,
+# then the gated matcher, then the clusterer, then the identity assigner. Its two stateful
+# halves have goldens of their own (`scenarios/gate`, `scenarios/identity`); this one pins that
+# they compose the same way.
+#
+#   scenario <name> <repeats>
+#   instant  <camera>#<track>:<x>,<y>:<box_height_px> ...   (frames are 1920x1080)
+#
+# The instant is repeated `repeats` times, which is what the gate's min_hits needs: nothing is
+# identified for the first two, and the third is where cross-camera association starts.
+
+# What mtmc is for: two cameras, one object.
+scenario two_cameras_alike 5
+instant cam0#1:1,0:300 cam1#7:1,0:300
+
+# Two cameras, two objects. Appearance is orthogonal, so the clusterer must not merge them.
+scenario two_cameras_unalike 5
+instant cam0#1:1,0:300 cam1#7:0,1:300
+
+# One camera's track is too small to trust: it is reported with NO identity (-1) rather than
+# dropped, because "we have no identity for this track" and "this track did not exist" are
+# different things to whoever is looking at the screen.
+scenario gated_by_height 5
+instant cam0#1:1,0:50 cam1#7:1,0:300
+
+# Three cameras, two objects: the two that look alike share an identity and the third does not.
+scenario three_cameras 4
+instant cam0#1:1,0:300 cam1#1:1,0:300 cam2#1:0,1:300
+
+# STRADDLING THE APPEARANCE THRESHOLD (0.86), which every scenario above was far from: each
+# embedding here is exactly 1.0 or 0.0 away from the others, so the threshold could be moved to
+# anything and the answers would not change. 0.95,0.31 is cosine 0.9506 from 1,0 -- above -- and
+# 0.60,0.80 is 0.6, below. A gate or matcher threshold that drifted would move one of the two.
+scenario appearance_just_above_the_threshold 4
+instant cam0#1:1,0:300 cam1#1:0.95,0.31:300
+
+scenario appearance_well_below_the_threshold 4
+instant cam0#1:1,0:300 cam1#1:0.60,0.80:300
+
+# TWO TRACKS ON ONE CAMERA that look identical. One identity is one object, so the same-camera
+# exclusion has to keep them apart -- and nothing above could tell whether it ran, because every
+# pair in this file was cross-camera.
+scenario one_camera_twice_alike 4
+instant cam0#1:1,0:300 cam0#2:1,0:300 cam1#1:1,0:300

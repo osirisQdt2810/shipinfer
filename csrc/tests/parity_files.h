@@ -49,14 +49,29 @@ namespace shipinfer::parity {
         return lines;
     }
 
-    inline std::vector<std::string> read_lines(const std::string& path) {
+    // Trailing whitespace trimmed, blank lines dropped, and `#` comments dropped unless the
+    // caller wants them. THREE parity binaries had each written this for themselves --
+    // identity, gate and now cluster -- which is the rule-of-three this header exists to stop:
+    // a reading contract in three places is three contracts one edit apart.
+    inline std::vector<std::string> read_lines(const std::string& path, bool keep_comments) {
         std::ifstream file(path);
         if (!file) throw ConfigError("cannot read " + path);
         std::vector<std::string> lines;
         for (std::string line; std::getline(file, line);) {
-            if (!line.empty()) lines.push_back(line);
+            while (!line.empty() && (line.back() == ' ' || line.back() == '\r'))
+                line.pop_back();
+            if (line.empty()) continue;
+            if (!keep_comments && line[0] == '#') continue;
+            lines.push_back(line);
         }
         return lines;
+    }
+
+    // DELEGATES, so there is one contract and not two overloads of one name with different
+    // trimming -- #221's review caught that the new two-argument form trimmed trailing
+    // whitespace and this one did not, while five binaries call this one.
+    inline std::vector<std::string> read_lines(const std::string& path) {
+        return read_lines(path, true);
     }
 
 }  // namespace shipinfer::parity

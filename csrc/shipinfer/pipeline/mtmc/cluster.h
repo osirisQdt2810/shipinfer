@@ -12,6 +12,9 @@
 // cross-camera association into within-camera deduplication. `mtmc/barrier.h` is what turns the
 // chain's one-frame-at-a-time stream back into instants; this is what gives those instants
 // meaning.
+// NOT THREAD-SAFE at the interface, and an implementation that is says so itself: the lane
+// unit takes its own mutex because ONE tracker is shared by every worker on a slot. What the
+// interface promises is only that `ids()` is called with a whole instant.
 #pragma once
 
 #include <cstdint>
