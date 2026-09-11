@@ -2953,6 +2953,26 @@ hook down, for when the operator asked to see something before it is executed.
       parking it rather than spending an afternoon on it while #222 waits. Say if you want it
       chased now; otherwise the next person to touch `api/streams.py` owns it.
 
+- [~] MTMC-EIGHT-OPEN-INSTANTS-IS-A-SMALL-GROUP'S-BOUND · MEASURING 11 Sep at the design load
+      (50 cameras x 20 fps, pan fixture, GPUs 0/2/5/6, 92 workers, 40 s). `kDefaultMaxInstants
+      = 8` is documented as "half a second at the default window: enough to absorb a camera a
+      few frames behind" -- which is a four-camera group's arithmetic. At fifty cameras the
+      arrival spread is not a few frames: two runs at the default evicted 1007 and 720 instants
+      (26% and 19% of all instants opened), admitted 170 and 97 observations, and produced
+      ZERO global ids. Three runs with `max_instants: 64` on the identical plan (the verb #225
+      made chain-settable; the plans differ in that one line) evicted NOTHING, admitted 2154 /
+      1359 / 527, and produced 10-19 ids.
+      WHAT IT IS NOT: throughput. frames_accepted was 29 565 / 31 760 at 8 against 34 908 /
+      32 292 / 31 729 at 64 -- overlapping ranges, so the first pair's +18% was run-to-run
+      variance and is not claimable. `late` rises with the bound (11.9k/12.6k -> 13.7k/14.9k/
+      16.0k), which is the expected trade: an instant that survives is still open when a
+      straggler arrives, where an evicted one was simply gone.
+      SWEEPING 8/16/32/64/128 before proposing a number, because "bigger helped" is not a
+      default. The open question the sweep answers: is there a knee, or does admission track
+      the bound until memory does -- in which case the fix is a bound DERIVED from the roster
+      (one instant per camera-period of spread) rather than a constant, and the docstring's
+      "half a second" is the thing to keep true rather than the 8.
+
 - [ ] MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK · #222 converged the two planes onto the
       CAPTURE (wall) stamp, because keying instants on different clocks is two sets of global
       ids for one clip and the sync rule makes that a defect. The risk the old comment argued
