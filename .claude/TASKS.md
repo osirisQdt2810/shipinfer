@@ -2796,6 +2796,55 @@ hook down, for when the operator asked to see something before it is executed.
       three CONSECUTIVE instants. So affinity's worth has to be measured as admission at a load
       the queue does not decimate -- 12 x 20 fps with workers swept -- and not from these rows.
 
+- [ ] MASK-FOLD-BELONGS-ON-THE-DEVICE · PROFILED 11 Sep and it is the largest host item after
+      the engines. `ship_segmenter` answers `(300, 38)` rows and a `(32, 160, 160)` prototype
+      bank per crop; `TrtEngine::execute` copies BOTH to host memory and
+      `graph/mask_area.cpp` reduces the bank to ONE float -- the mask's area. Measured at the
+      shipped shapes on this box: **1.44 ms of CPU per crop** (one core sustains 693 crops/s)
+      and **3.1 MB copied down per crop**, which is the bulk of the run's 39.6 GiB of
+      device-to-host traffic (73.7% of all GPU memory-op time). At 3 000 img/s with ~1.4 ship
+      crops per frame that is 6 cores and 13 GB/s of PCIe to produce 4 200 floats a second.
+      THE FIX: one kernel -- a dot product of 32 coefficients against 32 planes per cell, a
+      compare and a reduction -- run before the copy, so what comes home is one float per crop.
+      It belongs in `shipvision` (`runtime/ops/` on the Python plane has the readable twin the
+      parity test needs), and the Python plane's `PoolSegment._reduced` needs the same seam so
+      the two planes still agree. MEASURE the fold's own time against the 1.44 ms, and the
+      chain's host CPU against 4.55 cores at 240 img/s.
+
+- [ ] ENGINE-COPIES-EVERY-OUTPUT-HOME · `backends/tensorrt/engine.cpp` ends every `execute`
+      with one `gpuMemcpyAsync(host_outputs_[i], output_buffers_[i], ..., DeviceToHost)` per
+      output, unconditionally, and then a blocking sync. The prototype bank above is the
+      expensive case and `MASK-FOLD-BELONGS-ON-THE-DEVICE` removes that one; the SHAPE is the
+      item: a stage that consumes an output on the device (the fold, a future crop-from-mask,
+      anything fused) still pays the trip home. THE FIX is a per-output choice -- the
+      `OutputTensor` a consumer asks for by name (`InferenceResponse::named`) says whether it
+      wants host or device memory, defaulting to host so nothing changes silently. It is a
+      backend-contract change, so it needs the Python plane's `TensorRTBackend` in the same
+      PR (V88) and a parity test that a device-resident output reads the same numbers.
+
+- [ ] EXECUTE-BLOCKS-THE-INSTANCE-THREAD · PROFILED 11 Sep: `cudaStreamSynchronize` is **32.2%
+      of all CUDA API time** -- 9.64 s over 5 564 calls, 1.73 ms average -- because
+      `TrtEngine::execute` synchronises before returning, so the instance thread stops dead for
+      the length of a batch instead of taking the next one. The launches are the floor (1.03 M
+      in 20 s, ~4 300 per frame, four engines) and cannot be removed without fusing models; the
+      syncs can. THE FIX is an event per in-flight batch and a completion queue the instance
+      thread drains, which is Triton's shape (V86) -- and it interacts with the batch window, so
+      measure the pair: host cores at 240 img/s (4.55 today) and p50/p99 frame latency.
+      NOTE the same pattern sits in `DetectStage::do_run`, which calls `scratch_.synchronise()`
+      after the letterbox kernel before it even enqueues inference.
+
+- [ ] THE-BUILD-NEVER-VECTORISES · `scripts/build_csrc.py` compiles with `-O2` and nothing else
+      (`optimise = ["-O0", "-g"] if args.debug else ["-O2"]`), and this box's g++ is 11.4, where
+      `-O2` does NOT auto-vectorise (that arrived in GCC 12). MEASURED on the mask fold, which
+      is the data plane's hottest host loop: 1 488 us/crop as shipped; 425 us/crop -- **3.5x** --
+      with the loop order changed AND vectorisation enabled, and NEITHER change pays alone
+      (order alone is 2 174 us/crop, flags alone 1 595). So the flag is not a free win: it only
+      pays where a loop is written to vectorise, which is an argument for measuring per loop
+      rather than flipping `-O3` and claiming a speed-up. THE QUESTION is which flags are safe
+      for a container that may run on another host class: `-O3` alone is portable, `-march=native`
+      is not. Try `-O3` plus explicit `-mavx2 -mfma` against the box's own floor, and pin the
+      measurement per loop.
+
 - [ ] MTMC-TWO-SLOT-CACHED-REGISTRIES · `pipeline/mtmc/cluster.cpp` is
       `pipeline/tracking/associator.cpp` transcribed: `add`/`has`/`names`/`create`, `made_lock`,
       `made`, `made_*`, the (impl, slot) cache and the lane-before-unknown refusal, ~60
