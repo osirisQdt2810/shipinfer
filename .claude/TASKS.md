@@ -1899,6 +1899,16 @@ hook down, for when the operator asked to see something before it is executed.
       still unmeasured is a FIFTIETH of the load -- one camera, one GPU -- where the
       wake-up could dominate a nearly idle device; the PR names that rather than implying
       the whole range is covered.
+      A THIRD REGIME, 11 Sep, and the first with `mtmc` and the tracker doing real work (the
+      pan fixture, where the gate admits ~58% rather than nothing): 12 x 20 fps x 40 s, 24
+      workers, GPUs 0/2/5/6, off/on twice -- host CPU 176.4/177.0 -> 107.7/108.2 (**-39%**,
+      both pairs), frame p50 +0.5%/+2.9%, p95 within +-1.3%, p99 +5-7% (inside the off pair's
+      own 119-128 ms spread), accepted frames unchanged. At 10x the design rate: CPU -35.7%,
+      p50 +15.7%, p95 -4.1%, accepted +1.2%. THE CPU SAVING REPRODUCES AND THE THROUGHPUT GAIN
+      DOES NOT -- these arms are input- or queue-limited, so nothing turns the freed cores into
+      frames; the PR's "+25% rows" belongs to its own regime. Posted on #214. It matters more
+      than it did because today's profile says `cudaStreamSynchronize` is 32.2% of all CUDA API
+      time and the host is the wall at 4.55 cores for 240 img/s.
       ORIGINAL: `cli/bench.cpp` says the blocking-sync knob is off by
       default "because it trades wake-up latency for host CPU, and the host is only the wall at
       this load -- at a fifth of it the trade goes the other way". That sentence has never been
