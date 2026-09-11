@@ -2808,6 +2808,23 @@ hook down, for when the operator asked to see something before it is executed.
       step and rely on the barrier's `late` counter to make it visible -- which is what today
       does, unlabelled.
 
+- [ ] CSRC-MTMC-TWO-GROUPS-PER-SHARD · #222 carried the chain's `group:`/`cameras:` roster onto
+      the plan and announces it to the barrier, so the refusal of a SECOND `mtmc` slot no
+      longer rests on "no chain states which cameras belong to which" -- the chain does. What
+      is missing is the ROUTING: `MtmcStage` hands its camera's rows to the one barrier it was
+      constructed with, and nothing picks a barrier by roster, so two slots would both take
+      every camera the shard sees. The Python plane supports two groups today (the budget is
+      process-wide precisely so two can coexist).
+      THE FIX: `build_dag` builds one stage per `mtmc` slot and each stage takes its roster;
+      a frame whose camera is in no roster is published with a null global id rather than
+      forced into a group (that decision is the interesting half -- the alternative is
+      refusing the frame, and a camera nobody grouped is a configuration fact rather than a
+      fault). Then the refusal becomes support and `plan_stages`'s message goes away.
+      MEASURED WHILE WIRING IT, and worth keeping: with the roster honoured, a chain whose
+      `cameras:` do not match the running fleet makes the barrier wait for cameras that never
+      report (`complete 0, advanced 428`), while a roster matching the fleet closes the most
+      instants on evidence of any configuration measured (`complete 366` of 662).
+
 - [ ] CSRC-MTMC-GATE-OPTIONS · THE GATE'S THRESHOLDS ARE NOT SETTABLE FROM THE CHAIN, and
       MEASURED 11 Sep that is what makes the chain issue zero global ids: at 12 cameras x 20 fps
       with zero frames dropped and the barrier closing instants on evidence
