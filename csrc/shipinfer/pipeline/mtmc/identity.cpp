@@ -94,6 +94,10 @@ namespace shipinfer::mtmc {
     }
 
     void GlobalIdAssigner::reset() {
+        // `width_` SURVIVES, like `counter_` and `step_`: an identity space is fed by one
+        // embedder for the life of the process, so a post-reset chain with a different one is
+        // refused rather than silently merged into the old space's history. #220's review
+        // asked for this to be stated rather than inferred.
         members_.clear();
         owner_.clear();
         features_.clear();

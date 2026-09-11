@@ -78,9 +78,19 @@ namespace shipinfer::mtmc {
         // needed to would take a second lock rather than this one.
         if (CLUSTERERS().has(impl)) {
             std::lock_guard<std::mutex> held(made_lock());
-            std::shared_ptr<ClusterTracker>& cached = made()[{impl, slot}];
-            if (!cached) cached = CLUSTERERS().create(impl);
-            return cached;
+            const auto key = std::make_pair(impl, slot);
+            const auto found = made().find(key);
+            if (found != made().end()) return found->second;
+            // BUILT INTO A LOCAL FIRST. `made()[key]` default-inserts before the factory runs,
+            // so a constructor that threw left a NULL shared_ptr cached under that key --
+            // `made_cluster_trackers()` would then report an entry whose `tracker` is null and
+            // the bench's per-slot report dereferences it. Not reachable while every factory
+            // was trivial; the lane's tracker is the first one that can fail on a bad
+            // algorithm config, which is this PR. (`tracking/associator.cpp` has the same
+            // shape and the same fix is owed there -- `MTMC-TWO-SLOT-CACHED-REGISTRIES`.)
+            std::shared_ptr<ClusterTracker> built = CLUSTERERS().create(impl);
+            made().emplace(key, built);
+            return built;
         }
         std::ostringstream known;
         for (const std::string& name : CLUSTERERS().names()) {

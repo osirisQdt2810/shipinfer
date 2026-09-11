@@ -1,5 +1,7 @@
 #include "shipinfer/pipeline/mtmc/gate.h"
 
+#include <set>
+
 namespace shipinfer::mtmc {
 
     ObservationGate::ObservationGate(Options options) : options_(options) {
@@ -30,6 +32,21 @@ namespace shipinfer::mtmc {
         const std::vector<ClusterObservation>& observations) {
         std::map<TrackKey, int> hits;
         std::vector<ClusterObservation> admitted;
+        // ONE ROW PER KEY, refused rather than deduplicated. Both copies would have advanced
+        // the same run once (correct) and then both been admitted, and the caller zips
+        // `admitted` against the clusterer's labels -- so one track would occupy two rows of
+        // the matrix and the identity map would see it contest itself. The barrier upstream
+        // cannot produce this; a single-camera tracker emitting one track twice in a frame
+        // can, and that is a tracking fault to name rather than to average over.
+        std::set<TrackKey> seen_here;
+        for (const ClusterObservation& observation : observations) {
+            if (!seen_here.insert(observation.key).second) {
+                throw InferenceError(observation.key.str() +
+                                     " appears twice in one instant; a cross-camera instant "
+                                     "holds one row per (camera, track), and two rows for one "
+                                     "track would have it contest itself");
+            }
+        }
         for (const ClusterObservation& observation : observations) {
             // A ZERO FRAME HEIGHT admits nothing rather than dividing by it: a frame whose
             // extent nobody filled in is a wiring fault, and letting every track through it
