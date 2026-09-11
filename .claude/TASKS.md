@@ -2792,6 +2792,22 @@ hook down, for when the operator asked to see something before it is executed.
       takes the noun and the lane -- is cheaper than a third copy, and until then the two can
       drift independently, which is the real cost. Whoever adds the third writes the template.
 
+- [ ] MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK · #222 converged the two planes onto the
+      CAPTURE (wall) stamp, because keying instants on different clocks is two sets of global
+      ids for one clip and the sync rule makes that a defect. The risk the old comment argued
+      is real and now has nowhere to hide: NTP can step the wall clock, including backwards,
+      and a stepped frame lands in the WRONG instant rather than merely late. The steady stamp
+      cannot replace it -- it is per process, so a fleet's shards could never share an instant
+      -- so the answer is a clock that is both shared and monotonic.
+      WHAT TO MEASURE FIRST: how far this box's `CLOCK_REALTIME` actually steps under `chrony`
+      (`chronyc tracking` reports the last correction), because a 60 ms window tolerates a
+      slew and not a step. THE SHAPES: (a) refuse a frame whose capture stamp goes backwards
+      past the window and count it, which turns a step into a visible eviction rather than a
+      silent mis-bucket; (b) key on the stamp a shard's ingest writes ONCE per frame and pass
+      it through the RPC, so the group shares one process's monotonic clock; (c) accept the
+      step and rely on the barrier's `late` counter to make it visible -- which is what today
+      does, unlabelled.
+
 - [ ] CSRC-MTMC-GATE-OPTIONS · THE GATE'S THRESHOLDS ARE NOT SETTABLE FROM THE CHAIN, and
       MEASURED 11 Sep that is what makes the chain issue zero global ids: at 12 cameras x 20 fps
       with zero frames dropped and the barrier closing instants on evidence
