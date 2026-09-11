@@ -478,6 +478,20 @@ class TestTheBucketsAreBounded:
         held.drop_camera("cam-19")
         assert held.max_instants == 19
 
+    def test_a_roster_smaller_than_the_traffic_does_not_shrink_the_bound(self) -> None:
+        """The shipped case, and why the bound is not the live set: `ship_person_cpu.yaml`
+        declares four cameras and every bench fleet is fifty. The live set answers who must
+        report for an instant to be *complete*; the bound answers how many can be open."""
+        held = barrier(workers=1)
+        for index in range(4):
+            held.camera_added(f"declared-{index}")
+        for index in range(20):
+            held.submit(f"cam-{index}", float(index) * WIDE_S, "p", associate=flat)
+
+        assert len(held.live) == 4
+        assert held.max_instants == 24
+        assert DROPPED_EVICTED not in held.instant_stats()
+
     def test_a_fleet_larger_than_the_floor_evicts_nothing_it_is_still_filling(self) -> None:
         held = barrier(workers=1)
         held.camera_added("cam-absent")

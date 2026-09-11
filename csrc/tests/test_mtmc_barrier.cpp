@@ -423,6 +423,27 @@ namespace {
         check(barrier.max_instants() == 19, "it follows the fleet down as well as up");
     }
 
+    void a_roster_smaller_than_the_traffic_does_not_shrink_the_bound() {
+        // THE SHIPPED CASE, and the reason the bound is not `live_`: `ship_person_cpu.yaml`
+        // declares four cameras and every bench fleet is fifty. The live set answers who must
+        // report for an instant to be COMPLETE, which is that roster's business; the bound
+        // answers how many instants can legitimately be open, which is the traffic's.
+        Clock clock;
+        InstantBarrier barrier(unbounded(0.06, 1), nullptr, clock.fn());
+        for (int camera = 0; camera < 4; ++camera) {
+            barrier.camera_added("declared" + std::to_string(camera));
+        }
+        for (int camera = 0; camera < 20; ++camera) {
+            barrier.submit("cam" + std::to_string(camera), 100.0 + camera, payload_of("x"),
+                           kJoin);
+        }
+
+        check(barrier.live().size() == 4, "the live set is still the roster");
+        check(barrier.max_instants() == 24, "and the bound is every camera either set holds");
+        check(barrier.instant_stats().count(mtmc::kDroppedEvicted) == 0,
+              "so a stale roster cannot bring eviction back");
+    }
+
     void a_fleet_larger_than_the_floor_evicts_nothing_it_is_still_filling() {
         // THE FAILURE THIS FIXES, in miniature: twelve cameras, each with a frame in flight
         // and none of them complete, is twelve instants the group is still filling. Under a
@@ -1018,6 +1039,7 @@ int main() {
     an_evicted_instant_releases_the_frames_waiting_on_it();
     an_unnamed_bound_follows_the_fleet();
     a_fleet_larger_than_the_floor_evicts_nothing_it_is_still_filling();
+    a_roster_smaller_than_the_traffic_does_not_shrink_the_bound();
     a_bound_the_chain_names_is_exact();
     at_most_workers_minus_one_ever_wait();
     a_starved_frame_still_contributes_its_payload_to_the_instant();

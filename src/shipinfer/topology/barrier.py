@@ -156,10 +156,10 @@ BACKWARD_REFUSALS_BEFORE_ADOPTING = 1
 #: instant just closed. Measured, one 15 fps camera among eight at 20 fps: 80% coverage. A
 #: group is one frame rate.
 DEFAULT_SYNC_WINDOW_MS = 60.0
-#: The **floor** on how many instants may be open before the oldest is evicted; an unset
-#: ``max_instants`` follows the fleet — ``max(DEFAULT_MAX_INSTANTS, live cameras)``. Every
-#: camera holds one instant open and seals more as it advances, so a constant below the
-#: fleet's size evicts buckets the group is still filling. Measured: `benchmarks/RESULTS.md`.
+#: The **floor** on how many instants may be open before the oldest is evicted. Unset,
+#: ``max_instants`` is ``max(this, cameras seen or announced)``: every camera holds one
+#: instant open and seals more as it advances, so a constant below the fleet's size
+#: evicts buckets the group is still filling. Measured: `benchmarks/RESULTS.md`.
 DEFAULT_MAX_INSTANTS = 8
 
 
@@ -771,7 +771,10 @@ class InstantBarrier:
         self._live_set = frozenset(self._announced if self._hooked else self._seen)
         if self._configured_max_instants is not None:
             return
-        self._max_instants = max(DEFAULT_MAX_INSTANTS, len(self._live_set))
+        # Seen *union* announced, not the live set: the live set answers who must report for
+        # an instant to be complete, which is a roster decision; the bound answers how many
+        # instants can legitimately be open, which is a fact about traffic.
+        self._max_instants = max(DEFAULT_MAX_INSTANTS, len(self._announced | self._seen))
         self._recent_limit = max(8, self._max_instants * 4)
 
     def _match(self, capture_s: float) -> _Bucket | None:

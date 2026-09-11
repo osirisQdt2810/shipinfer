@@ -120,10 +120,11 @@ namespace shipinfer::mtmc {
     //: plus whatever it has SEALED by moving on and the window has not yet retired. So the
     //: number legitimately open scales with the FLEET, and a bound below that evicts buckets
     //: the group is still filling rather than the stale clock eviction exists for. Hence the
-    //: floor and the live set, unless the chain names a number. MEASURED 11 Sep at the design
-    //: load (50 cameras x 20 fps, `benchmarks/RESULTS.md`): at 8 the run evicted 20-28% of its
-    //: instants and admitted 97-545 observations; from 16 up it evicts NOTHING and admits
-    //: ~2 200. The live set is 50 there, which is three times the knee.
+    //: floor and the cameras this barrier has seen or been told about, unless the chain names
+    //: a number. MEASURED 11 Sep at the design load (50 cameras x 20 fps,
+    //: `benchmarks/RESULTS.md`): at 8 the run evicted 20-28% of its instants and admitted
+    //: 97-545 observations; from 16 up it evicts NOTHING and admits ~2 200. The fleet is 50
+    //: there, three times the knee.
     inline constexpr int kDefaultMaxInstants = 8;
 
     // One camera's contribution to an instant: who, and whatever the caller put in.

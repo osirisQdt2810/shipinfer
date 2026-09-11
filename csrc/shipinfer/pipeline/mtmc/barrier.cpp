@@ -143,8 +143,16 @@ namespace shipinfer::mtmc {
         // THE BOUND FOLLOWS THE FLEET unless the chain named one: every camera keeps one
         // instant open and seals more as it advances, so a bound below the fleet's size
         // evicts buckets the group is still filling rather than a clock that is wrong.
+        //
+        // SEEN *UNION* ANNOUNCED, and NOT `live_`: the live set answers who must report for an
+        // instant to be complete, which is a roster decision; the bound answers how many
+        // instants can legitimately be open, which is a fact about traffic. A shard whose
+        // roster names four cameras and whose fleet sends fifty has fifty cameras opening
+        // instants, and a bound of eight would evict on every one of them.
         if (configured_max_instants_) return;
-        max_instants_ = std::max<int>(kDefaultMaxInstants, static_cast<int>(live_.size()));
+        std::set<std::string> fleet = announced_;
+        fleet.insert(seen_.begin(), seen_.end());
+        max_instants_ = std::max<int>(kDefaultMaxInstants, static_cast<int>(fleet.size()));
         recent_limit_ = static_cast<size_t>(std::max(8, max_instants_ * 4));
     }
 
