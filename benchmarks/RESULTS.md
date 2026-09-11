@@ -333,6 +333,73 @@ a per-camera sequencer in front of the tracker — and it trades load balance fo
 is the trade this project exists to get right. Priced and open as
 `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY`.
 
+## Where the time actually goes (the first profile of the C++ chain)
+
+V168 makes optimisation a loop -- benchmark, then **profile** -- and the profiler could not
+reach the benchmarked route: `deploy/rootless/profile.sh --cpp` named
+`csrc/build/shipinfer_pipeline`, which `scripts/build_csrc.py` has never produced, and it had no
+way to start the RTSP servers the mandated route needs in the same container. Both fixed; this
+is what the first run says. Nsight Systems, `--trace=cuda,nvtx,osrt`, the pan fixture, 12
+cameras x 20 fps x 20 s, four A5000s -- the design rate, not saturation.
+
+**The host is the wall, and the GPUs are a quarter busy.** 121.6 s of process CPU for 26.7 s of
+wall is **4.55 cores** at ~240 img/s (3.7 excluding the profiler's own 18.6 s + 4.2 s). Per
+thread group: the model instance threads 58.9 s (48%), the 24 pipeline workers 19.8 s (16%),
+the twelve camera threads 3.4 s, the RTSP servers 6.1 s (a cost no deployment pays). Extrapolate
+the 3.7 cores linearly and **3 000 img/s needs ~46 of this box's 48 cores** -- the host runs out
+first, with the four devices at 25% average kernel occupancy.
+
+| CUDA API | share of API time | calls | avg |
+|---|---|---|---|
+| `cudaStreamSynchronize` | **32.2%** (9.64 s) | 5 564 | 1.73 ms |
+| kernel launches (`cuLaunchKernelEx` + `cudaLaunchKernel` + `cuLaunchKernel`) | 36% (10.8 s) | **1 026 905** | ~10 us |
+| `cudaMemcpyAsync` | 4.5% (1.36 s) | 53 686 | 25 us |
+
+A million kernel launches in twenty seconds is ~4 300 per frame, which is what four TensorRT
+engines cost per image; the launches are the floor, the **syncs are not**. Every
+`TrtEngine::execute` ends in a blocking `cudaStreamSynchronize`, so the instance thread stops
+dead for 1.7 ms per batch instead of handing the batch to a completion queue and taking the next.
+
+### Answering V168's two questions
+
+**No, the RAM -> VRAM -> RAM -> VRAM round trip is gone.** Host-to-device for the whole run was
+**14.7 MB in 6 copies** -- context setup, nothing per frame. The pixels are decoded by NVDEC into
+VRAM, copied device-to-device once into a buffer the pipeline owns (`surface_intake.h` argues
+that copy), letterboxed by a kernel, cropped by a kernel, and handed to TensorRT bindings that
+already live on the device.
+
+**But the reverse leg is enormous, and that is the finding:**
+
+| direction | volume | copies | GPU memcpy time |
+|---|---|---|---|
+| Device-to-Host | **39.6 GiB** | 7 086 | **2.07 s (73.7%)** |
+| Device-to-Device | 192 GiB | 46 115 | 0.73 s (26.1%) |
+| Host-to-Device | 14.7 MB | 6 | 3.7 ms |
+
+`TrtEngine::execute` copies **every** output to host memory whether a host consumer reads it or
+not, and one of them is the segmenter's `(32, 160, 160)` prototype bank -- **3.1 MB per crop**,
+copied down so that a host loop can reduce it to **one float**: the mask's area. Measured on this
+box at the shipped shapes, that fold costs **1.44 ms of CPU per crop** (one core sustains 693),
+and it is the single largest host item after the engines themselves.
+
+### Which steps run on the CPU
+
+| stage | device | host work |
+|---|---|---|
+| decode | **GPU** (NVDEC) | one driver thread per camera (3.4 s / 12 cameras) |
+| letterbox | **GPU** kernel | a blocking stream sync per frame |
+| detect | **GPU** | 300x6 output copied down, decoded on the host (cheap) |
+| crop | **GPU** kernel | the box list is built on the host and uploaded |
+| segment | **GPU** | **the whole prototype bank copied down; the mask fold is a host loop** |
+| embed x2 | **GPU** | 512 floats per crop copied down (cheap) |
+| track | **host** | bytetrack, per camera, in the `shipvision` lane |
+| mtmc | **host** | gate, gram, agglomerative clustering, identity assignment |
+| reassembly, records, JSON | **host** | one event per frame |
+
+Four items came out of this profile and are filed with their numbers:
+`MASK-FOLD-BELONGS-ON-THE-DEVICE`, `ENGINE-COPIES-EVERY-OUTPUT-HOME`,
+`EXECUTE-BLOCKS-THE-INSTANCE-THREAD` and `THE-BUILD-NEVER-VECTORISES`.
+
 ## The verdict, and the one open question
 
 The ≥5× target needs a ratio to be against, and the four above give opposite answers. Absent

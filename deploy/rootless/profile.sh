@@ -21,6 +21,8 @@
 #
 #   deploy/rootless/profile.sh --systems shipinfer --cameras 50 --fps 20 --seconds 30
 #   deploy/rootless/profile.sh --cpp -- --cameras 50 --fps 20 --seconds 30   # the C++ plane
+#   SHIPINFER_CPP_COMMAND='bash /work/scripts/cpp_bench_over_rtsp.sh' \
+#     deploy/rootless/profile.sh --cpp -- --plan /work/.artifacts/cpp/run.plan …  # over RTSP
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -60,16 +62,34 @@ NSYS_ARGS=(
   --sample=none
   --cuda-memory-usage=true
   --force-overwrite=true
+  # PRIMARY ONLY. The RTSP route's wrapper `exec`s the bench and leaves its two servers
+  # running as siblings (`cpp_bench_over_rtsp.sh`: the container's exit reaps them), so the
+  # default `--wait=all` sits waiting for processes that outlive the measurement and no report
+  # is written at all -- measured 11 Sep: "One or more process it created re-parented".
+  --wait=primary
   --output "/work/.artifacts/profile/run"
 )
 
 if [ "$TARGET" = "cpp" ]; then
-  BINARY="$REPO/csrc/build/shipinfer_pipeline"
+  # `cpp.sh`'s contract, spelled the same way on purpose: V168 makes optimisation a loop --
+  # benchmark, then profile -- and a profiler that cannot launch what the benchmark launches
+  # breaks the loop at the join. It named `shipinfer_pipeline`, which `scripts/build_csrc.py`
+  # has never produced (the binaries are `csrc/shipinfer/cli/*.cpp`), so `--cpp` could not run
+  # at all; and the mandated route needs `SHIPINFER_CPP_COMMAND`, because the RTSP servers
+  # start in the SAME container as the bench (see `cpp_bench_over_rtsp.sh`).
+  CPP_BINARY="${SHIPINFER_CPP_BINARY:-bench}"
+  BINARY="$REPO/csrc/build/$CPP_BINARY"
   if [ ! -x "$BINARY" ]; then
     echo "no binary at $BINARY — run: python scripts/build_csrc.py" >&2
     exit 1
   fi
-  COMMAND=(/work/csrc/build/shipinfer_pipeline "$@")
+  if [ -n "${SHIPINFER_CPP_COMMAND:-}" ]; then
+    # Deliberately word-split: the value is a command line, not a path.
+    # shellcheck disable=SC2206
+    COMMAND=(${SHIPINFER_CPP_COMMAND} "$@")
+  else
+    COMMAND=("/work/csrc/build/$CPP_BINARY" "$@")
+  fi
 else
   COMMAND=(python /work/benchmarks/run_bench.py "$@")
 fi
@@ -86,6 +106,8 @@ exec docker run --rm --pid=host "${GPU_DEVICES[@]}" \
   -e PYTHONPATH=/work/src:/work \
   -e SHIPINFER_IN_CONTAINER=1 \
   -e SHIPINFER_CUDA_GRAPHS="${SHIPINFER_CUDA_GRAPHS:-off}" \
+  -e SHIPINFER_CPP_BINARY -e SHIPINFER_CUDA_BLOCKING_SYNC \
+  -e SHIPINFER_RTSP_PERSON_DATA -e SHIPINFER_RTSP_SHIP_DATA -e SHIPINFER_RTSP_PORT \
   -v "$REPO:/work" \
   -v "$TRT_DIR:/tensorrt:ro" \
   -v "$WHEELS:/wheels:ro" \
