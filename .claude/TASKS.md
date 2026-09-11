@@ -2784,6 +2784,20 @@ hook down, for when the operator asked to see something before it is executed.
       takes the noun and the lane -- is cheaper than a third copy, and until then the two can
       drift independently, which is the real cost. Whoever adds the third writes the template.
 
+- [ ] MTMC-GATE-COMMITS-BEFORE-THE-GRAM-CAN-THROW · `ShipvisionCluster::ids()` is not atomic on
+      refusal while the half it wraps promises it is: `identity.h` says "EVERY EMBEDDING IS
+      CHECKED BEFORE ANYTHING IS MUTATED, so a refusal leaves the instant unapplied and the
+      caller may retry it", but `gate_.filter()` has already done `hits_ = std::move(hits)`
+      before `gram_of` or `assign` can throw. A caller that takes the assigner at its word and
+      retries advances every track's consecutive run TWICE, so `min_hits = 3` is satisfied
+      after two real instants -- the gate loosened by one, silently. Named by #221's review as
+      a non-blocker.
+      THE FIX is two-phase: `filter` answers the admitted rows AND the hit-map delta, and the
+      caller commits it after the assign succeeds -- which also makes the gate's own contract
+      match the identity map's, so a reader of either finds the same promise. Cheap; it needs
+      one API change and a test that retries a refused instant and asserts the runs did not
+      double-advance.
+
 - [ ] MTMC-GRAM-WANTS-A-REAL-GEMM · `shipvision_cluster.cpp::gram_of` is a scalar triple loop,
       and `matchers/appearance/matcher.h` names exactly this code as the thing not to write:
       "`features @ features.T` is what BLAS is for -- multithreaded, blocked for the cache --
