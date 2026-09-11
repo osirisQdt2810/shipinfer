@@ -202,34 +202,54 @@ publishing the frame untracked.
 cores (26%), and the four models' busy percentages sum to ~430% of the 800% that eight instances
 per device could use. What binds is the barrier's latency trade and the ordering above.
 
-**AND THE CHAIN ISSUES NO GLOBAL IDS AT THESE DEFAULTS, which the throughput table cannot
-show.** The counters the stage added say why: at 12 cameras × 20 fps — 20 fps per camera, zero
-frames dropped, instants closing on evidence — the barrier is healthy and the gate admits
-**nothing**:
+**AND THE CHAIN ISSUES NO GLOBAL IDS AT THE REFERENCE'S DEFAULTS, which the throughput table
+cannot show.** Now that a chain can state the gate (#225), its two halves can be separated —
+and the first reading of these counters, which blamed the footage, was wrong. Nine arms, one
+variable each: 12 cameras × 20 fps × 40 s, GPUs 0/2/5/6, 24 workers (the regime where the
+per-camera tracker refuses almost nothing — 13 to 72 late frames of ~9 540 — so the gate is the
+only thing under test), `--source nvdec` over gstreamer RTSP from the offline H.264.
 
-```
-mtmc_instants mtmc complete 282   advanced 184   window 522
-mtmc_observations mtmc offered 3768   admitted 0
-mtmc_identities mtmc 0 0
-```
+| min_hits | min_height_fraction | window | roster | offered | admitted | ids / tracks | instants `complete` |
+|---|---|---|---|---|---|---|---|
+| **3** (default) | **1/9** (default) | 60 | 4 declared | 3 868 | **0** | 0 / 0 | 0 of 890 |
+| 2 | 1/9 | 60 | 4 declared | 3 739 | 969 (25.9%) | 10 / 23 | 0 of 910 |
+| 1 | 1/9 | 60 | 4 declared | 3 680 | **3 680 (100%)** | 17 / 52 | 0 of 894 |
+| 3 | 0.02 | 60 | 4 declared | 3 507 | **0** | 0 / 0 | 0 of 909 |
+| 1 | 0.02 | 60 | 4 declared | 3 317 | 3 317 (100%) | 21 / 60 | 0 of 869 |
+| 3 | 1/9 | **200** | 4 declared | 3 419 | **0** | 0 / 0 | 0 of 918 |
+| 3 | 1/9 | 60 | **the run's 12** | 3 480 | **0** | 0 / 0 | **421** of 905 |
+| 2 | 1/9 | 60 | the run's 12 | 3 330 | 847 (25.4%) | 6 / 20 | 487 of 881 |
+| 3 | 1/9 | 200 | the run's 12 | 4 211 | **0** | 0 / 0 | 449 of 850 |
 
-It is not the window (200 ms instead of 60 moves the closes from `window` to `advanced` and
-still admits 0) and it is not the barrier. It is `ObservationGate`'s production defaults against
-this footage: `min_height_fraction = 1/9` is 120 px of a 1080-tall frame, which is
-["roughly the smallest crop its re-ID model was trained to handle"](../3rdparty/shipvision/shipvision/mtmc/gating.py)
-— and the benchmark's 2K crowd frames have people smaller than that. With the floor and
-`min_hits` lowered, the same run issues identities:
+**The height floor excludes nothing.** At `min_hits 1` the admitted count equals the offered
+count *exactly* — 3 680 of 3 680, and 3 317 of 3 317 — so every box the tracker produced already
+clears 120 px of a 1080-tall frame at the reference's own `1/9`, which is
+["roughly the smallest crop its re-ID model was trained to handle"](../3rdparty/shipvision/shipvision/mtmc/gating.py).
+Lowering **only** the floor admits nothing. The earlier diagnosis lowered both thresholds in one
+step and concluded the footage was too small; it is not, and
+`BENCH-FOOTAGE-IS-BELOW-THE-MTMC-GATE` is closed as refuted rather than fixed.
 
-```
-mtmc_observations mtmc offered 4046   admitted 4046
-mtmc_identities mtmc 20 52            # 20 global ids across 52 tracks
-```
+**What closes the gate is the AGE test.** `min_hits` counts *consecutive* qualifying instants and
+the hit map is replaced each instant, so a track absent from one instant starts over: 3 admits
+nothing, 2 admits a quarter, 1 admits everything. It is not the window — 200 ms moves the closes
+from `window` to `advanced` and still admits 0 — and it is not the roster.
 
-So the chain is proven end to end **and** the measurement is honest about what it did not
-exercise: the association ran on 4 046 observations, and at the reference's defaults this
-footage offers none. Two consequences, both filed: the gate's thresholds are not settable from
-the chain (`CSRC-MTMC-GATE-OPTIONS`), and a benchmark that means to exercise mtmc needs footage
-whose subjects clear the floor (`BENCH-FOOTAGE-IS-BELOW-THE-MTMC-GATE`).
+**The roster is wrong too, and separately.** `topology/ship_person_cpu.yaml` declares
+`cameras: [cam-01 … cam-04]` while the bench fleet is `cam00 … cam11`, so the barrier waited for
+four cameras that never connect: **not one instant closed `complete`** until the roster named the
+run's own cameras, and then 421 of 905 did. It moves the gate's arithmetic not at all (25.4%
+against 25.9% at `min_hits 2`), which is why it is a separate defect and not this one's cause.
+
+**And the gate sees a third of a frame's rows.** 3 480 observations from 9 538 frames is 0.36 per
+frame, while the two embedders processed 77 777 person crops and 13 124 ship crops — about 9.5
+embedded rows per frame. An observation needs a track id **and** an embedding
+(`graph/stages.cpp`); the track batch is where the rest go, and there is no counter for tracked
+*rows* — only `track_frames_untracked`, which counts frames.
+
+So the chain is proven end to end, the association runs on real observations when the gate lets
+it, and each of the three findings above is filed with its numbers rather than paraphrased:
+`MTMC-MIN-HITS-CANNOT-BE-MET-BY-A-FREE-RUNNING-FLEET`, `MTMC-ROSTER-NAMES-NO-CAMERA-A-RUN-HAS`
+and `MTMC-OFFERS-A-THIRD-OF-A-FRAMES-ROWS`.
 
 The fix for the *throughput* half is placement **affinity**, not more threads — a camera's frames reaching one worker, or
 a per-camera sequencer in front of the tracker — and it trades load balance for ordering, which

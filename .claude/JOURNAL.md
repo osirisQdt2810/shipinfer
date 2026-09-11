@@ -1,5 +1,30 @@
 # Journal
 
+## 2026-09-11 — the gate that closed, and the diagnosis that was wrong
+
+**The chain can set the mtmc gate now (#225), and the first thing it bought was a retraction.**
+Two days ago the C++ chain ran end to end and issued zero global ids; the counters said
+`offered 3768 admitted 0`, an experiment that lowered `min_hits` AND `min_height_fraction`
+together made identities appear, and the page concluded the benchmark footage was below the
+reference's 120 px floor. With the two knobs separable, nine arms say that is false: at
+`min_hits 1` the gate admits EXACTLY what it is offered -- 3 680 of 3 680 -- with the height
+floor at the reference's own 1/9, so every box always cleared it. Lowering only the floor
+admits 0. **The age test is what closes:** 3 admits nothing, 2 admits a quarter, 1 admits
+everything, and neither a 200 ms window nor a corrected roster moves it.
+
+The lesson is the shape of the first experiment, not the conclusion it reached: **two
+thresholds lowered in one step cannot say which one was binding**, and the write-up named the
+one that fit the story I already had (the footage is a crowd shot; the floor is about crop
+size). The knob existed only because the item was filed to build it -- which is the argument
+for filing the thing that would let you check, rather than the explanation.
+
+**Two more defects fell out of the same runs.** The production chain's mtmc roster is
+`cam-01 … cam-04` and every bench fleet is `cam00 … cam11`, so no instant had EVER closed
+`complete` in any of these measurements -- 421 of 905 do once the roster names the run's own
+cameras. And the gate sees 0.36 observations per frame while the embedders process ~9.5 rows
+per frame: the rows go missing at the track batch, where the only counter is one for frames
+with no ids at all. Both filed with their numbers.
+
 ## 2026-09-09 (late night) — four merged, and half an hour when nothing could merge
 
 **#192 landed on round 8, after seven rounds each finding a real `main=DENY → HEAD=ALLOW`
