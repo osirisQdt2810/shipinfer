@@ -162,6 +162,34 @@ namespace {
               "and the reason is the instant's shape, not the track's size");
     }
 
+    // doc: long why a retried instant counting twice is pinned rather than fixed here
+    void a_re_submitted_instant_advances_the_run_again_as_the_reference_does() {
+        // `filter` commits its hit map before the caller has applied the instant, so an
+        // instant submitted twice advances every run twice and `min_hits` is satisfied one
+        // real instant early. That is worth a test because it is EASY to read as a port
+        // defect and it is not: the reference does the same, measured 11 Sep --
+        //
+        //   instant 1            hits=1 admitted=0
+        //   instant 2            hits=2 admitted=0
+        //   RETRY of instant 2   hits=3 admitted=1
+        //
+        // -- from `shipvision/mtmc/gating.py`, whose `filter` assigns `self._hits = hits`
+        // before `tracker.track()` runs the gram, the clusterer and the assigner, any of
+        // which can raise. Making this half atomic alone would diverge the two planes, so the
+        // fix is upstream and this pins the shared behaviour until then
+        // (`MTMC-GATE-COMMITS-BEFORE-THE-GRAM-CAN-THROW`). Nothing retries today: the stage
+        // catches the refusal and publishes the frame unidentified.
+        ObservationGate gate(options(3));
+        const std::vector<ClusterObservation> instant = {seen("cam0", 1, 200)};
+
+        gate.filter(instant);
+        gate.filter(instant);
+
+        check(gate.filter(instant).size() == 1,
+              "the third submission admits, whether or not the second was applied");
+        check(gate.hits(TrackKey{"cam0", 1}) == 3, "and the run counts every submission");
+    }
+
     void reset_forgets_every_run() {
         ObservationGate gate(options(3));
         gate.filter({seen("cam0", 1, 200)});
@@ -184,6 +212,7 @@ int main() {
     a_frame_with_no_extent_admits_nothing_rather_than_dividing_by_zero();
     the_admitted_keep_their_input_order();
     one_track_twice_in_one_instant_is_refused();
+    a_re_submitted_instant_advances_the_run_again_as_the_reference_does();
     reset_forgets_every_run();
     std::printf("%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;
