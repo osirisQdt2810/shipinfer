@@ -3225,7 +3225,7 @@ hook down, for when the operator asked to see something before it is executed.
       job (CLAUDE.md's known permanent exception), which is why it is not folded into a normal
       PR.
 
-- [ ] WHOSE-LIBCUDART-DOES-THE-PYTHON-FLAG-SET · MEASURE whether this plane's blocking-sync
+- [x] WHOSE-LIBCUDART-DOES-THE-PYTHON-FLAG-SET · MEASURED 11 Sep: ONE RUNTIME, and the flag is read back. Whether this plane's blocking-sync
       flag reaches torch's streams at all. #214's review predicted that a second
       `DeviceManager` in one process gets `cudaErrorSetOnActiveProcess` on every device, and
       it did NOT: on GPU 2, default path, `validate_on_start=True` so the first manager takes
@@ -3234,7 +3234,29 @@ hook down, for when the operator asked to see something before it is executed.
       the loader's `libcudart`, torch uses its own copy under `torch/lib/` -- in which case the
       flag is being set on a runtime nothing in this plane synchronises through, and the
       Python default flipped on the C++ plane's evidence plus symmetry. The C++ measurement
-      stands (one binary, one runtime). THE TEST: an interleaved pair on the Python plane at a
+      stands (one binary, one runtime).
+      MEASURED IN THE BENCH IMAGE (`shipinfer-gst:jammy-nvdec`, GPU 2, container), and the
+      two-runtime hypothesis is FALSE where every measurement is taken: after `import torch`,
+      `/proc/self/maps` holds exactly one libcudart --
+      `/opt/conda/lib/python3.11/site-packages/nvidia/cuda_runtime/lib/libcudart.so.12` -- and
+      `ctypes.CDLL("libcudart.so.12")` adds nothing new, because the loader hands back the
+      mapping torch already had. So `prefer_blocking_sync` sets the flag on the runtime torch
+      synchronises through.
+      AND THE DEVICE REPORTS IT BACK. `cudaGetDeviceFlags` answers 0 before, 0x04 after the set,
+      and STILL 0x04 once `torch.zeros(1, device="cuda:0")` has created the primary context --
+      so torch's context carries the flag rather than replacing it.
+      WHAT THE SAME PROBE REFUTES is #214's review's other prediction: `cudaSetDeviceFlags` is
+      NOT refused after a context on this runtime. Setting the same value again returns 0, and
+      so does setting the OPPOSITE (0x01, spin) -- after which `cudaGetDeviceFlags` reports 1.
+      That is why a second `DeviceManager` "took" the flag on both rungs: the call always
+      succeeds here, so `took` means "the call returned 0", not "a live context changed".
+      CONSEQUENCE worth knowing rather than changing: `harness/shipinfer.py`'s
+      `_announce_blocking_sync` refuses an arm where no visible device took the flag, and on
+      this runtime that condition cannot arise -- the guard is for a driver that does refuse.
+      WHAT REMAINS UNPROVEN is whether a flag set after a context changes that context's
+      SYNCHRONISE behaviour; `cudaGetDeviceFlags` reporting it is not that. The discriminator is
+      still an A/B at load, which is what #214 carries on this plane.
+      ORIGINAL TEST: an interleaved pair on the Python plane at a
       fixed load with the knob on and off, host CPU per thread group as the discriminator --
       `scripts/host_cpu.py` already reports it. If the flag does nothing here, either load
       libcudart the way torch does (`torch/lib/libcudart.so.12`) or read the flag through
