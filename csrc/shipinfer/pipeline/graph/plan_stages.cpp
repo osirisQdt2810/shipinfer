@@ -1,5 +1,6 @@
 #include "shipinfer/pipeline/graph/plan_stages.h"
 
+#include "shipinfer/pipeline/mtmc/cluster.h"
 #include "shipinfer/pipeline/tracking/associator.h"
 
 namespace shipinfer {
@@ -15,7 +16,7 @@ namespace shipinfer {
         // A stage this plane implements IN TREE rather than through an engine, so `runnable`
         // below cannot ask it for a loaded model -- a tracker has none.
         bool in_tree(const std::string& kind) {
-            return kind == "track";
+            return kind == "track" || kind == "mtmc";
         }
 
         bool runnable(const PlanNode& node, const std::set<std::string>& loaded) {
@@ -26,6 +27,7 @@ namespace shipinfer {
             // the Dag asked for it. Asking the registry makes a lane-less build report
             // `track` in `unsupported` instead, which is what it did before there was a
             // tracker at all and is the only coherent answer.
+            if (node.kind == "mtmc") return mtmc::CLUSTERERS().has(node.impl);
             if (in_tree(node.kind)) return tracking::ASSOCIATORS().has(node.impl);
             return !node.model.empty() && loaded.count(node.model) != 0;
         }
@@ -156,7 +158,7 @@ namespace shipinfer {
     }
 
     bool plane_runs(const std::string& kind) {
-        return kind == "detect" || crops(kind) || kind == "track";
+        return kind == "detect" || crops(kind) || in_tree(kind);
     }
 
     bool plane_runs_a_model(const std::string& kind) {
@@ -175,10 +177,29 @@ namespace shipinfer {
         PlanStages built;
         const PlanNode* detect = nullptr;
         std::vector<const PlanNode*> trackers;
+        std::vector<const PlanNode*> groups;
         std::vector<const PlanNode*> croppers;
         for (const PlanNode& node : plan.nodes) {
             if (!runnable(node, loaded)) {
                 built.unsupported.push_back(node.slot);
+            } else if (node.kind == "mtmc") {
+                // REFUSED, not last-wins and not several -- and the REASON is narrower than
+                // it was. The chain DOES state membership (`group:` and `cameras:`, which the
+                // plan now carries), so what is missing is the ROUTING: this plane's stage
+                // hands its camera's rows to the one barrier it was built with, and nothing
+                // decides which of two barriers a frame belongs to. Until a stage picks its
+                // group by roster, two slots would both be handed every camera this shard
+                // sees and would issue two contradictory sets of global ids for the same
+                // objects -- worse than refusing to start (`CSRC-MTMC-TWO-GROUPS-PER-SHARD`).
+                if (!groups.empty()) {
+                    throw ConfigError(
+                        "plan '" + plan.name + "' has two runnable mtmc slots ('" +
+                        groups.front()->slot + "' and '" + node.slot +
+                        "'); the chain states each group's roster but this plane does not yet "
+                        "route a camera to its group, so both slots would take every camera "
+                        "this shard sees and issue contradictory global ids");
+                }
+                groups.push_back(&node);
             } else if (node.kind == "track") {
                 // NOT refused for being a second one. Two trackers over one camera's rows is
                 // refused at LOAD by `chain.py::_check_one_filler_per_row` when their
@@ -257,6 +278,39 @@ namespace shipinfer {
             // declared empty selection is no rows, and a named one is that class's id.
             spec.class_id = class_of(plan, *node);
             built.tracks.push_back(std::move(spec));
+            built.stage_names.push_back(node->slot);
+        }
+        // AFTER the trackers, because cross-camera identity consumes their ids -- the chain
+        // says so too (`after: [track]`) -- and after the embedders because it is decided on
+        // appearance. `stage_names` is the order the Dag runs them in.
+        for (const PlanNode* node : groups) {
+            MtmcStageSpec spec;
+            spec.slot = node->slot;
+            spec.output = output_of(node->slot);
+            spec.impl = node->impl;
+            if (built.tracks.empty()) {
+                throw ConfigError(
+                    "plan '" + plan.name + "' runs mtmc slot '" + node->slot +
+                    "' with no runnable tracker. Cross-camera identity is keyed by (camera, "
+                    "track), so without one there is nothing for an identity to hold on to "
+                    "and every row would be published unidentified");
+            }
+            // THE FIRST tracker's output. A chain with two disjoint trackers is legal, and
+            // choosing between them here would be a silent policy -- so it is the first in
+            // plan order, stated rather than derived, and `MTMC-READS-ONE-TRACKER` holds the
+            // question of what a two-tracker chain should feed a group.
+            spec.track_source = built.tracks.front().output;
+            spec.sync_window_ms = node->sync_window_ms;
+            spec.max_instants = node->max_instants;
+            // THE ROSTER, so the barrier waits for the cameras the CHAIN names rather than
+            // for every camera this shard happens to see.
+            spec.group = node->group.empty() ? node->slot : node->group;
+            spec.cameras = node->cameras;
+            for (const ObjectStageSpec& object : built.objects) {
+                if (object.fold) continue;  // a segmenter's fold is an area, not an embedding
+                spec.embedding_sources.push_back(object.output);
+            }
+            built.mtmcs.push_back(std::move(spec));
             built.stage_names.push_back(node->slot);
         }
         // An `ObjectBatch` is keyed by a stage's OUTPUT name and not its own (`stages.cpp`:

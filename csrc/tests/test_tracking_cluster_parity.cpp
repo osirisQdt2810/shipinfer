@@ -181,10 +181,13 @@ namespace {
         for (int instant = 0; instant < 3; ++instant) {
             const bool last = instant == 2;
             try {
-                second->ids({looks("cam0", 1, {1.0f, 0.0f}),
+                // THE LONG VECTOR FIRST, so `dim` is 3 and the SHORT one is the row the
+                // normalisation loop indexes -- the direction the comment above prices, and
+                // the one the first draft of this test did not cover (#221 round 3).
+                second->ids({looks("cam0", 1, {1.0f, 0.0f, 0.0f}),
                              looks("cam1", 1,
-                                   last ? std::vector<float>{1.0f, 0.0f, 0.0f}
-                                        : std::vector<float>{1.0f, 0.0f})});
+                                   last ? std::vector<float>{1.0f, 0.0f}
+                                        : std::vector<float>{1.0f, 0.0f, 0.0f})});
             } catch (const InferenceError& error) {
                 width_message = error.what();
             }
@@ -195,8 +198,8 @@ namespace {
                   (zero_message.empty() ? "(nothing thrown)" : zero_message));
         check(zero_message.find("cam1#1") != std::string::npos,
               "and the refusal names the track rather than the condition");
-        check(width_message.find("3 dimensions") != std::string::npos ||
-                  width_message.find("and 3") != std::string::npos,
+        check(width_message.find("2 dimensions") != std::string::npos ||
+                  width_message.find("and 2") != std::string::npos,
               "a second embedding width is refused, got: " +
                   (width_message.empty() ? "(nothing thrown)" : width_message));
         check(width_message.find("one embedder") != std::string::npos,

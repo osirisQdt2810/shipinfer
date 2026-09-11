@@ -15,11 +15,14 @@
 // below. Offline: g++ alone, no CUDA, no GStreamer.
 
 #include <cstdio>
+#include <memory>
 #include <set>
 #include <string>
 
 #include "shipinfer/core/types.h"
 #include "shipinfer/pipeline/graph/plan_stages.h"
+#include "shipinfer/pipeline/mtmc/cluster.h"
+#include "shipinfer/pipeline/tracking/associator.h"
 
 namespace {
 
@@ -295,10 +298,82 @@ namespace {
         check(built.crops.size() == 2, "one crop set per slot");
     }
 
+    // ------------------------------------------------------------------- the cross-camera slot
+
+    // REGISTERED HERE, and that is the point: `runnable()` asks the two registries whether an
+    // impl exists, and BOTH real impls are lane units -- so a lane-less `--offline` build
+    // (which is exactly what `cpp.yml`'s offline job runs) has neither, and a test naming
+    // `shipvision` asserts on a slot the plan correctly calls unsupported. These two registrars
+    // make the tests below about the PLAN rather than about which lanes the build happened to
+    // include.
+    const tracking::AssociatorRegistrar kPlanTrack("plan-test", [] {
+        return std::shared_ptr<tracking::Associator>{};
+    });
+    const mtmc::ClusterRegistrar kPlanMtmc("plan-test", [] {
+        return std::shared_ptr<mtmc::ClusterTracker>{};
+    });
+
+    const std::string kTrack = "node track track plan-test\nper camera\n";
+
+    void an_mtmc_slot_reads_the_chains_barrier_knobs() {
+        // The reason they are on the plan at all: `ship_person_cpu.yaml` has stated
+        // `sync_window_ms: 60` all along and this plane ran its own default, so the two
+        // bucketed instants differently for one chain file -- and the window is what the
+        // whole chain's throughput turns on.
+        const PlanStages built =
+            plan_stages(plan_of(kDetect + kTrack +
+                                "node mtmc mtmc plan-test\nscope global\nsync_window_ms 25\n"
+                                "max_instants 4\n"),
+                        kLoaded);
+
+        check(built.mtmcs.size() == 1, "one cross-camera slot");
+        if (built.mtmcs.empty()) return;
+        check(built.mtmcs[0].sync_window_ms && *built.mtmcs[0].sync_window_ms == 25.0,
+              "the window the chain stated, in milliseconds");
+        check(built.mtmcs[0].max_instants && *built.mtmcs[0].max_instants == 4,
+              "and the instant bound");
+        check(built.mtmcs[0].track_source == built.tracks.front().output,
+              "fed by the tracker's OUTPUT name, which is where the ids are");
+    }
+
+    void an_unstated_window_stays_absent_rather_than_becoming_a_number_here() {
+        // Absent means "the barrier's own default", and that decision belongs to the barrier
+        // -- a number invented here would be a fifth place the default lives.
+        const PlanStages built = plan_stages(
+            plan_of(kDetect + kTrack + "node mtmc mtmc plan-test\nscope global\n"), kLoaded);
+
+        check(built.mtmcs.size() == 1, "the slot still runs");
+        check(!built.mtmcs.empty() && !built.mtmcs[0].sync_window_ms,
+              "with no window of its own");
+    }
+
+    void two_mtmc_slots_are_refused_because_no_chain_states_their_groups() {
+        // Two slots are two camera GROUPS -- the other plane supports that and the barrier's
+        // budget is process-wide precisely so two can coexist -- but a group is a MEMBERSHIP
+        // and no chain states one, so both would be the whole fleet and would issue two
+        // contradictory sets of global ids for the same objects.
+        check(refused(kDetect + kTrack + "node mtmc mtmc plan-test\nscope global\n" +
+                      "node mtmc2 mtmc plan-test\nscope global\n"),
+              "a second runnable mtmc slot is refused rather than silently dropped");
+    }
+
+    void an_mtmc_slot_with_no_tracker_is_refused() {
+        // Cross-camera identity is keyed by (camera, track), so without a tracker there is
+        // nothing for an identity to hold on to and every row would be unidentified.
+        check(refused(kDetect + "node mtmc mtmc plan-test\nscope global\n"),
+              "an mtmc slot with no runnable tracker is refused");
+    }
+
 }  // namespace
 
 int main() {
     try {
+        // INSIDE the try, like every other case: the four cross-camera ones were added
+        // outside it, so an unexpected throw aborted instead of reporting (#222's review).
+        an_mtmc_slot_reads_the_chains_barrier_knobs();
+        an_unstated_window_stays_absent_rather_than_becoming_a_number_here();
+        two_mtmc_slots_are_refused_because_no_chain_states_their_groups();
+        an_mtmc_slot_with_no_tracker_is_refused();
         the_detect_slot_carries_the_plans_numbers();
         a_declared_empty_selection_matches_no_row();
         no_selection_at_all_matches_every_row();
@@ -312,6 +387,7 @@ int main() {
     } catch (const std::exception& error) {
         std::printf("FAIL: unexpected exception: %s\n", error.what());
         ++failures;
+        ++checks;
     }
     std::printf("%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;

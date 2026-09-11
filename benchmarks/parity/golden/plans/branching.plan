@@ -70,5 +70,6 @@ edge embed_ship track bgr@cpu
 edge track mtmc meta@cpu
 edge mtmc output meta@cpu
 field embedding embed_person embed_ship
+field global_id mtmc
 field mask_area_px segment
 field track_id track

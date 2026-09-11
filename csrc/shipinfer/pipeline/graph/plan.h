@@ -69,6 +69,19 @@ namespace shipinfer {
         std::string when;
         std::string per;
         std::string scope;
+        //: The cross-camera barrier's two knobs, carried because the chain states them: the
+        //: window is what the whole chain's throughput turns on (a worker parked in the
+        //: barrier is a worker not draining its lane), and `ship_person_cpu.yaml` has said
+        //: `sync_window_ms: 60` all along while this plane ran its own default -- so the two
+        //: bucketed instants differently for one chain file.
+        //: THE GROUP AND ITS ROSTER. A roster decides which frames form an instant, so it
+        //: has to cross: this plane accreted every camera it happened to see while the other
+        //: waited for the declared four, which is two instant memberships for one chain file
+        //: (#222's review).
+        std::string group;
+        std::vector<std::string> cameras;
+        std::optional<double> sync_window_ms;
+        std::optional<int> max_instants;
     };
 
     struct PlanEdge {

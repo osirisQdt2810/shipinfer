@@ -26,22 +26,36 @@ def test_the_readme_points_at_it() -> None:
 
 
 @pytest.mark.parametrize("name", ["plan.cpp", "from_plan.cpp"])
-def test_the_chain_measured_now_tracks_and_still_has_no_mtmc(name: str) -> None:
-    """This test used to assert the OPPOSITE and failing was its purpose.
+def test_the_chain_measured_runs_the_whole_thing(name: str) -> None:
+    """This test has now inverted TWICE, and failing was its purpose both times.
 
-    It read "track not in body and mtmc not in body" behind `RESULTS.md`'s largest negative
-    claim, and tracking landing broke it -- which is how the page got re-measured instead of
-    going quiet. What is left of the claim is `mtmc`, so that is what it asserts, plus that
-    the graph does reach a tracker by name.
+    It began as "track not in body and mtmc not in body" behind `RESULTS.md`'s largest
+    negative claim. Tracking landing broke it, so the page was re-measured; `mtmc` landing
+    broke what was left. There is no exclusion to guard any more, so what it guards instead is
+    the positive: the graph asks for both by name, and the page carries the whole-chain
+    numbers. A chain that quietly stopped building one of them would leave those numbers
+    describing something else.
     """
     body = (GRAPH / name).read_text(encoding="utf-8")
+    page = RESULTS.read_text(encoding="utf-8")
 
-    assert "mtmc" not in body, f"{name} now builds an mtmc node; RESULTS.md still excludes it"
     if name == "from_plan.cpp":
         assert "create_associator" in body, (
             "the graph no longer asks for a tracker, so the page's tracking numbers describe "
             "a chain that is not being built"
         )
+        assert "mtmc_runtime" in body or "MtmcRuntime" in body, (
+            "the graph no longer builds the mtmc stage, so the whole-chain section is "
+            "measuring a shorter chain than it says"
+        )
+    assert "tracked img/s" in page, (
+        "the page must report the TRACKED rate and not only the accepted one: an untracked "
+        "frame carries no ids and `mtmc` cannot associate it"
+    )
+    assert "track_frames_untracked" in page, (
+        "and it must name the counter that separates the two, or the next reader quotes the "
+        "accepted number as the chain's throughput -- which is what happened"
+    )
 
 
 def test_the_binary_stamps_its_own_disclaimer() -> None:
