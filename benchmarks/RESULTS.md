@@ -278,12 +278,17 @@ only thing that changed is that the camera now shows a scene instead of a slides
 the observations reach the gate, three fifths of them qualify, and 72 per-camera tracks resolve
 to a dozen global identities.
 
-**And the cost appears where the old runs could not see it.** With the gate admitting, the same
-40 s leaves **1 483 of 9 520 events incomplete** (15.6%) against **zero** on the old fixture at
-the same reassembly window — the barrier and the clusterer are doing per-instant work now, and
-the reassembly window has not been re-chosen since they started
-(`MTMC-REAL-WORK-COSTS-A-SIXTH-OF-THE-EVENTS`). The throughput table further up this page was
-measured with `mtmc` admitting nothing, so it is a floor for this chain rather than its rate.
+**And one number here was a counting artefact, corrected.** These runs reported *1 483 of 9 520
+events incomplete* (15.6%) against zero on the old fixture, and this page blamed the barrier's
+per-instant work against a reassembly window nobody had re-chosen. It was neither.
+`collector_timeouts` was 0 the whole time, and a counter for **which** stage never answered
+(`events_missing_stage`) named `crop` for every one of them: the run opened each frame expecting
+`crop` unconditionally, `Dag::runnable` requires a stage's inputs to be non-empty, and a frame
+the detector found nothing in therefore never makes `crop` runnable. With `crop` off that list
+the same rig at 30 s answers `events_complete 7 118` of 7 118 accepted frames,
+`events_incomplete 0` — **nothing was ever lost**.
+The throughput table further up this page is still a floor rather than a rate, because it was
+measured with `mtmc` admitting nothing.
 
 ### Pushed to saturation, the useful rate is not the retired rate
 
@@ -293,11 +298,16 @@ finding used, on the same pan fixture, the same four A5000s (0/2/5/6), `--source
 same chain with the roster naming the run's own twelve cameras — so the comparison row below is
 the 57.6% arm, not the 4-camera-roster one — with workers as the only variable:
 
-| workers | retired img/s | untracked | **tracked img/s** | mtmc admitted | ids / tracks | events incomplete |
+| workers | retired img/s | untracked | **tracked img/s** | mtmc admitted | ids / tracks | events incomplete † |
 |---|---|---|---|---|---|---|
-| 24 | 399.7 | 447 (2.8%) | **388.5** | 42 of 25 282 (0.17%) | 1 / 1 | 18.3% |
-| 48 | 659.1 | 4 262 (16.2%) | **552.5** | 120 of 34 954 (0.34%) | 0 / 0 | 18.6% |
-| 92 | 867.9 | 12 940 (37.3%) | **544.4** | 96 of 25 385 (0.38%) | 0 / 0 | 20.2% |
+| 24 | 399.7 | 447 (2.8%) | **388.5** | 42 of 25 282 (0.17%) | 1 / 1 | 18.3% † |
+| 48 | 659.1 | 4 262 (16.2%) | **552.5** | 120 of 34 954 (0.34%) | 0 / 0 | 18.6% † |
+| 92 | 867.9 | 12 940 (37.3%) | **544.4** | 96 of 25 385 (0.38%) | 0 / 0 | 20.2% † |
+
+† **The incomplete column is the same counting artefact as above**, at a different rate: these
+arms were measured before `crop` came off the run's unconditional expected list, so every frame
+the detector found nothing in is counted here as a partial loss. Nothing was lost in those
+frames. Read the column as "frames with no detections", or re-run the three arms.
 
 **The tracked rate is a ceiling and the workers do not move it.** Retired frames scale (399.7 →
 867.9) while the **tracked** rate saturates at ~550: 48 workers to 92 buys 209 more retired

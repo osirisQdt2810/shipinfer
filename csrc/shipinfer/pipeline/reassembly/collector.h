@@ -55,8 +55,10 @@ namespace shipinfer {
         bool open(const std::shared_ptr<FrameState>& state,
                   const std::vector<std::string>& expected);
         // **Widens** the expected set with the stages that will actually run, once the
-        // detections are known. `open` is called with only the unconditional stages (detect,
-        // crop); this adds the conditional branches that the frame's content selects. It never
+        // detections are known. `open` is called with only the stage that always runs
+        // (`detect`); this adds every other one as it becomes runnable -- `crop` included,
+        // which is why it is no longer on that list: a frame with no detections never makes it
+        // runnable, and expecting it unconditionally sealed such frames Incomplete. It never
         // removes — which is why it is named for what it does: the first version called it
         // `expect` and documented it as "narrowing", and a caller who opened with a fuller set
         // would have found a skipped branch silently expected again. Before this was wired at

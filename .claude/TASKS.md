@@ -3055,6 +3055,21 @@ hook down, for when the operator asked to see something before it is executed.
       which roster a group waits for, and it is now a stated divergence rather than a guess:
       `MTMC-THE-TWO-PLANES-DISAGREE-ABOUT-THE-ROSTER`.
 
+- [ ] PYTHON-COLLECTOR-HAS-NO-UNCONDITIONAL-STAGE · FOUND by #234's review, and it is the hole
+      that PR's own reasoning closes on the other plane. `pipeline/runner.py:489` calls
+      `collector.open(state)` with no `expected` at all, and `reassembly/collector.py`'s
+      `_complete` is `self._expected.issubset(self._delivered)` -- trivially TRUE on an empty
+      expected set. So a frame that dies between `open` and the graph's first `planned()` is
+      reported COMPLETE on the Python plane, where the C++ plane reports it Incomplete because
+      it keeps `detect` on the list for exactly this reason.
+      NARROW BUT REAL: the window is one frame's worth of work before the first stage is
+      planned, and what it costs is the one thing this pipeline was rebuilt to remove -- a lost
+      frame reported as a good one. THE FIX is the C++ shape: open with the one stage that
+      always runs, which on that plane is whatever the chain's first element is (the runner
+      knows the node order, so it can name it rather than hard-code `detect`).
+      NOT a V88 divergence to settle by copying: the C++ side is right and the Python side has
+      the hole, so this is a port of a decision rather than a choice between two.
+
 - [ ] MTMC-THE-TWO-PLANES-DISAGREE-ABOUT-THE-ROSTER · FOUND 11 Sep while making the fault
       above visible, and it is a V88 divergence with a comment claiming the opposite.
       `graph/from_plan.cpp:43` announces EVERY declared camera to the barrier before any worker
@@ -3098,7 +3113,7 @@ hook down, for when the operator asked to see something before it is executed.
       observations per frame** (42 063 in 9 517 frames) against 0.36, with no code change. The
       counter for tracked ROWS is still worth having, but it would have measured the input.
 
-- [ ] MTMC-REAL-WORK-COSTS-A-SIXTH-OF-THE-EVENTS · MEASURED 11 Sep on the pan fixture, which is
+- [x] MTMC-REAL-WORK-COSTS-A-SIXTH-OF-THE-EVENTS · REFUTED 11 Sep -- IT WAS NOT mtmc AND NOT THE WINDOW. MEASURED on the pan fixture, which is
       the first run where `mtmc` does real per-instant work: **1 483 of 9 520 events incomplete
       (15.6%)**, against ZERO on the old fixture at the same reassembly window, same cameras,
       same rate, same workers. `reassembly_us_max` 303 ms. Nothing is dropped upstream
@@ -3107,6 +3122,16 @@ hook down, for when the operator asked to see something before it is executed.
       RE-CHOSEN since either landed (`pipeline.reassembly`, `core/settings/`), and every
       latency number on the page was measured with the gate admitting nothing. Sweep the window
       against completeness on the pan fixture before changing the default.
+      REFUTED the same day, and no sweep was needed: `collector_timeouts 0` already said the
+      window was not it, so the first step was a counter for WHICH stage never answered
+      (`events_missing_stage`, #234). The answer was `crop`, for 1 123 of 1 123 incomplete
+      events. `cli/bench.cpp` opened every frame expecting `{"detect", "crop"}`, and
+      `Dag::runnable` requires every `needs()` input NON-EMPTY -- so a frame the detector found
+      nothing in never makes `crop` runnable and was sealed Incomplete for a stage that had
+      nothing to do. Nothing was lost in any of them. With `crop` off that list the SAME run
+      answers `events_complete 7118`, `events_incomplete 0`. The Python plane never had this:
+      `pipeline/runner.py` calls `collector.open(state)` with no expected set at all and lets
+      `planned()` widen it, which is what the C++ side does now.
 
 - [ ] BENCH-DEFAULT-FIXTURE-IS-A-SLIDESHOW · `scripts/rtsp_serve.py`'s default data is
       `person_2K`, ten unrelated photographs, and every number on `benchmarks/RESULTS.md` was

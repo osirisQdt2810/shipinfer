@@ -463,6 +463,16 @@ int main(int argc, char** argv) {
         //: this path runs only on a refusal, which on a healthy fleet is never.
         std::mutex unwritable_lock;
         std::map<std::string, uint64_t> unwritable_by_camera;
+        //: WHICH STAGE did not deliver, by name, for every result that carries a missing
+        //: list -- Timeout, Evicted and Shutdown as well as Incomplete, because
+        //: `finish_locked` fills it for all four and a stage lost to a timeout is worth the
+        //: same line. So these lines need NOT sum to `events_incomplete`: a frame missing two
+        //: stages counts twice, and an evicted frame that delivered everything counts zero.
+        //: The total alone reads as a timeout and is not one: measured 11 Sep, 1 483 of 9 520
+        //: events with `collector_timeouts 0`, and nothing said which stage. A tally under a
+        //: mutex costs nothing on a healthy run, where the map stays empty.
+        std::mutex missing_lock;
+        std::map<std::string, uint64_t> missing_by_stage;
         //: Every finished frame's reassembly wait, so the run can report PERCENTILES. A vector
         //: and `nth_element` rather than a histogram: reserved once, exact, and a bucket
         //: boundary is an argument nobody then has to have. The lock is not the cost on this
@@ -484,8 +494,8 @@ int main(int argc, char** argv) {
         const pipeline::events::FieldMap& event_fields = planned.fields;
         FrameCollector collector(
             [&emitted, &complete, &event_bytes, &unwritable, &unwritable_lock,
-             &unwritable_by_camera, &latency_lock, &latency_us, &frame_us, &labels,
-             &event_fields, &options](FrameResult&& result) {
+             &unwritable_by_camera, &missing_lock, &missing_by_stage, &latency_lock,
+             &latency_us, &frame_us, &labels, &event_fields, &options](FrameResult&& result) {
                 // The null sink: the event is built -- REALLY built since P5-A; this comment
                 // used to claim it while the body only counted -- and then discarded. Same
                 // choice the Python driver makes, so neither side is measured with a sink the
@@ -538,6 +548,10 @@ int main(int argc, char** argv) {
                 // numbers and quoting the first as throughput while most events are
                 // Incomplete is not a like-for-like comparison.
                 if (result.reason == FinishReason::Complete) complete.fetch_add(1);
+                if (!result.missing.empty()) {
+                    std::lock_guard<std::mutex> lock(missing_lock);
+                    for (const std::string& stage : result.missing) ++missing_by_stage[stage];
+                }
                 emitted.fetch_add(1);
                 // Every finished frame, complete or not: a run whose tail is timeouts is
                 // exactly the run whose latency a reader needs, and dropping those samples
@@ -637,7 +651,31 @@ int main(int argc, char** argv) {
         std::mutex refused_mutex;
         std::map<std::string, uint64_t> open_refused_by_camera;
         std::vector<std::thread> workers;
-        const std::vector<std::string> unconditional{"detect", "crop"};
+        // doc: long why `crop` came off this list, with the number that found it
+        // DETECT ALONE. `crop` was here too, and it cannot run on a frame with no detections
+        // (`Dag::runnable` requires every `needs()` input NON-EMPTY), so every such frame was
+        // sealed Incomplete for a stage that had nothing to do -- while `collector_timeouts`
+        // said 0 and nothing said which stage. Measured 11 Sep on the pan fixture, before and
+        // after: `events_incomplete 1123` of 7 123, all of them `events_missing_stage crop`.
+        // Nothing was lost in any of them.
+        //
+        // `detect` STAYS, and not for symmetry: `open` with an empty expected set makes
+        // `complete()` trivially true (an empty set is a subset of anything), so a frame that
+        // died before its first stage would be reported complete. One stage that always runs
+        // -- it needs only the frame's pixels -- is what keeps that from being true.
+        //
+        // Everything else is added by `CollectorObserver::planned`, which `Dag::execute` calls
+        // with the runnable set before EVERY stage, so a stage is expected exactly when it can
+        // run. The Python plane has always done it this way: `pipeline/runner.py` calls
+        // `collector.open(state)` with no `expected` at all.
+        // THE DETECTOR'S SLOT, not the kind. `plan_stages` names the stage `detect->slot` and
+        // `from_plan` builds `DetectStage(planned.detect_slot, ...)`, so a chain that spells it
+        // anything -- `kind: detect` exists for exactly that, and
+        // `scenarios/plans/defaults.yaml` ships `detect_small` -- would have every frame
+        // expecting a stage nothing delivers. That is this PR's own artefact one level up:
+        // `events_complete 0` and `events_missing_stage detect N` naming a stage not in the
+        // chain, while `stage_names` above prints the real slot on the same stdout.
+        const std::vector<std::string> unconditional{planned.detect_slot};
         // The pipeline queue hands frames to workers one at a time, as the Python runner does;
         // the batching happens in each model's own instance queue under its window, across
         // every frame in flight.
@@ -988,6 +1026,22 @@ int main(int argc, char** argv) {
         }
         std::cout << "events_complete " << complete.load() << "\n";
         std::cout << "events_incomplete " << (emitted.load() - complete.load()) << "\n";
+        // ONE LINE PER STAGE that failed to answer, and none at all on a run where every
+        // frame was complete. `events_incomplete` says how many and this says what: a stage
+        // whose count is the incomplete total never ran for those frames, while several small
+        // counts are frames that lost different stages.
+        {
+            // UNDER THE LOCK, for the same reason the refused-by-camera map is read under
+            // its own: this read happens to sit after the workers are joined today, and
+            // positional safety does not survive a hoist -- the abandoned exit reports with
+            // every worker still sealing frames. (Naming that map here would also trip the
+            // line-window test that pins its lock, which is fair: a mention is a use to a
+            // reader too.)
+            std::lock_guard<std::mutex> lock(missing_lock);
+            for (const auto& [stage, count] : missing_by_stage) {
+                std::cout << "events_missing_stage " << stage << " " << count << "\n";
+            }
+        }
         // TWO WINDOWS, and the names say which is which. `reassembly_us` starts when the
         // collector opens the frame, so it is the part this plane controls; `frame_us` starts
         // at capture, so it is the one a deployment is judged on.
