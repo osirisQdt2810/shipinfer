@@ -633,12 +633,15 @@ def _gate_height(params: Mapping[str, Any], where: str) -> float | None:
     value = _gate_options(params, where).get("min_height_fraction")
     if value is None:
         return None
-    try:
-        fraction = float(value)
-    except (TypeError, ValueError) as exc:
+    # THE TYPE FIRST, the way `_gate_hits` does it. `float(value)` took `False` as 0.0 -- the
+    # loosest gate there is, from a key written as an off switch -- and `"0.02"` as a number,
+    # writing one into the plan while the element handed the reference tracker the string.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigurationError(
-            f"{where}: `min_height_fraction` is {value!r}; it is a fraction of frame height"
-        ) from exc
+            f"{where}: `min_height_fraction` is {value!r}; it is a fraction of frame height, "
+            f"written as a number"
+        )
+    fraction = float(value)
     if not 0.0 <= fraction < 1.0 or not math.isfinite(fraction):
         raise ConfigurationError(
             f"{where}: `min_height_fraction` is {value}; a fraction of frame height is in "

@@ -98,8 +98,8 @@ namespace {
         for (const Scenario& scenario : scenarios) {
             // A SLOT PER SCENARIO, because `create_cluster_tracker` caches per (impl, slot) --
             // one identity space per group -- so sharing one would carry state between them.
-            const auto tracker =
-                mtmc::create_cluster_tracker("shipvision", "parity" + std::to_string(slot++));
+            const auto tracker = mtmc::create_cluster_tracker(
+                "shipvision", "parity" + std::to_string(slot++), {});
             written.push_back("scenario " + scenario.name);
             for (int instant = 0; instant < scenario.repeats; ++instant) {
                 std::vector<std::string> answers;
@@ -160,7 +160,7 @@ namespace {
         // unchecked, and `dim` comes from `admitted.front()` -- so a 256-dim track in a 512-dim
         // group reads 256 floats past the end of its vector. #221's review priced it.
         const std::shared_ptr<mtmc::ClusterTracker> tracker =
-            mtmc::create_cluster_tracker("shipvision", "refusals");
+            mtmc::create_cluster_tracker("shipvision", "refusals", {});
         // THREE INSTANTS, because the gate admits nothing until `min_hits`: the refusals live
         // behind it, so a one-instant test would pass on an empty admitted set.
         std::string zero_message;
@@ -177,7 +177,7 @@ namespace {
             }
         }
         const std::shared_ptr<mtmc::ClusterTracker> second =
-            mtmc::create_cluster_tracker("shipvision", "refusals-width");
+            mtmc::create_cluster_tracker("shipvision", "refusals-width", {});
         for (int instant = 0; instant < 3; ++instant) {
             const bool last = instant == 2;
             try {
@@ -219,7 +219,7 @@ namespace {
         // The only check that prices the knob rather than the plumbing: everything upstream
         // proves two numbers reach this factory, and nothing above proves the gate reads them.
         const std::shared_ptr<mtmc::ClusterTracker> strict =
-            mtmc::create_cluster_tracker("shipvision", "gate-default");
+            mtmc::create_cluster_tracker("shipvision", "gate-default", {});
         const std::shared_ptr<mtmc::ClusterTracker> stated =
             mtmc::create_cluster_tracker("shipvision", "gate-stated", {1, 0.02});
         const std::vector<ClusterObservation> instant = {distant("cam0", {1.0f, 0.0f}),

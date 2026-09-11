@@ -78,9 +78,9 @@ namespace {
     void the_registry_hands_out_one_tracker_per_slot() {
         // A cross-camera tracker IS the identity space for a group, so two instances would
         // issue two contradictory sets of global ids for the same objects.
-        const auto first = mtmc::create_cluster_tracker("fake", "quay");
-        const auto second = mtmc::create_cluster_tracker("fake", "quay");
-        const auto other = mtmc::create_cluster_tracker("fake", "jetty");
+        const auto first = mtmc::create_cluster_tracker("fake", "quay", {});
+        const auto second = mtmc::create_cluster_tracker("fake", "quay", {});
+        const auto other = mtmc::create_cluster_tracker("fake", "jetty", {});
 
         check(first.get() == second.get(),
               "one slot, one identity space, however many callers");
@@ -90,7 +90,7 @@ namespace {
     void an_unknown_impl_is_refused_by_name() {
         bool refused = false;
         try {
-            mtmc::create_cluster_tracker("no_such", "quay");
+            mtmc::create_cluster_tracker("no_such", "quay", {});
         } catch (const ConfigError& error) {
             refused = std::string(error.what()).find("unknown cross-camera tracker") !=
                       std::string::npos;
@@ -104,7 +104,7 @@ namespace {
         // not ask `has` first -- the hole `AssociatorRegistry::create` was reviewed for.
         bool refused = false;
         try {
-            mtmc::CLUSTERERS().create("no_such");
+            mtmc::CLUSTERERS().create("no_such", {});
         } catch (const ConfigError& error) {
             refused = std::string(error.what()).find("no cross-camera tracker is registered") !=
                       std::string::npos;
@@ -123,7 +123,7 @@ namespace {
         }
         std::string message;
         try {
-            mtmc::create_cluster_tracker("shipvision", "quay");
+            mtmc::create_cluster_tracker("shipvision", "quay", {});
         } catch (const ConfigError& error) {
             message = error.what();
         }
@@ -181,7 +181,7 @@ namespace {
         for (int attempt = 0; attempt < 2; ++attempt) {
             bool refused = false;
             try {
-                mtmc::create_cluster_tracker("throws", "quay");
+                mtmc::create_cluster_tracker("throws", "quay", {});
             } catch (const ConfigError&) {
                 refused = true;
             }
@@ -194,7 +194,7 @@ namespace {
     }
 
     void what_was_built_is_listable() {
-        mtmc::create_cluster_tracker("fake", "listed");
+        mtmc::create_cluster_tracker("fake", "listed", {});
         bool found = false;
         for (const mtmc::MadeClusterTracker& made : mtmc::made_cluster_trackers()) {
             if (made.slot == "listed") found = made.impl == "fake" && made.tracker != nullptr;
@@ -206,7 +206,7 @@ namespace {
     void the_seam_takes_a_whole_instant() {
         // Handing a cross-camera tracker one camera at a time turns cross-camera association
         // into within-camera deduplication, which is why the argument is a vector.
-        const auto tracker = mtmc::create_cluster_tracker("fake", "instant");
+        const auto tracker = mtmc::create_cluster_tracker("fake", "instant", {});
         ClusterObservation first{
             TrackKey{"cam0", 1}, {1.f, 0.f}, {0.f, 0.f, 10.f, 10.f}, 1920, 1080};
         ClusterObservation second{
