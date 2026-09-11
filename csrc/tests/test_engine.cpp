@@ -300,6 +300,11 @@ namespace {
             future.get();  // one at a time, so the two are two batches rather than one
         }
         const double floor_us = 2.0 * static_cast<double>(kLatency.count()) * 1000.0;
+        // READ IMMEDIATELY, deliberately, because that is the invariant: a future that has
+        // resolved is a batch that has been counted. `instance.cpp` used to count after the
+        // scatter loop, so this read raced the worker and failed on a loaded CI runner while
+        // passing five-for-five locally -- the counters moved above the loop instead of this
+        // test gaining a poll, since every reader of `stats()` had the same window.
         check(instance.stats().batches == 2, "two serialised requests are two batches");
         check(instance.stats().compute_us >= floor_us * 0.95,
               "compute_us is microseconds really spent, got " +

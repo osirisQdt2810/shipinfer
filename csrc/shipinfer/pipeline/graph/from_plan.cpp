@@ -1,5 +1,8 @@
 #include "shipinfer/pipeline/graph/from_plan.h"
 
+#include <algorithm>
+
+#include "shipinfer/pipeline/mtmc/cluster.h"
 #include "shipinfer/pipeline/tracking/associator.h"
 
 namespace shipinfer {
@@ -10,8 +13,41 @@ namespace shipinfer {
         return names;
     }
 
+    MtmcRuntime mtmc_runtime(const PlanStages& planned, const PlanSettings& settings) {
+        MtmcRuntime runtime;
+        if (planned.mtmcs.empty()) return runtime;
+        // ONE BUDGET FOR THE PROCESS, sized from the plan's own worker count, which is what
+        // makes the never-starve invariant hold for any number of barriers (`mtmc/barrier.h`).
+        // `workers - 1`: the last worker must never be the one parked.
+        runtime.budget =
+            std::make_shared<mtmc::WaiterBudget>(std::max(0, settings.workers - 1));
+        for (const MtmcStageSpec& spec : planned.mtmcs) {
+            mtmc::BarrierOptions options;
+            options.workers = settings.workers;
+            // FROM THE PLAN when the chain says so. `ship_person_cpu.yaml` has stated
+            // `sync_window_ms: 60` all along and this plane ran its own default, so the two
+            // bucketed instants differently for one chain file -- and the window is what the
+            // whole chain's throughput turns on, so an unstated one measures a configuration
+            // nobody chose.
+            if (spec.sync_window_ms) options.sync_window_s = *spec.sync_window_ms / 1000.0;
+            if (spec.max_instants) options.max_instants = *spec.max_instants;
+            const auto barrier =
+                std::make_shared<mtmc::InstantBarrier>(options, runtime.budget);
+            // THE ROSTER, ANNOUNCED BEFORE ANY WORKER STARTS, which is the other half of
+            // reading it from the plan. `barrier.h`: an announced camera wins over a
+            // merely-seen one the moment anything announces, so a chain that names its four
+            // cameras forms instants over those four -- and without this the barrier accreted
+            // every camera the shard saw while the other plane waited for the declared list,
+            // which is two instant memberships for one chain file (#222's review). The
+            // Python element does the same, per member, in `mtmc.py`.
+            for (const std::string& camera : spec.cameras) barrier->camera_added(camera);
+            runtime.barriers[spec.slot] = barrier;
+        }
+        return runtime;
+    }
+
     Dag build_dag(const PlanStages& planned, const ModelMap& models, WorkerScratch& scratch,
-                  std::chrono::milliseconds timeout) {
+                  std::chrono::milliseconds timeout, const MtmcRuntime& mtmc_shared) {
         Dag dag;
         dag.add(std::make_unique<DetectStage>(planned.detect_slot,
                                               *models.at(planned.detect_model), planned.detect,
@@ -49,6 +85,26 @@ namespace shipinfer {
             dag.add(std::make_unique<TrackStage>(
                 track.slot, track.output, track.class_id,
                 tracking::create_associator(track.impl, track.slot)));
+        }
+        // LAST, after the trackers whose ids it consumes and the embedders whose vectors
+        // decide it -- the order the chain declares for itself (`after: [track]`).
+        for (const MtmcStageSpec& spec : planned.mtmcs) {
+            const auto barrier = mtmc_shared.barriers.find(spec.slot);
+            if (barrier == mtmc_shared.barriers.end() || !barrier->second) {
+                // REFUSED rather than built here. A barrier per Dag is a barrier per WORKER,
+                // and a cross-camera tracker that saw one worker's frames would be doing
+                // within-camera deduplication -- the failure `mtmc/barrier.h` exists to
+                // prevent. Whoever owns the fleet calls `mtmc_runtime` once and passes it in.
+                throw ConfigError(
+                    "plan runs mtmc slot '" + spec.slot +
+                    "' but no barrier was handed to build_dag for it. One barrier per slot is "
+                    "shared by every worker: call `mtmc_runtime(planned, settings)` once for "
+                    "the process and pass the result in, or a per-worker barrier would turn "
+                    "cross-camera association into within-camera deduplication");
+            }
+            dag.add(std::make_unique<MtmcStage>(
+                spec.slot, spec.output, spec.track_source, spec.embedding_sources,
+                barrier->second, mtmc::create_cluster_tracker(spec.impl, spec.slot)));
         }
         return dag;
     }

@@ -125,6 +125,10 @@ namespace shipinfer::mtmc {
                 const std::vector<ClusterObservation>& instant) override {
                 std::lock_guard<std::mutex> held(lock_);
                 const std::vector<ClusterObservation> admitted = gate_.filter(instant);
+                // COUNTED HERE, because the gate is the only place that knows how much of an
+                // instant it kept -- and "no identities" has two causes that look identical
+                // from outside: nothing admitted, or nothing that matched.
+                note_instant(instant.size(), admitted.size());
                 const std::vector<int> labels = cluster(admitted);
                 std::vector<IdentityObservation> observations;
                 observations.reserve(admitted.size());
@@ -142,7 +146,8 @@ namespace shipinfer::mtmc {
                 std::map<TrackKey, int64_t> out;
                 for (const ClusterObservation& observation : instant) {
                     const auto found = assigned.find(observation.key);
-                    out[observation.key] = found == assigned.end() ? -1 : found->second;
+                    out[observation.key] =
+                        found == assigned.end() ? kUnidentified : found->second;
                 }
                 return out;
             }

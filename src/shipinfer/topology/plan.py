@@ -19,7 +19,7 @@ import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from shipinfer.core.errors import ConfigurationError
 
@@ -91,6 +91,17 @@ class PlanNode:
     when: str | None = None
     per: str | None = None
     scope: str | None = None
+    #: The cross-camera barrier's two knobs, carried because the chain states them and the
+    #: other plane could not read them: `ship_person_cpu.yaml` has said `sync_window_ms: 60`
+    #: all along while the C++ barrier ran its own default, so the two planes bucketed one
+    #: chain file's instants differently. The window is also what the chain's latency turns on.
+    sync_window_ms: float | None = None
+    max_instants: int | None = None
+    #: The cross-camera GROUP and its declared roster. It decides which frames form an instant,
+    #: so the other plane reading `cameras:` while this one accreted every camera it saw was
+    #: two instant memberships for one chain file (#222's review).
+    group: str | None = None
+    cameras: tuple[str, ...] = ()
 
 
 class SettingsLike(Protocol):
@@ -401,6 +412,19 @@ def resolve_plan(
                 ),
                 per=node.spec.per,
                 scope=node.spec.scope,
+                # ONLY FOR AN `mtmc` NODE. The four keys belong to that kind, and running the
+                # readers over every node wrote a stray `sync_window_ms` on a `detect` slot
+                # into the plan for `plan_stages` to ignore silently (#222's review).
+                sync_window_ms=(
+                    _barrier_window(node.spec.params, where) if node.kind == "mtmc" else None
+                ),
+                max_instants=(
+                    _barrier_instants(node.spec.params, where) if node.kind == "mtmc" else None
+                ),
+                group=_barrier_group(node.spec.params, where) if node.kind == "mtmc" else None,
+                cameras=(
+                    _barrier_cameras(node.spec.params, where) if node.kind == "mtmc" else ()
+                ),
             )
         )
         if (event_field := ROW_FIELD_KINDS.get(node.kind)) is not None:
@@ -512,6 +536,74 @@ def _probability(value: float, where: str) -> float:
     return number
 
 
+def _barrier_window(params: Mapping[str, Any], where: str) -> float | None:
+    """The instant's width in milliseconds, or `None` when the chain does not say.
+
+    Refused rather than clamped: a zero-width instant admits one camera and calls the rest of
+    its group late, which reads as a synchronisation failure rather than as a bad setting.
+    """
+    value = params.get("sync_window_ms")
+    if value is None:
+        return None
+    # TYPED, because `float(value)` on a chain's `sync_window_ms: fast` raised a bare
+    # `ValueError` past the reader's own vocabulary (#222's review). The mtmc element gates
+    # this first for an mtmc node; nothing gates a key on any other kind.
+    try:
+        window = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"{where}: `sync_window_ms` is {value!r}; an instant's width is a positive finite "
+            f"number of milliseconds"
+        ) from exc
+    # `math.isfinite`, which is what the two hand-written comparisons spelled out (#222).
+    if not window > 0.0 or not math.isfinite(window):
+        raise ConfigurationError(
+            f"{where}: `sync_window_ms` is {value!r}; an instant's width is a positive finite "
+            f"number of milliseconds, and a zero-width one admits one camera and calls the "
+            f"rest of its group late"
+        )
+    return window
+
+
+def _barrier_group(params: Mapping[str, Any], where: str) -> str | None:
+    """The group's name, or `None` when the chain does not say (the element uses the slot)."""
+    value = params.get("group")
+    return None if value is None else _speakable(str(value), f"{where}: `group`")
+
+
+def _barrier_cameras(params: Mapping[str, Any], where: str) -> tuple[str, ...]:
+    """The declared roster, through `parse_group` so there is one reader of that YAML shape.
+
+    A roster decides which frames form an instant, so it has to cross to the other plane --
+    which accreted every camera it happened to see instead (#222's review).
+    """
+    from shipinfer.topology.elements.mtmc import parse_group
+
+    _, cameras = parse_group(params, where=where)
+    return tuple(_speakable(camera, f"{where}: `cameras`") for camera in cameras)
+
+
+def _barrier_instants(params: Mapping[str, Any], where: str) -> int | None:
+    """How many instants may be open at once, or `None` when the chain does not say."""
+    value = params.get("max_instants")
+    if value is None:
+        return None
+    # TYPED, and INTEGRAL: `int(2.9)` truncated to 2 silently, so a chain asking for 2.9
+    # instants got 2 with nothing said (#222's review).
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigurationError(
+            f"{where}: `max_instants` is {value!r}; how many instants may be open at once is "
+            f"a whole count"
+        )
+    count = int(value)
+    if count < 1:
+        raise ConfigurationError(
+            f"{where}: `max_instants` is {count}; zero open instants means every frame "
+            f"evicts itself"
+        )
+    return count
+
+
 def _positive(value: int, where: str) -> int:
     """A cap is a positive count. Nothing between a chain file and the decode loop refused a
     `-1` -- not `_resolve_decode_params`'s bare `int()`, not the unvalidated `DecodeParams`
@@ -594,6 +686,16 @@ def plan_text(plan: ResolvedPlan) -> str:
             lines.append(f"per {node.per}")
         if node.scope:
             lines.append(f"scope {node.scope}")
+        if node.group:
+            lines.append(f"group {node.group}")
+        # ONE LINE PER CAMERA, in the roster's order, because a plan line is words and a
+        # comma-joined list would need a second escaping rule for a camera id.
+        for camera in node.cameras:
+            lines.append(f"camera {camera}")
+        if node.sync_window_ms is not None:
+            lines.append(f"sync_window_ms {node.sync_window_ms!r}")
+        if node.max_instants is not None:
+            lines.append(f"max_instants {node.max_instants}")
     lines.append("")
     lines += [f"edge {producer} {consumer} {caps}" for producer, consumer, caps in plan.edges]
     lines += [f"field {name} " + " ".join(slots) for name, slots in sorted(plan.fields.items())]
@@ -938,6 +1040,53 @@ def _when(node: dict[str, object], args: Sequence[str], where: str) -> None:
     node["when"] = " ".join(args)
 
 
+def _sync_window_ms(node: dict[str, object], args: Sequence[str], where: str) -> None:
+    """The instant's width in milliseconds. Positive and finite, or the group cannot form.
+
+    A zero-width instant admits one camera and calls the rest of its group late, which reads
+    as a synchronisation failure rather than as a bad setting -- so the reader refuses it.
+    """
+    _want(args, 1, where, "sync_window_ms <milliseconds>")
+    if not _NUMBER.match(args[0]):
+        raise PlanSyntaxError(f"{where}: {args[0]!r} is not a number")
+    value = float(args[0])
+    if not value > 0.0 or not math.isfinite(value):
+        raise PlanSyntaxError(
+            f"{where}: sync_window_ms is {args[0]}; an instant's width is a positive finite "
+            f"number of milliseconds"
+        )
+    node["sync_window_ms"] = value
+
+
+def _camera(node: dict[str, object], args: Sequence[str], where: str) -> None:
+    """One camera of a cross-camera group's roster. Repeatable, in the roster's order."""
+    _want(args, 1, where, "camera <id>")
+    roster = list(node.get("cameras") or ())
+    if args[0] in roster:
+        raise PlanSyntaxError(
+            f"{where}: camera {args[0]!r} is listed twice in this group; a roster is a set of "
+            f"cameras and a duplicate would have the barrier wait for one camera twice"
+        )
+    roster.append(args[0])
+    node["cameras"] = tuple(roster)
+
+
+def _max_instants(node: dict[str, object], args: Sequence[str], where: str) -> None:
+    """How many instants may be open at once. Zero means every frame evicts itself."""
+    _want(args, 1, where, "max_instants <count>")
+    # `_int` rather than a hand-rolled `isdigit`: `"--5".lstrip("-")` is all digits, so the
+    # old check passed it to `int()` and a plan line took the reader down with a bare
+    # `ValueError`. `_int` also carries the `_INT_MAX` bound and accepts `+5`, which the other
+    # plane's `as_int` does -- both divergences #222's review measured.
+    value = _int(args[0], where)
+    if value < 1:
+        raise PlanSyntaxError(
+            f"{where}: max_instants is {value}; zero open instants means every frame evicts "
+            f"itself"
+        )
+    node["max_instants"] = value
+
+
 #: Verbs that attach to the `node` block above them, the way `capacity` attaches to `queue`.
 _ATTRIBUTES = {
     "model": _word_attr("model"),
@@ -956,4 +1105,8 @@ _ATTRIBUTES = {
     "when": _when,
     "per": _word_attr("per"),
     "scope": _word_attr("scope"),
+    "sync_window_ms": _sync_window_ms,
+    "max_instants": _max_instants,
+    "group": _word_attr("group"),
+    "camera": _camera,
 }

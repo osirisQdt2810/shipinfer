@@ -10,7 +10,7 @@ namespace shipinfer::pipeline::events {
         // `RECORD_CONVERTERS.get(name)` is hoisted out of the row loop on the Python plane
         // for the same reason: at ~15 000 objects a second, a string compare per object is a
         // cost with nothing to show for it.
-        enum class Field { Embedding, ShipId, Similarity, MaskArea, TrackId };
+        enum class Field { Embedding, ShipId, Similarity, MaskArea, TrackId, GlobalId };
 
         // `_as_float` on the Python plane is `row.reshape(-1)[0]` -- the FIRST element, not a
         // sum, and this matches it. It does not REDUCE: whatever the segment slot attached,
@@ -37,6 +37,12 @@ namespace shipinfer::pipeline::events {
                 case Field::TrackId:
                     record.track_id = static_cast<int64_t>(row[0]);
                     return;
+                case Field::GlobalId:
+                    // THE CROSS-CAMERA ID, and the stage only ever attaches a row for an
+                    // observation that HAS one: `kUnidentified` is skipped there, so an
+                    // unidentified track leaves this field null the way `output.py` leaves it.
+                    record.global_id = static_cast<int64_t>(row[0]);
+                    return;
             }
         }
 
@@ -55,6 +61,8 @@ namespace shipinfer::pipeline::events {
                     return "mask_area_px";
                 case Field::TrackId:
                     return "track_id";
+                case Field::GlobalId:
+                    return "global_id";
             }
             return "?";
         }
@@ -68,6 +76,7 @@ namespace shipinfer::pipeline::events {
             if (name == "similarity") return Field::Similarity;
             if (name == "mask_area_px") return Field::MaskArea;
             if (name == "track_id") return Field::TrackId;
+            if (name == "global_id") return Field::GlobalId;
             throw ConfigError("no converter for ObjectRecord field '" + name +
                               "' on this plane; ObjectBatch carries floats, so a string "
                               "field such as track_state cannot travel in one here");
