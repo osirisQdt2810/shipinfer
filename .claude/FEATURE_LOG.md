@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-11 — the chain sets the mtmc gate, so cross-camera identity can be measured
+
+The reference admits an observation after `min_hits` consecutive qualifying instants and only
+if the box clears `min_height_fraction` of frame height -- 3 and 1/9, 120 px at 1080p -- and
+no chain could say otherwise: the element took `params: options:` and the plan carried none of
+it, so this plane ran the defaults whatever the chain said. Both numbers are on the plan now,
+through `MtmcStageSpec::gate` into `create_cluster_tracker`, with one set of bounds. A tracker
+is cached per (impl, slot), so a second caller asking for different options on one slot is
+REFUSED rather than handed the first one's gate. A key the plan cannot carry is refused BY
+NAME at resolution (`CSRC-TRACKER-OPTIONS` owes the rest). The proof is on the lane: a 60 px
+subject -- the benchmark footage's -- is never admitted at the reference's floor, and is
+identified on the FIRST instant at the chain's.
+
+---
+
 ## 2026-09-11 — the C++ graph associates instants, and the chain's real rate is 260 img/s
 
 `MtmcStage` is barrier + scatter and nothing else: read each row's track id and embedding, hand

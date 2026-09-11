@@ -309,7 +309,7 @@ namespace {
     const tracking::AssociatorRegistrar kPlanTrack("plan-test", [] {
         return std::shared_ptr<tracking::Associator>{};
     });
-    const mtmc::ClusterRegistrar kPlanMtmc("plan-test", [] {
+    const mtmc::ClusterRegistrar kPlanMtmc("plan-test", [](const mtmc::ClusterOptions&) {
         return std::shared_ptr<mtmc::ClusterTracker>{};
     });
 
@@ -323,7 +323,7 @@ namespace {
         const PlanStages built =
             plan_stages(plan_of(kDetect + kTrack +
                                 "node mtmc mtmc plan-test\nscope global\nsync_window_ms 25\n"
-                                "max_instants 4\n"),
+                                "max_instants 4\nmin_hits 1\nmin_height_fraction 0.02\n"),
                         kLoaded);
 
         check(built.mtmcs.size() == 1, "one cross-camera slot");
@@ -334,6 +334,11 @@ namespace {
               "and the instant bound");
         check(built.mtmcs[0].track_source == built.tracks.front().output,
               "fed by the tracker's OUTPUT name, which is where the ids are");
+        check(built.mtmcs[0].gate.min_hits && *built.mtmcs[0].gate.min_hits == 1,
+              "the observation floor the chain stated");
+        check(built.mtmcs[0].gate.min_height_fraction &&
+                  *built.mtmcs[0].gate.min_height_fraction == 0.02,
+              "and the height floor, which is what admits a distant subject at all");
     }
 
     void an_unstated_window_stays_absent_rather_than_becoming_a_number_here() {
@@ -345,6 +350,9 @@ namespace {
         check(built.mtmcs.size() == 1, "the slot still runs");
         check(!built.mtmcs.empty() && !built.mtmcs[0].sync_window_ms,
               "with no window of its own");
+        check(!built.mtmcs.empty() && !built.mtmcs[0].gate.min_hits &&
+                  !built.mtmcs[0].gate.min_height_fraction,
+              "and no gate of its own: the implementation's defaults stand");
     }
 
     void two_mtmc_slots_are_refused_because_no_chain_states_their_groups() {

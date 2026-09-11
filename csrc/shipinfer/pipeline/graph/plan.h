@@ -80,6 +80,11 @@ namespace shipinfer {
         //: (#222's review).
         std::string group;
         std::vector<std::string> cameras;
+        //: The GATE's two thresholds, from the slot's `params: options:` on the other plane.
+        //: They decide which tracks may be associated at all, and the reference's production
+        //: values admit nothing on footage whose subjects are small in frame.
+        std::optional<int> min_hits;
+        std::optional<double> min_height_fraction;
         std::optional<double> sync_window_ms;
         std::optional<int> max_instants;
     };

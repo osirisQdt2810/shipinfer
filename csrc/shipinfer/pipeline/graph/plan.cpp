@@ -211,6 +211,23 @@ namespace shipinfer {
             } else if (verb == "scope") {
                 want(args, 1, where, "scope <value>");
                 node.scope = args[0];
+            } else if (verb == "min_hits") {
+                want(args, 1, where, "min_hits <count>");
+                const int hits = as_int(args[0], where);
+                if (hits < 1) {
+                    throw ConfigError(where + ": min_hits is " + args[0] +
+                                      "; 0 would admit a track on the frame it was first seen");
+                }
+                node.min_hits = hits;
+            } else if (verb == "min_height_fraction") {
+                want(args, 1, where, "min_height_fraction <fraction>");
+                const double fraction = as_double(args[0], where);
+                if (!(fraction >= 0.0) || fraction >= 1.0) {
+                    throw ConfigError(where + ": min_height_fraction is " + args[0] +
+                                      "; a fraction of frame height is in [0, 1), and 1.0 "
+                                      "admits nothing at all rather than thresholding");
+                }
+                node.min_height_fraction = fraction;
             } else if (verb == "group") {
                 want(args, 1, where, "group <name>");
                 node.group = args[0];
@@ -258,6 +275,7 @@ namespace shipinfer {
                                   "'; expected one of artefact, classes, crop, edge, field, "
                                   "fold_detections, fold_mask, fold_prototypes, fold_score, "
                                   "camera, group, instances, label, letterbox, "
+                                  "min_height_fraction, min_hits, "
                                   "max_detections, "
                                   "max_instants, model, node, per, plan, policy, "
                                   "policy_option, queue_delay_us, score, scope, setting, "
@@ -550,6 +568,11 @@ namespace shipinfer {
             // IN THE ROSTER'S ORDER, which is the order the other writer emits and therefore
             // the order a byte compare is entitled to.
             for (const std::string& camera : node.cameras) out += "camera " + camera + "\n";
+            if (node.min_hits) out += "min_hits " + std::to_string(*node.min_hits) + "\n";
+            if (node.min_height_fraction) {
+                out += "min_height_fraction " + events::json_number(*node.min_height_fraction) +
+                       "\n";
+            }
             if (node.sync_window_ms) {
                 out += "sync_window_ms " + events::json_number(*node.sync_window_ms) + "\n";
             }

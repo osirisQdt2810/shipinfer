@@ -206,6 +206,45 @@ namespace {
               "and says why one identity space cannot hold two widths");
     }
 
+    // 60 px tall at 1080p, which is BELOW the reference's own floor of 1/9 (120 px). Not an
+    // invented number: it is the benchmark footage's, where the whole chain ran end to end
+    // and answered `mtmc_observations offered 3768 admitted 0`.
+    ClusterObservation distant(const std::string& camera, std::vector<float> embedding) {
+        ClusterObservation out = parse_field(camera + "#1:1,0:60");
+        out.embedding = std::move(embedding);
+        return out;
+    }
+
+    void the_chains_gate_is_what_the_real_implementation_admits() {
+        // The only check that prices the knob rather than the plumbing: everything upstream
+        // proves two numbers reach this factory, and nothing above proves the gate reads them.
+        const std::shared_ptr<mtmc::ClusterTracker> strict =
+            mtmc::create_cluster_tracker("shipvision", "gate-default");
+        const std::shared_ptr<mtmc::ClusterTracker> stated =
+            mtmc::create_cluster_tracker("shipvision", "gate-stated", {1, 0.02});
+        const std::vector<ClusterObservation> instant = {distant("cam0", {1.0f, 0.0f}),
+                                                         distant("cam1", {1.0f, 0.0f})};
+
+        size_t identified_at_the_default = 0;
+        for (int repeat = 0; repeat < 3; ++repeat) {
+            for (const auto& [key, global_id] : strict->ids(instant)) {
+                if (global_id != mtmc::kUnidentified) ++identified_at_the_default;
+            }
+        }
+        size_t identified_as_stated = 0;
+        for (const auto& [key, global_id] : stated->ids(instant)) {
+            if (global_id != mtmc::kUnidentified) ++identified_as_stated;
+        }
+
+        check(identified_at_the_default == 0,
+              "at the reference's own floor a 60 px subject is never admitted, however many "
+              "instants it is seen in");
+        check(identified_as_stated == 2,
+              "and at the floor the chain states, both cameras are identified on the FIRST "
+              "instant -- min_hits 1 and a height floor the subject clears");
+        check(stated->sizes().identities == 1, "as ONE object seen twice, which is the point");
+    }
+
     void the_golden_names_its_own_emitter() {
         const std::vector<std::string> all =
             parity::read_lines(resolve("golden/cluster/basic.txt"), true);
@@ -225,6 +264,7 @@ int main() {
     try {
         the_composition_answers_what_the_reference_answered();
         the_two_refusals_the_golden_cannot_reach();
+        the_chains_gate_is_what_the_real_implementation_admits();
         the_golden_names_its_own_emitter();
     } catch (const std::exception& error) {
         std::printf("FAIL: %s\n", error.what());

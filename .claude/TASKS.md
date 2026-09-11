@@ -2849,7 +2849,7 @@ hook down, for when the operator asked to see something before it is executed.
       report (`complete 0, advanced 428`), while a roster matching the fleet closes the most
       instants on evidence of any configuration measured (`complete 366` of 662).
 
-- [~] CSRC-MTMC-GATE-OPTIONS · THE GATE'S THRESHOLDS ARE NOT SETTABLE FROM THE CHAIN, and
+- [x] CSRC-MTMC-GATE-OPTIONS · THE GATE'S THRESHOLDS ARE NOT SETTABLE FROM THE CHAIN, and
       MEASURED 11 Sep that is what makes the chain issue zero global ids: at 12 cameras x 20 fps
       with zero frames dropped and the barrier closing instants on evidence
       (`complete 282 advanced 184 window 522`), the run reports
@@ -2868,6 +2868,13 @@ hook down, for when the operator asked to see something before it is executed.
       `create_cluster_tracker`. The one design question worth stating: a tracker is cached per
       (impl, slot), so two chains asking for different options on one slot must be REFUSED
       rather than silently sharing the first one's gate.
+      DONE 11 Sep: both numbers on the plan's `mtmc` node and in `MtmcStageSpec::gate`,
+      one set of bounds per plane, and `create_cluster_tracker(impl, slot, options)` refuses a
+      second set on one slot. Eight red probes; `test_plan_parity` 127, `test_plan_stages` 65,
+      `test_mtmc_cluster` 20, `test_tracking_cluster_parity` 11, offline suite 4246 passed. The
+      lane check is the knob's own price: a 60 px subject is never admitted at the reference's
+      floor and is identified on the FIRST instant at the chain's. The MEASUREMENT with the
+      floor set from the chain is `BENCH-FOOTAGE-IS-BELOW-THE-MTMC-GATE`'s option (c).
 
 - [ ] BENCH-FOOTAGE-IS-BELOW-THE-MTMC-GATE · `benchmarks/baseline/data/{person_2K,ship_2K}` is
       what every measurement uses, and its subjects are shorter than the gate's 120 px floor at
