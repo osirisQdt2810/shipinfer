@@ -2846,6 +2846,14 @@ hook down, for when the operator asked to see something before it is executed.
       names to leave on the device and exposes `output_device(i)`; `Model`/`ModelInstance` hold
       the fold; `graph/mask_area_device.{h,cpp}` is a NEW unit on the CUDA line, because
       `graph/mask_area.cpp` must stay pure -- it is the offline tier's and the golden's.
+      PROFILED AGAIN AT THE DESIGN LOAD, 11 Sep (50 cameras x 20 fps, 92 workers, four A5000s,
+      20 s), and the case is stronger there than at twelve cameras: device-to-host is **42.5 GiB
+      in 6 464 copies and 81.3% of all GPU memory-op time** (73.7% at twelve), host-to-device is
+      191 copies that are engine loads rather than per-frame traffic, and the eight
+      `*-ship_segme` instance threads are the largest single consumer of host CPU -- ~6.8-7.0 s
+      each of 262.7 s total, ~54 s between them. The 92 pipeline workers take 57.8 s and the
+      fifty camera threads 22.8 s. So the fold plus its copy home IS the top item at the load
+      the box is sized for, not only at the small one.
 
 - [ ] ENGINE-COPIES-EVERY-OUTPUT-HOME · `backends/tensorrt/engine.cpp` ends every `execute`
       with one `gpuMemcpyAsync(host_outputs_[i], output_buffers_[i], ..., DeviceToHost)` per
