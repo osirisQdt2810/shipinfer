@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-11 — the profiler reaches the benchmarked route, and the first profile of the chain
+
+V168 makes optimisation a loop -- benchmark, then profile -- and the join was broken:
+`profile.sh --cpp` named `csrc/build/shipinfer_pipeline`, a binary `build_csrc.py` has never
+produced, and it could not start the RTSP servers the mandated route needs in the same
+container. It takes `cpp.sh`'s contract now (`SHIPINFER_CPP_BINARY`, `SHIPINFER_CPP_COMMAND`,
+the three `SHIPINFER_RTSP_*` variables) and `--wait=primary`, because the wrapper `exec`s the
+bench and leaves its servers as siblings, which made nsys wait forever and write no report.
+THE FIRST PROFILE, at the design rate on four A5000s: the host is the wall at **4.55 cores for
+240 img/s** with the devices 25% busy, `cudaStreamSynchronize` is 32% of CUDA API time, and
+device-to-host traffic is **39.6 GiB in 20 s** against 14.7 MB up -- the RAM->VRAM->RAM->VRAM
+round trip is gone and every engine output comes home whether anyone reads it. Four items filed.
+
+---
+
 ## 2026-09-11 — footage a tracker can follow, and the first global ids at the shipped defaults
 
 Every bench run replayed ten unrelated photographs at 20 fps, so a camera's scene changed
