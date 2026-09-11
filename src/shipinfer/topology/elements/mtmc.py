@@ -305,8 +305,11 @@ class ShipvisionMtmc(Element):
       logged at ``open()`` so the degradation is on the record rather than inferred from an
       accuracy number.
     * ``options: {...}`` — the remaining ``ClusterMTMCTracker`` keyword arguments
-      (``min_hits``, ``appearance_threshold``, ``distance_threshold``, ``max_age``,
-      ``capacity``, …). A key the tracker does not accept stops the deploy at ``open()``.
+      (``min_hits``, ``min_height_fraction``, ``appearance_threshold``, ``max_age``, …). A key
+      the tracker does not accept stops the deploy at ``open()``. **A plan carries the first
+      two only**, so any other key resolves no further than this process: ``shipinfer plan``
+      refuses it by name rather than write a plan the C++ plane would run without it
+      (``CSRC-TRACKER-OPTIONS`` owes the rest).
 
     There is deliberately **no ``backend:``**, for the reason ``track.py`` gives: an unpinned
     ``MTMC.build`` takes the fastest matcher this host can build with a numpy floor, and

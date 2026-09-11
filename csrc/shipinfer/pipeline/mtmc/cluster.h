@@ -134,7 +134,7 @@ namespace shipinfer::mtmc {
         void add(const std::string& impl, ClusterTrackerFactory factory);
         bool has(const std::string& impl) const;
         std::shared_ptr<ClusterTracker> create(const std::string& impl,
-                                               const ClusterOptions& options = {}) const;
+                                               const ClusterOptions& options) const;
         std::vector<std::string> names() const;
 
       private:
@@ -154,9 +154,13 @@ namespace shipinfer::mtmc {
     //: AND THE SAME OPTIONS EVERY TIME for one slot. The tracker is cached, so a second
     //: caller asking for different thresholds on one slot would silently get the first
     //: caller's gate -- a configuration that is not the one in the file. Refused instead.
+    //: REQUIRED, not defaulted. `= {}` here would let a future caller build the group's
+    //: tracker without the gate its chain stated, silently and at the one seam that cannot be
+    //: checked afterwards -- so the one production caller says `spec.gate` and a test that
+    //: means "the implementation's own defaults" writes `{}`.
     std::shared_ptr<ClusterTracker> create_cluster_tracker(const std::string& impl,
                                                            const std::string& slot,
-                                                           const ClusterOptions& options = {});
+                                                           const ClusterOptions& options);
 
     struct MadeClusterTracker {
         std::string impl;
