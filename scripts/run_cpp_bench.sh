@@ -96,8 +96,8 @@ fi
 # chain offers 4.42 and admits 62% at the reference's own defaults.
 #
 # So the fixture follows the CHAIN rather than a flag nobody sets: a plan with a `track` or
-# `mtmc` node gets the pan, everything else keeps the photographs, and an explicit
-# any explicit data -- `SHIPINFER_RTSP_*_DATA` for the RTSP arm, `SHIPINFER_BENCH_*_FRAMES` for
+# `mtmc` node gets the pan, everything else keeps the photographs, and any explicit data --
+# `SHIPINFER_RTSP_*_DATA` for the RTSP arm, `SHIPINFER_BENCH_*_FRAMES` for
 # the replay one -- always wins. Both, because the replay arm never reads the RTSP names: an
 # operator who set the replay one and got the pan would have no escape hatch that works.
 # The detection-only numbers on `benchmarks/RESULTS.md`
@@ -105,7 +105,7 @@ fi
 # measured on input that cannot have any.
 PERSON_FRAMES="${SHIPINFER_BENCH_PERSON_FRAMES:-/work/benchmarks/baseline/data/person_2K}"
 SHIP_FRAMES="${SHIPINFER_BENCH_SHIP_FRAMES:-/work/benchmarks/baseline/data/ship_2K}"
-if grep -qE "^node [a-z_0-9]+ (track|mtmc) " "$PLAN" &&
+if grep -qE "^node [^ ]+ (track|mtmc) " "$PLAN" &&
    [ -z "${SHIPINFER_RTSP_PERSON_DATA:-}" ] && [ -z "${SHIPINFER_RTSP_SHIP_DATA:-}" ] &&
    [ -z "${SHIPINFER_BENCH_PERSON_FRAMES:-}" ] && [ -z "${SHIPINFER_BENCH_SHIP_FRAMES:-}" ]; then
   for pair in "person:person_4K" "ship:ship_4K"; do
@@ -124,6 +124,9 @@ if grep -qE "^node [a-z_0-9]+ (track|mtmc) " "$PLAN" &&
     if [ -z "$(ls -A "$out" 2>/dev/null)" ]; then
       echo "pan fixture: generating $out from $(basename "$src")" >&2
       rm -rf "$out.partial"
+      # WHAT 400 COSTS on the replay arm: `replay.h` decodes every file in the folder and
+      # page-locks it, so 400 x 1920x1080 BGR is ~2.5 GB pinned per library, ~5 GB across the
+      # two, against ~62 MB for the ten photographs. The RTSP arm encodes once and streams.
       python "$REPO/scripts/make_pan_fixture.py" --src "$src" --out "$out.partial" --frames 400
       mv "$out.partial" "$out"
     fi

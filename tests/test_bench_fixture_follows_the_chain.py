@@ -84,6 +84,25 @@ def test_a_plan_with_a_tracker_and_nothing_else_gets_the_pan(tmp_path: Path) -> 
     assert selects_the_pan(plan)
 
 
+@pytest.mark.parametrize("slot", ["ship-track", "ShipTrack"])
+def test_the_slot_may_be_spelled_any_way_the_chain_spells_it(slot: str, tmp_path: Path) -> None:
+    """The slot is an operator-chosen YAML key; the KIND is the closed enum `plan.py` writes.
+    A predicate that constrains the slot refuses a legal chain -- silently, and on exactly the
+    measurement this file exists to protect. The vocabulary already uses hyphens elsewhere
+    (`impl: gstreamer-gpu`), so neither spelling is hypothetical.
+    """
+    plan = tmp_path / "hyphen.plan"
+    plan.write_text(
+        "plan 3 hyphen\n"
+        "node decode decode replay\n"
+        "node detect detect pool\n"
+        f"node {slot} track shipvision\n",
+        encoding="utf-8",
+    )
+
+    assert selects_the_pan(plan)
+
+
 @pytest.mark.parametrize(
     "variable",
     [
@@ -117,15 +136,16 @@ def test_a_half_written_fixture_is_never_served() -> None:
 
 
 def test_the_generator_is_only_run_when_the_directory_is_empty() -> None:
-    """`pan_frames` refuses a non-empty directory rather than mixing two laps, so the script
-    has to ask before it generates — and it must not pass `--force`, which would discard a
-    fixture another run is serving."""
+    """`pan_frames` refuses a non-empty directory rather than mixing two laps, so the CALL has
+    to sit inside the emptiness guard: hoisted out of it, every run after the first would abort
+    on the fixture it was about to serve."""
     text = RUNNER.read_text(encoding="utf-8")
     block = text[text.index("for pair in") : text.index("export SHIPINFER_RTSP_PERSON_DATA")]
+    guard = 'if [ -z "$(ls -A "$out" 2>/dev/null)" ]; then'
+    assert guard in block
 
-    assert 'if [ -z "$(ls -A "$out" 2>/dev/null)" ]; then' in block
-    invocation = next(line for line in block.splitlines() if "make_pan_fixture.py" in line)
-    assert "--force" not in invocation, (
-        f"the generator is invoked with --force: {invocation.strip()} -- which would discard a "
-        f"fixture another run is serving"
+    guarded = block[block.index(guard) : block.index("\n    fi")]
+    assert "make_pan_fixture.py" in guarded, (
+        "the generator is invoked outside the emptiness guard, so a second run aborts on the "
+        "fixture it was about to serve"
     )

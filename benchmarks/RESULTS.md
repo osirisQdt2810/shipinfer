@@ -380,7 +380,9 @@ What the rate does is decimate each camera's stream before the barrier ever sees
 workers, which is the fair queue working at ten times the design rate), so only 17–41% of a
 camera's frames reach a tracker at all. `min_hits` counts CONSECUTIVE qualifying instants and the
 gate's hit map is replaced each instant, so a track present in a sixth of them starts again almost
-every time. At the design rate nothing is refused and the same gate admits three fifths.
+every time. At the design rate on TWELVE cameras nothing is refused and the same gate admits
+three fifths; the fifty-camera row above is the design rate too, and it refuses 23% -- the
+queue is sized per host, so the fleet's size decides how much of the rate reaches it.
 
 **What this changes about the fix.** `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` was priced against a
 flat 260 img/s measured on the slideshow fixture, where almost nothing tracked at all. Its
