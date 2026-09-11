@@ -3487,7 +3487,33 @@ hook down, for when the operator asked to see something before it is executed.
           accesses holding the mutex, and a 40-line control program in the same
           `condition_variable::wait_for` shape reproduces them, so they are the toolchain's
           modelling rather than this code.
-        * **3c-i -- OPEN AS #220 (`feat/the-cross-camera-seam`, 1 commit, 15 files):** the
+        * **3c-ii -- OPEN AS #221 (`feat/the-cross-camera-lane-unit`, 1 commit, 17 files):**
+          the `shipvision` impl behind the seam -- gate, gram, `GatedMatcher::build`,
+          `AgglomerativeClusterer::fit_predict`, `GlobalIdAssigner::assign` -- plus
+          `--kind cluster`, whose golden is the only gate that catches a piece wired to the
+          wrong neighbour (removing the gate from the composition fails it with 12
+          divergences while every unit test stays green). Both goldens reproduce from the
+          PINNED submodule (5a5359a, checked against the parent tree). ASan/UBSan over the
+          whole composition including the seven library sources: clean. ALSO #220's FIVE
+          APPROVAL NOTES, two of which become reachable in this PR: a throwing factory no
+          longer caches a null `shared_ptr` under its (impl, slot) -- the lane's tracker is
+          the first factory that can fail -- and a duplicate (camera, track) inside one
+          instant is refused rather than admitted twice, which would have had one track take
+          two rows of the matrix and contest itself. Plus `lines_of` extracted to
+          `parity_files.h` at the third copy, the not-thread-safe line on `gate.h` and
+          `cluster.h`, and `reset()` keeping `width_` stated as deliberate.
+        * **3c-i -- MERGED as #220 (11 Sep), APPROVE on round 2 after one BLOCKING round.**
+          The blocking half was a hole in the exception-safety fix #220 carried over from
+          #219: `check_embeddings` guarded the width comparison on `width_ != 0` and assigned
+          `width_` after the loop, so a VIRGIN assigner's first instant compared no widths --
+          and a chain with two embedders mixes widths on every instant including that one, so
+          instant one merged two incomparable tracks into one global id (the direction
+          `gate.h` calls unrecoverable) and every instant after it threw. The `const` method
+          with a `mutable` member is what made the fix look illegal. Second finding: the
+          gate's golden was never re-checked against the reference, so a submodule bump would
+          leave port and golden agreeing while both disagreed with `shipvision` --
+          `tests/pipeline/test_gate_parity.py` is the missing half.
+          ORIGINAL (3c-i, as opened as #220 (`feat/the-cross-camera-seam`, 1 commit, 15 files):** the
           `ClusterTracker` seam and the `ObservationGate` in front of it, both lane-free, plus
           `--kind gate` (four lines, because #219 collapsed the emitter's five-way duplication
           into one `_emit`). Four red probes: the gate's height-then-age order and its
