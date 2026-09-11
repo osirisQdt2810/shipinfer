@@ -285,6 +285,48 @@ the reassembly window has not been re-chosen since they started
 (`MTMC-REAL-WORK-COSTS-A-SIXTH-OF-THE-EVENTS`). The throughput table further up this page was
 measured with `mtmc` admitting nothing, so it is a floor for this chain rather than its rate.
 
+### Pushed to saturation, the useful rate is not the retired rate
+
+The rows above run the design rate — 20 fps per camera, which twelve cameras deliver and this
+chain keeps up with at 24 workers. Pushed to **200 fps per camera**, the load the flat-rate
+finding used, on the same pan fixture, the same four A5000s (0/2/5/6), `--source nvdec`, and the
+same chain with the roster naming the run's own twelve cameras — so the comparison row below is
+the 57.6% arm, not the 4-camera-roster one — with workers as the only variable:
+
+| workers | retired img/s | untracked | **tracked img/s** | mtmc admitted | ids / tracks | events incomplete |
+|---|---|---|---|---|---|---|
+| 24 | 399.7 | 447 (2.8%) | **388.5** | 42 of 25 282 (0.17%) | 1 / 1 | 18.3% |
+| 48 | 659.1 | 4 262 (16.2%) | **552.5** | 120 of 34 954 (0.34%) | 0 / 0 | 18.6% |
+| 92 | 867.9 | 12 940 (37.3%) | **544.4** | 96 of 25 385 (0.38%) | 0 / 0 | 20.2% |
+
+**The tracked rate is a ceiling and the workers do not move it.** Retired frames scale (399.7 →
+867.9) while the **tracked** rate saturates at ~550: 48 workers to 92 buys 209 more retired
+img/s and *no* more frames carrying ids, while the tracker's refusals rise 2.8% → 16.2% → 37.3%.
+So the honest figure for this chain on four A5000s is **~550 tracked img/s**, and the devices are
+not what stops it.
+
+**Identity collapses here, and the worker count is NOT why.** 0.17 / 0.34 / 0.38% of observations
+admitted, against **57.6%** at the design rate on the same footage, the same roster and the same
+box. The refusal column is the reordering, and it rises **13×** across these arms while admission
+does not move — and goes the wrong way if anything. The 24-worker arm settles it: 2.8% refusals,
+reordering all but absent, and admission already collapsed to 0.17%. The variable is the input
+**rate**, not the workers.
+
+What the rate does is decimate each camera's stream before the barrier ever sees it: **50 601 to
+76 420 frames are refused at the pipeline queue** (spread evenly — 4 000 ± 600 per camera at 92
+workers, which is the fair queue working at ten times the design rate), so only 17–41% of a
+camera's frames reach a tracker at all. `min_hits` counts CONSECUTIVE qualifying instants and the
+gate's hit map is replaced each instant, so a track present in a sixth of them starts again almost
+every time. At the design rate nothing is refused and the same gate admits three fifths.
+
+**What this changes about the fix.** `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` was priced against a
+flat 260 img/s measured on the slideshow fixture, where almost nothing tracked at all. Its
+premise survives the better fixture and its baseline moves: the tracked rate flattens at ~550
+while refusals rise 13×, which is the ordering cost the item is about. What it may NOT claim is
+the identity collapse above — that one is the rate, and the item says so now, because the
+measurement that would settle affinity's worth is admission at a load the queue does not
+decimate.
+
 
 The fix for the *throughput* half is placement **affinity**, not more threads — a camera's frames reaching one worker, or
 a per-camera sequencer in front of the tracker — and it trades load balance for ordering, which

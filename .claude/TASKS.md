@@ -2780,6 +2780,21 @@ hook down, for when the operator asked to see something before it is executed.
       per-camera SEQUENCER in front of the tracker (release in frame order, bounded, drop the
       late ones) rather than pinning the frame to a thread; that is also what the Python
       plane's `track.py` shard does per camera. MEASURE both against the flat 260.
+      RE-MEASURED 11 Sep on footage that actually tracks (`harness/pan.py`), and the premise
+      survives with a better baseline. 12 cameras x 200 fps x 40 s, four A5000s, workers the
+      only variable: retired 399.7 -> 659.1 -> 867.9 img/s at 24/48/92 while TRACKED saturates
+      at 388.5 -> 552.5 -> 544.4, so 48 to 92 buys 209 retired img/s and no ids. Untracked
+      rises 2.8% -> 16.2% -> 37.3%, which IS the ordering cost this item is about. The old flat
+      260 was measured on the slideshow fixture where almost nothing tracked at all; the honest
+      ceiling today is ~550 tracked img/s on four devices.
+      WHAT THIS ITEM MAY NOT CLAIM, and the first draft did: the identity collapse at saturation
+      (0.17%, 0.34%, 0.38% admitted against 57.6% at the design rate) is NOT the worker count.
+      The refusals rise 13x across the arms while admission does not move, and the 24-worker arm
+      -- 2.8% refusals, reordering all but absent -- is already collapsed. The variable is the
+      RATE: 50 601-76 420 frames are refused at the pipeline queue (evenly, 4 000 +/- 600 per
+      camera), so 17-41% of a camera's frames reach a tracker and a track cannot be present in
+      three CONSECUTIVE instants. So affinity's worth has to be measured as admission at a load
+      the queue does not decimate -- 12 x 20 fps with workers swept -- and not from these rows.
 
 - [ ] MTMC-TWO-SLOT-CACHED-REGISTRIES · `pipeline/mtmc/cluster.cpp` is
       `pipeline/tracking/associator.cpp` transcribed: `add`/`has`/`names`/`create`, `made_lock`,
