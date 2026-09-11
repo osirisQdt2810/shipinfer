@@ -2771,7 +2771,9 @@ hook down, for when the operator asked to see something before it is executed.
       worker is the 1000-slot buffer's failure in a new place. The shape that keeps both is a
       per-camera SEQUENCER in front of the tracker (release in frame order, bounded, drop the
       late ones) rather than pinning the frame to a thread; that is also what the Python
-      plane's `track.py` shard does per camera. MEASURE both against the flat 260. `pipeline/mtmc/cluster.cpp` is
+      plane's `track.py` shard does per camera. MEASURE both against the flat 260.
+
+- [ ] MTMC-TWO-SLOT-CACHED-REGISTRIES · `pipeline/mtmc/cluster.cpp` is
       `pipeline/tracking/associator.cpp` transcribed: `add`/`has`/`names`/`create`, `made_lock`,
       `made`, `made_*`, the (impl, slot) cache and the lane-before-unknown refusal, ~60
       near-identical lines. Named by #220's review, and defensible at TWO: the mirroring is
@@ -2781,6 +2783,44 @@ hook down, for when the operator asked to see something before it is executed.
       `SlotCachedRegistry<T>` -- interface, registrar, per-(impl, slot) cache, one refusal that
       takes the noun and the lane -- is cheaper than a third copy, and until then the two can
       drift independently, which is the real cost. Whoever adds the third writes the template.
+
+- [ ] MTMC-GRAM-WANTS-A-REAL-GEMM · `shipvision_cluster.cpp::gram_of` is a scalar triple loop,
+      and `matchers/appearance/matcher.h` names exactly this code as the thing not to write:
+      "`features @ features.T` is what BLAS is for -- multithreaded, blocked for the cache --
+      and a triple loop in this file would be slower than the thing it replaced while looking
+      like an optimisation." #221's review measured the first draft; I re-measured both shapes
+      in the container at `-O2` (`.artifacts/gram_bench.cpp`, three passes each):
+      | n admitted | dim | first draft | flat + float + symmetric (#221) |
+      |---|---|---|---|
+      | 120 | 512 | 13.7 ms | **6.8 ms** |
+      | 120 | 2048 | 63.1 ms | **26.9 ms** |
+      | 300 | 512 | 89.9 ms | **37.7 ms** |
+      | 300 | 2048 | 507.4 ms | **171.7 ms** |
+      | 750 | 512 | 650.6 ms | **243.4 ms** |
+      | 750 | 2048 | 3881.7 ms | **1189.6 ms** |
+      The rewrite is 2.1-3.3x and NOT ENOUGH: `ids()` holds its lock across the gram, the
+      instant budget at 20 fps is 50 ms, and the design load's 50 cameras x ~15 tracks = 750
+      observations puts a 512-d embedder at 243 ms and a 2048-d one at 1.2 s. At the load
+      actually measured (12 cameras, n ~ 120) it is 6.8 ms and invisible, which is why the
+      chain runs today and why this is an item rather than a blocker.
+      TWO WAYS OUT, the first being the real one: (a) a BLAS `cblas_ssyrk` (or Eigen) behind
+      the `shipvision` lane -- E.E^T is one call, ~1-3 ms at n=750 -- which adds a
+      `pkg-config` package to that lane and nothing to the offline tier; (b) bound the admitted
+      count per instant, which is what `ObservationGate` is for, and state the bound. Measure
+      the group size a deployment actually produces before choosing: 750 is the sizing table's
+      number, not an observation.
+
+- [ ] CPP-LANE-JOB-GLOBS-ONE-PREFIX · `.github/workflows/cpp.yml:98`'s lane job collects
+      binaries with `for candidate in csrc/build/test_tracking_*`, so a lane binary named
+      anything else is BUILT BY CI AND NEVER RUN -- the `CSRC-BENCH-UNCOMPILED` shape, found by
+      #221's review on `test_cluster_parity`. The offline job globs `test_*` and counts, but it
+      builds without `--with-external shipvision`, so a lane unit is not compiled there at all.
+      WORKED AROUND by naming the binary `test_tracking_cluster_parity`, which the existing
+      glob catches, and the convention is stated in `build_csrc.py`'s lane list. THE FIX: run
+      every binary the lane build produced with a count guard, the way the offline job does.
+      IT NEEDS A MANUAL MERGE -- a PR touching `.github/workflows/**` cannot pass the review
+      job (CLAUDE.md's known permanent exception), which is why it is not folded into a normal
+      PR.
 
 - [ ] WHOSE-LIBCUDART-DOES-THE-PYTHON-FLAG-SET · MEASURE whether this plane's blocking-sync
       flag reaches torch's streams at all. #214's review predicted that a second
