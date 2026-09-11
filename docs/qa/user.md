@@ -1171,6 +1171,23 @@ THREE RULINGS, and the first one retires every number in this session:
 3. **If there is no video, MAKE one. Make the input.** Being blocked on missing input is not
    an answer -- the box has 1080p frames and ffmpeg, so a video is something to produce.
 
+### V168 — 11 Sep. Optimisation is a LOOP (benchmark -> profile), and two questions about the CPU
+
+> tối ưu là 1 vòng lặp, bao gồm: pbenchmark -> profile xem hiện tại pipeline đang bị bottleneck
+> ở đâu. Bạn cần làm đúng như vậy, pipeline hiện tại đang có những step nào xử lý ở CPU, liệu
+> còn pattern: RAM -> VRAM -> RAM -> VRAM không?
+
+A standing rule and two questions:
+
+1. **Optimisation is a loop: benchmark, then PROFILE to find where the pipeline is bottlenecked
+   -- and do it in that order, every time.** A number without a profile says nothing about what
+   to change next; my worker sweeps priced the symptom (frames, ids) and never once said which
+   stage the time is in.
+2. **Which steps of the current pipeline run on the CPU?** To be answered per stage, from the
+   code and from a profile, not from the architecture's intent.
+3. **Is the RAM -> VRAM -> RAM -> VRAM pattern still there?** The round trip ADR-004/V156 exist
+   to remove: decode to VRAM, and everything downstream on the device.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
@@ -1351,6 +1368,7 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 
 | Rule | Where |
 |---|---|
+| **Optimisation is a LOOP: benchmark, then PROFILE** to find where the pipeline is bottlenecked -- in that order, every time. Name the stages that run on the CPU and prove no RAM -> VRAM -> RAM -> VRAM round trip survives | **V168**, V156, ADR-004 |
 | **Benchmark ONLY over gstreamer RTSP from an offline video file** — no camera, no `replay`, no other route; if the video does not exist, create it | **V167** |
 | **The target is 3 000 FPS** for the whole pipeline (lowered from 4 500), and only that counts as achieved | **V167**, V165 |
 | **The target is 4 500 img/s for the WHOLE pipeline**, `decode -> ... -> mtmc track`, absolute rather than a multiple of the baseline | **V165** |
