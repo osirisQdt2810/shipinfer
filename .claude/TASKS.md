@@ -2756,7 +2756,22 @@ hook down, for when the operator asked to see something before it is executed.
       global id carries two tracks from one camera and the second is a ghost no instant can
       displace.
 
-- [ ] MTMC-TWO-SLOT-CACHED-REGISTRIES · `pipeline/mtmc/cluster.cpp` is
+- [ ] PIPELINE-WORKERS-NEED-CAMERA-AFFINITY · MEASURED 11 Sep and it is the chain's real
+      ceiling: one shared worker pool reorders a camera's frames, the per-camera tracker
+      refuses a frame that does not advance its stream, and the refusal rate rises with the
+      worker count -- 1.8% at 24 workers, 20.2% at 48, 41.9% at 92, while the TRACKED rate
+      stays flat at ~260 img/s. So every worker past ~24 buys frames that carry no ids, which
+      `mtmc` cannot associate and the event schema leaves null.
+      THE FIX IS AFFINITY, not threads: a camera's frames must reach the same worker, the way
+      `scheduling/policies/sequence_affinity.py` already does it for model instances on the
+      Python plane. The C++ pipeline's `WorkerPool` takes the next frame off one queue, so
+      nothing binds a camera to a worker.
+      THE COST TO WEIGH BEFORE BUILDING IT: affinity trades load balance for ordering, which
+      is the trade this whole project exists to get right -- a crowded camera pinned to one
+      worker is the 1000-slot buffer's failure in a new place. The shape that keeps both is a
+      per-camera SEQUENCER in front of the tracker (release in frame order, bounded, drop the
+      late ones) rather than pinning the frame to a thread; that is also what the Python
+      plane's `track.py` shard does per camera. MEASURE both against the flat 260. `pipeline/mtmc/cluster.cpp` is
       `pipeline/tracking/associator.cpp` transcribed: `add`/`has`/`names`/`create`, `made_lock`,
       `made`, `made_*`, the (impl, slot) cache and the lane-before-unknown refusal, ~60
       near-identical lines. Named by #220's review, and defensible at TWO: the mirroring is
@@ -2854,7 +2869,37 @@ hook down, for when the operator asked to see something before it is executed.
       `ship_detector` and `ship_segmenter` only, so on `ship_person_cpu` the two embedders'
       plans are outside the byte-identity guard entirely.
 
-- [~] **V167-GSTREAMER-ONLY-3000 · THE FIRST NUMBERS ON THE MANDATED ROUTE, 10 Sep.**
+- [~] **V167-GSTREAMER-ONLY-3000 · THE WHOLE CHAIN MEASURED END TO END, 11 Sep, AND THE
+      THROUGHPUT NUMBER THIS LEDGER HAS BEEN QUOTING WAS COUNTING FRAMES THE TRACKER
+      REFUSED.** `decode -> detect -> crop -> segment -> embed x2 -> track -> mtmc`, over
+      gstreamer RTSP from the offline H.264 (`--source nvdec`), 4 GPUs (0/2/5/6), 12 cameras
+      x 200 fps x 40 s, fp16, one variable: `workers`.
+      | workers | accepted img/s | untracked | **TRACKED img/s** | complete/incomplete |
+      |---|---|---|---|---|
+      | 24 | 265.8 | 188 (1.8%) | **261.1** | 10 633 / 0 |
+      | 48 | 331.4 | 2 679 (20.2%) | **264.4** | 13 256 / 0 |
+      | 92 | 442.6 | 7 409 (41.9%) | **257.3** | 17 662 / 40 |
+      **THE TRACKED RATE IS FLAT AT ~260 img/s.** Every extra worker buys accepted frames that
+      carry NO track ids, and a frame with no ids is a frame `mtmc` cannot associate -- so the
+      "throughput scales with workers, sharply diminishing" finding below was measuring the
+      refusals. `track_frames_untracked` is the counter that says so, and it exists because
+      #215's review made a refused frame publish an empty batch rather than fail the stage.
+      WHY: ONE SHARED WORKER POOL REORDERS A CAMERA'S FRAMES, and a per-camera tracker refuses
+      a frame that does not advance its own stream (`stages.cpp:290`, and `track.py` catches
+      the same refusal). More workers, more reordering, more refusals -- 1.8% at 24, 42% at 92.
+      So the chain's real answer on four A5000s is **~260 img/s of tracked frames**, which is
+      **11.5x short of V167's 3 000**, and the per-worker scaling that looked like headroom was
+      not. The fix is placement AFFINITY rather than more threads
+      (`PIPELINE-WORKERS-NEED-CAMERA-AFFINITY`, below): the Python plane already owns a
+      `sequence_affinity` placement policy; the C++ pipeline's worker pool has no such binding.
+      Neither the host nor the engines is the wall at 92 workers: 12.4 of 48 cores (26%), and
+      the four models sum to ~430% of the 800% eight instances could use on each device.
+      ALSO: the 10 Sep entry below reported "484.8 img/s, every frame complete" for the same
+      split on four GPUs and "zero untracked" on three. Today's binary reports 42% untracked at
+      that worker count. I am not asserting the old number was wrong -- it was a different day,
+      a different tenant load and a pre-#220 binary -- but it was read WITHOUT the untracked
+      counter in view, and the tracked rate is the number that matters.
+      PREVIOUS ENTRY (10 Sep) -- THE FIRST NUMBERS ON THE MANDATED ROUTE.
       Every figure below is `--source nvdec` over **gstreamer RTSP** from an **offline H.264
       video** (`benchmarks/baseline/data/.rtsp/*.h264`, encoded once by ffmpeg from the 1080p
       JPEGs -- so the "make the video" half was already built and is what the RTSP server
