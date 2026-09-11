@@ -2748,6 +2748,13 @@ hook down, for when the operator asked to see something before it is executed.
       that is currently impossible -- window against coverage against throughput -- can be run
       and the default chosen rather than proposed.
 
+> **QUEUED, VERIFIED, PUSHED, NOT YET OPENED (one PR at a time).** Two branches are green on
+> both tiers and waiting for #235 to merge, in this order:
+> `feat/a-capture-clock-that-steps-back-is-counted` (both barriers refuse a capture stamp that
+> steps back past a window; `MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK` (a)) and
+> `test/the-contested-cluster-tripwire` (the reference defect becomes a gate rather than a
+> comment). Open them in that order; both rebase cleanly as of 767b2a2.
+
 - [ ] MTMC-ONE-CAMERA-TWICE-IN-A-CONTESTED-CLUSTER · A REFERENCE DEFECT, found by #219's
       review in the port and confirmed to be in BOTH planes. `_assign_group`'s per-camera
       contest re-reads the incumbent from `members_` on every iteration, a winner is added by
