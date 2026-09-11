@@ -14,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -911,6 +912,24 @@ int main(int argc, char** argv) {
                 for (const auto& [reason, count] : barrier->frame_stats()) {
                     std::cout << "mtmc_frames " << slot << " " << reason << " " << count
                               << "\n";
+                }
+                // THE ROSTER'S OWN LINE, and it is why the reasons above read as they do: a
+                // declared camera is waited for whether it exists or not, so a roster naming
+                // cameras this fleet does not have makes `complete` unreachable and every
+                // instant closes on its window. Measured 11 Sep -- `ship_person_cpu.yaml`
+                // declares `cam-01 ... cam-04` and every bench fleet is `cam00 ... cam11`, so
+                // not ONE instant closed complete in six runs and nothing said why. Printed
+                // only when there is something to say, because an empty list every run is a
+                // line readers learn to skip.
+                const std::set<std::string> silent = barrier->silent_cameras();
+                if (!silent.empty()) {
+                    std::cout << "mtmc_cameras_silent " << slot << " ";
+                    bool first = true;
+                    for (const std::string& camera : silent) {
+                        std::cout << (first ? "" : ",") << camera;
+                        first = false;
+                    }
+                    std::cout << "\n";
                 }
             }
             for (const mtmc::MadeClusterTracker& made : mtmc::made_cluster_trackers()) {

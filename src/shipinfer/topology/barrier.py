@@ -472,6 +472,22 @@ class InstantBarrier:
             return self._live_set
 
     @property
+    def silent_cameras(self) -> frozenset[str]:
+        """Declared cameras that have never sent a frame. Empty is the healthy answer.
+
+        A non-empty one is a configuration fault that is otherwise silent: announced cameras
+        win over seen ones (:meth:`camera_added`), so a roster naming cameras this fleet does
+        not have makes a complete instant unreachable and every one closes on its window.
+        Measured 11 Sep on the C++ plane: a chain declaring `cam-01 … cam-04` against a fleet
+        of `cam00 … cam11` closed NOT ONE instant complete in six runs.
+        """
+        with self._cond:
+            # No `_hooked` check: with no lifecycle wiring `_announced` is empty, so the
+            # difference is empty and nothing can be silent by construction. A branch for that
+            # would be a second statement of the same fact.
+            return frozenset(self._announced - self._seen)
+
+    @property
     def open_instants(self) -> int:
         with self._cond:
             return len(self._buckets)
