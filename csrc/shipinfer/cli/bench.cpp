@@ -463,11 +463,14 @@ int main(int argc, char** argv) {
         //: this path runs only on a refusal, which on a healthy fleet is never.
         std::mutex unwritable_lock;
         std::map<std::string, uint64_t> unwritable_by_camera;
-        //: WHICH STAGE did not deliver, by name, for every event sealed Incomplete. The total
-        //: alone reads as a timeout and is not one: measured 11 Sep on the pan fixture, 1 483
-        //: of 9 520 events were incomplete with `collector_timeouts 0`, so a frame was sealed
-        //: while a stage it expected had never answered -- and nothing said which. A tally
-        //: under a mutex costs nothing on a healthy run, where the map stays empty.
+        //: WHICH STAGE did not deliver, by name, for every result that carries a missing
+        //: list -- Timeout, Evicted and Shutdown as well as Incomplete, because
+        //: `finish_locked` fills it for all four and a stage lost to a timeout is worth the
+        //: same line. So these lines need NOT sum to `events_incomplete`: a frame missing two
+        //: stages counts twice, and an evicted frame that delivered everything counts zero.
+        //: The total alone reads as a timeout and is not one: measured 11 Sep, 1 483 of 9 520
+        //: events with `collector_timeouts 0`, and nothing said which stage. A tally under a
+        //: mutex costs nothing on a healthy run, where the map stays empty.
         std::mutex missing_lock;
         std::map<std::string, uint64_t> missing_by_stage;
         //: Every finished frame's reassembly wait, so the run can report PERCENTILES. A vector
@@ -665,7 +668,14 @@ int main(int argc, char** argv) {
         // with the runnable set before EVERY stage, so a stage is expected exactly when it can
         // run. The Python plane has always done it this way: `pipeline/runner.py` calls
         // `collector.open(state)` with no `expected` at all.
-        const std::vector<std::string> unconditional{"detect"};
+        // THE DETECTOR'S SLOT, not the kind. `plan_stages` names the stage `detect->slot` and
+        // `from_plan` builds `DetectStage(planned.detect_slot, ...)`, so a chain that spells it
+        // anything -- `kind: detect` exists for exactly that, and
+        // `scenarios/plans/defaults.yaml` ships `detect_small` -- would have every frame
+        // expecting a stage nothing delivers. That is this PR's own artefact one level up:
+        // `events_complete 0` and `events_missing_stage detect N` naming a stage not in the
+        // chain, while `stage_names` above prints the real slot on the same stdout.
+        const std::vector<std::string> unconditional{planned.detect_slot};
         // The pipeline queue hands frames to workers one at a time, as the Python runner does;
         // the batching happens in each model's own instance queue under its window, across
         // every frame in flight.

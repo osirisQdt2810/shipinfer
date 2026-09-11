@@ -784,7 +784,8 @@ namespace {
             /*fail=*/true));
         auto state = a_frame();
         check(collector.open(state, {"detect", "crop"}),
-              "opened with the unconditional stages");
+              "opened with both stages, which is what this test needs rather than what the "
+              "run now opens with");
         CollectorObserver observer(collector, state->tag());
         dag.execute(*state, observer);
         collector.seal(state->tag());

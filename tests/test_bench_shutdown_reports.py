@@ -126,6 +126,22 @@ class TestOneReporterServesBothExits:
                 "four lines above it; every worker writes it as it seals a frame"
             )
 
+    def test_the_one_stage_the_run_expects_is_read_from_the_plan(self) -> None:
+        """The detector's stage is named for its SLOT -- `plan_stages` pushes `detect->slot`
+        and `scenarios/plans/defaults.yaml` ships `detect_small` -- so a literal `"detect"` on
+        the expected list would make every frame of such a chain report
+        `events_missing_stage detect N`, naming a stage that is not in it. That is the artefact
+        this file's neighbour deletes, one level up, and `events_complete` now rests on this
+        single name.
+        """
+        text = BENCH.read_text(encoding="utf-8")
+        declaration = next(line for line in text.splitlines() if "unconditional{" in line)
+
+        assert "planned.detect_slot" in declaration, declaration
+        assert (
+            '"detect"' not in declaration
+        ), f"the run expects a hard-coded stage name: {declaration.strip()}"
+
     def test_the_report_names_the_stage_rather_than_only_counting(self) -> None:
         """A number nobody can act on is not a diagnostic: the line has to carry the stage's
         own name, which is what `FrameResult::missing` holds."""

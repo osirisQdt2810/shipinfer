@@ -17,6 +17,9 @@ runnable and was sealed Incomplete for a stage with nothing to do. `detect` stay
 because an empty expected set makes `complete()` trivially true; everything else is added by
 `planned()` as it becomes runnable, which is what the Python plane has always done. The same run
 now answers `events_complete 7118`, `events_incomplete 0`.
+
+---
+
 ## 2026-09-11 — a roster nobody answers for says so, on both planes
 
 A declared camera is waited for whether it exists or not, so a roster naming cameras the fleet
@@ -29,6 +32,9 @@ once, naming them, the first time an instant gives up on its window while one ha
 Per frame, not per announcement: a static fleet announces everything before the first frame. It
 also surfaced a V88 divergence whose comment claimed the opposite -- the C++ plane announces the
 declared roster at graph build, this plane only what the runner hands it -- now filed.
+
+---
+
 ## 2026-09-11 — the mask fold has a kernel, and it is 144x the host loop
 
 The profile said the segmenter's `(32, 160, 160)` prototype bank is copied home per crop -- 3.1 MB
@@ -2127,6 +2133,9 @@ catches everything, counts `build_failures` and always returns `PadProbeReturn.O
 drain included. Config generation refuses eight ways before a GPU is involved — the sharpest
 being a single-output detector with no `bbox_parser`, which otherwise runs and reports zero
 detections on every frame.
+
+---
+
 ## perf: multi-chunk copies home go through pinned ping-pong staging (26 Aug 2026)
 
 C44's lever 2, converged over three review rounds. The pageable D2H tails were the ops
