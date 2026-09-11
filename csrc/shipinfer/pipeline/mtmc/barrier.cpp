@@ -124,6 +124,18 @@ namespace shipinfer::mtmc {
         return frame_counts_;
     }
 
+    std::set<std::string> InstantBarrier::silent_cameras() const {
+        std::lock_guard<std::mutex> guard(lock_);
+        // ANNOUNCED MINUS SEEN. No `hooked_` check: with no lifecycle wiring `announced_` is
+        // empty, so the difference is empty and nothing can be silent by construction -- a
+        // branch for that would state the same fact twice.
+        std::set<std::string> silent;
+        for (const std::string& camera : announced_) {
+            if (seen_.count(camera) == 0) silent.insert(camera);
+        }
+        return silent;
+    }
+
     void InstantBarrier::refresh_live() {
         live_ = hooked_ ? announced_ : seen_;
     }

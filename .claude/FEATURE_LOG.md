@@ -5,6 +5,18 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-11 — a roster nobody answers for says so, on both planes
+
+A declared camera is waited for whether it exists or not, so a roster naming cameras the fleet
+does not have makes a complete instant unreachable and every one closes on its window -- which
+reads as a clock or a lane-depth problem. Measured: `ship_person_cpu.yaml` declares
+`cam-01 … cam-04`, every bench fleet is `cam00 … cam11`, and not ONE instant closed complete.
+Both barriers answer `silent_cameras()` now -- announced minus seen -- the bench prints
+`mtmc_cameras_silent <slot> cam-01,...` when the set is non-empty, and the Python element warns
+once, naming them, the first time an instant gives up on its window while one has never sent.
+Per frame, not per announcement: a static fleet announces everything before the first frame. It
+also surfaced a V88 divergence whose comment claimed the opposite -- the C++ plane announces the
+declared roster at graph build, this plane only what the runner hands it -- now filed.
 ## 2026-09-11 — the mask fold has a kernel, and it is 144x the host loop
 
 The profile said the segmenter's `(32, 160, 160)` prototype bank is copied home per crop -- 3.1 MB

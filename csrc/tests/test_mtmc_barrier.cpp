@@ -752,6 +752,31 @@ namespace {
         check(barrier.instant_stats()[mtmc::kDroppedFailed] == 1, "counted once, per instant");
     }
 
+    void a_declared_camera_that_never_sends_is_named() {
+        // The fault this exists to make visible: an announced camera is waited for whether it
+        // exists or not, so a roster naming cameras the fleet does not have makes `complete`
+        // unreachable and every instant closes on its window instead -- which reads as a clock
+        // or a lane-depth problem. Measured 11 Sep at 12 cameras: not ONE complete instant in
+        // six runs, 421 of 905 once the roster named the run's own cameras.
+        InstantBarrier barrier(options(0.06, 4));
+
+        check(barrier.silent_cameras().empty(),
+              "nothing is silent before anything is announced: the live set IS what was seen");
+
+        barrier.camera_added("cam0");
+        barrier.camera_added("cam-typo");
+        check(barrier.silent_cameras() == std::set<std::string>{"cam0", "cam-typo"},
+              "both are silent until a frame arrives, which is why the element waits for a "
+              "window to close before it says anything");
+
+        barrier.submit("cam0", 100.0, payload_of("a"), kJoin);
+        check(barrier.silent_cameras() == std::set<std::string>{"cam-typo"},
+              "a camera that has sent is no longer silent, and the typo is left");
+
+        barrier.drop_camera("cam-typo");
+        check(barrier.silent_cameras().empty(), "and dropping it leaves nothing to report");
+    }
+
     void one_event_per_instant_and_not_one_per_frame() {
         std::vector<std::string> events;
         InstantBarrier barrier(options(0.06, 4), nullptr, {},
@@ -856,6 +881,7 @@ int main() {
     a_shutdown_releases_the_parked_workers_at_once();
     a_submit_after_close_all_is_refused_rather_than_parked();
     a_failed_association_releases_the_waiters_and_the_closer_gets_the_exception();
+    a_declared_camera_that_never_sends_is_named();
     one_event_per_instant_and_not_one_per_frame();
     every_frame_of_a_group_gets_the_same_answer_or_an_honest_gap();
     std::printf("%d checks, %d failure(s)\n", checks, failures);

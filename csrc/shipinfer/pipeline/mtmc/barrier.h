@@ -205,6 +205,15 @@ namespace shipinfer::mtmc {
         std::map<std::string, uint64_t> instant_stats() const;
         std::map<std::string, uint64_t> frame_stats() const;
 
+        //: Declared cameras that have never sent a frame. EMPTY is the healthy answer, and a
+        //: non-empty one is a configuration fault that is otherwise silent: announced cameras
+        //: win over seen ones, so a roster naming cameras this fleet does not have makes
+        //: `complete` unreachable and every instant closes on the window or on a newer one.
+        //: Measured 11 Sep: `topology/ship_person_cpu.yaml` declares `cam-01 ... cam-04` and
+        //: every bench fleet is `cam00 ... cam11`, so not ONE instant closed complete in six
+        //: runs -- 421 of 905 did once the roster named the run's own cameras.
+        std::set<std::string> silent_cameras() const;
+
         // The lifecycle half: which cameras the group is waiting for. Announced cameras win
         // over merely-seen ones the moment anything announces, the way the Python element's
         // `camera_added` hook does.
