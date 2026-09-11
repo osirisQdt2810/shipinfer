@@ -2849,7 +2849,7 @@ hook down, for when the operator asked to see something before it is executed.
       report (`complete 0, advanced 428`), while a roster matching the fleet closes the most
       instants on evidence of any configuration measured (`complete 366` of 662).
 
-- [ ] CSRC-MTMC-GATE-OPTIONS · THE GATE'S THRESHOLDS ARE NOT SETTABLE FROM THE CHAIN, and
+- [~] CSRC-MTMC-GATE-OPTIONS · THE GATE'S THRESHOLDS ARE NOT SETTABLE FROM THE CHAIN, and
       MEASURED 11 Sep that is what makes the chain issue zero global ids: at 12 cameras x 20 fps
       with zero frames dropped and the barrier closing instants on evidence
       (`complete 282 advanced 184 window 522`), the run reports
