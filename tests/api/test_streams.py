@@ -818,7 +818,11 @@ class TestNothingBlockingRunsOnTheEventLoop:
             caller = threading.Thread(target=post, name="posting")
             caller.start()
             try:
-                assert watcher.entered.wait(5.0), "the POST never asked for a report"
+                # A RENDEZVOUS, NOT THE CLAIM: it waits for the posting thread to reach the
+                # wedged report, while what the test measures is `elapsed` below --
+                # milliseconds against ten seconds, unchanged. Five seconds for a thread start
+                # failed twice on runners that were also building the C++ tiers.
+                assert watcher.entered.wait(30.0), "the POST never asked for a report"
                 started = time.monotonic()
                 assert client.get("/health").status_code == 200
                 # Still wedged: the POST has to give up on its own deadline, not because the
