@@ -3034,6 +3034,21 @@ hook down, for when the operator asked to see something before it is executed.
       which roster a group waits for, and it is now a stated divergence rather than a guess:
       `MTMC-THE-TWO-PLANES-DISAGREE-ABOUT-THE-ROSTER`.
 
+- [ ] PYTHON-COLLECTOR-HAS-NO-UNCONDITIONAL-STAGE · FOUND by #234's review, and it is the hole
+      that PR's own reasoning closes on the other plane. `pipeline/runner.py:489` calls
+      `collector.open(state)` with no `expected` at all, and `reassembly/collector.py`'s
+      `_complete` is `self._expected.issubset(self._delivered)` -- trivially TRUE on an empty
+      expected set. So a frame that dies between `open` and the graph's first `planned()` is
+      reported COMPLETE on the Python plane, where the C++ plane reports it Incomplete because
+      it keeps `detect` on the list for exactly this reason.
+      NARROW BUT REAL: the window is one frame's worth of work before the first stage is
+      planned, and what it costs is the one thing this pipeline was rebuilt to remove -- a lost
+      frame reported as a good one. THE FIX is the C++ shape: open with the one stage that
+      always runs, which on that plane is whatever the chain's first element is (the runner
+      knows the node order, so it can name it rather than hard-code `detect`).
+      NOT a V88 divergence to settle by copying: the C++ side is right and the Python side has
+      the hole, so this is a port of a decision rather than a choice between two.
+
 - [ ] MTMC-THE-TWO-PLANES-DISAGREE-ABOUT-THE-ROSTER · FOUND 11 Sep while making the fault
       above visible, and it is a V88 divergence with a comment claiming the opposite.
       `graph/from_plan.cpp:43` announces EVERY declared camera to the barrier before any worker
