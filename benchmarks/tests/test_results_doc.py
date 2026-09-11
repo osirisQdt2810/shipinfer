@@ -58,6 +58,22 @@ def test_the_chain_measured_runs_the_whole_thing(name: str) -> None:
     )
 
 
+def test_the_gate_the_page_measures_is_the_gate_a_chain_can_state() -> None:
+    """The nine-arm table is a measurement of two thresholds, and it is only reproducible while
+    those are the two a plan carries. A third one becoming settable is the day the table is
+    incomplete rather than wrong, which is exactly when it should be reread."""
+    page = RESULTS.read_text(encoding="utf-8")
+    plan = (REPO_ROOT / "src" / "shipinfer" / "topology" / "plan.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "min_hits" in page and "min_height_fraction" in page
+    assert '_PLAN_OPTIONS = ("min_hits", "min_height_fraction")' in plan, (
+        "RESULTS.md's gate table varies the two options a plan can carry; `_PLAN_OPTIONS` "
+        "moved, so the table now describes a subset of the gate a chain can state"
+    )
+
+
 def test_the_binary_stamps_its_own_disclaimer() -> None:
     """The page quotes the bench's note rather than asserting the exclusion itself.
 
