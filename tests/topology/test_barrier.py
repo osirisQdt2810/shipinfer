@@ -777,6 +777,50 @@ class TestAFailedAssociationDoesNotStrandAWaiter:
 # -- the observer -------------------------------------------------------------------------------
 
 
+class TestARosterNobodyAnswers:
+    """`MTMC-ROSTER-NAMES-NO-CAMERA-A-RUN-HAS`: a declared camera is waited for whether it
+    exists or not, so a roster naming cameras this fleet does not have makes a complete instant
+    unreachable and every one closes on its window — which reads as a clock or a lane-depth
+    problem. Measured on the C++ plane 11 Sep: not one complete instant in six runs, 421 of 905
+    once the roster named the run's own cameras."""
+
+    def test_nothing_is_silent_before_anything_is_announced(self) -> None:
+        """With no lifecycle wiring the live set IS what has been seen, so a list here would be
+        an accusation about a chain that never made a claim."""
+        held = barrier()
+
+        assert held.silent_cameras == frozenset()
+        held.submit("cam-a", 100.0, "p", associate=flat)
+        assert held.silent_cameras == frozenset()
+
+    def test_a_declared_camera_is_silent_until_it_sends(self) -> None:
+        """One camera at a time, so no submit parks: a group of one closes on its own frame,
+        and the roster grows afterwards — which is also how a real chain reaches this state,
+        since `camera_added` fires as cameras connect."""
+        held = barrier()
+        held.camera_added("cam-a")
+
+        assert held.silent_cameras == frozenset({"cam-a"})
+
+        held.submit("cam-a", 100.0, "p", associate=flat)
+
+        assert held.silent_cameras == frozenset(), "a camera that has sent is not silent"
+
+        held.camera_added("cam-typo")
+
+        assert held.silent_cameras == frozenset(
+            {"cam-typo"}
+        ), "and the one nobody ever answers for is what this property is for"
+
+    def test_dropping_the_camera_leaves_nothing_to_report(self) -> None:
+        held = barrier()
+        held.camera_added("cam-typo")
+
+        held.drop_camera("cam-typo")
+
+        assert held.silent_cameras == frozenset()
+
+
 class TestTheInstantObserver:
     def test_one_event_per_instant_and_not_one_per_frame(self) -> None:
         """A closed instant resolves many frames; counting it per frame reports the wrong number."""

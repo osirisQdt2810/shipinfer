@@ -66,6 +66,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from shipinfer.core.errors import ConfigurationError, ValidationError
 from shipinfer.core.logging import get_logger
 from shipinfer.topology.barrier import (
+    CLOSED_WINDOW,
     DEFAULT_MAX_INSTANTS,
     DEFAULT_SYNC_WINDOW_MS,
     DROPPED_FAILED,
@@ -380,6 +381,11 @@ class ShipvisionMtmc(Element):
         #: Latched so the under-sized-group warning is one line per *crossing* rather than
         #: one per camera announcement.
         self._starved_group = False
+        #: Whether any instant has given up on its window. The silent-roster check below waits
+        #: for that, because every declared camera is silent until its first frame arrives.
+        self._closed_on_window = False
+        #: Latched: one line per open(), not one per instant that times out.
+        self._warned_silent = False
         # Resolved once at open, so the per-frame path walks no module dictionaries.
         self._CameraTracks: Any = None
         self._FrameTrackCluster: Any = None
@@ -463,10 +469,12 @@ class ShipvisionMtmc(Element):
             workers=context.workers,
             budget=context.waiter_budget,
             max_instants=self._max_instants,
-            on_event=self._metrics.instant,
+            on_event=self._on_instant,
         )
         self._reported_cameras = -1
         self._starved_group = False
+        self._closed_on_window = False
+        self._warned_silent = False
         self._note_cameras()
         if context.workers is None and self._barrier.budget.permits:
             # A supplied budget wins over the worker count, so this barrier *does* wait --
@@ -626,6 +634,11 @@ class ShipvisionMtmc(Element):
                 rest of the deployment late.
             ServerStateError: called before :meth:`Element.open`.
         """
+        # PER FRAME, and not from `_note_cameras`: cameras announce before the first frame on
+        # a static fleet, so a check that only ran on an announcement would never fire for the
+        # deployment that has this fault. Two bool reads in the common case -- the set
+        # difference happens at most once per `open`.
+        self._note_silent_roster()
         tracks = item.meta.get("tracks")
         if tracks is None:
             self._metrics.frame_missing(MISSING_TRACKS)
@@ -776,6 +789,41 @@ class ShipvisionMtmc(Element):
         )
 
     # -- metrics -----------------------------------------------------------------------
+
+    def _on_instant(self, reason: str) -> None:
+        """Count the instant, and remember that one gave up on its window.
+
+        `on_event` runs UNDER the barrier's lock, which is a plain `Lock`, so this may not ask
+        the barrier anything -- `silent_cameras` takes that same lock. It sets a flag and
+        `_note_cameras`, which runs outside it, does the asking.
+        """
+        self._metrics.instant(reason)
+        if reason == CLOSED_WINDOW:
+            self._closed_on_window = True
+
+    def _note_silent_roster(self) -> None:
+        """Say it once when the group waited out a window for a camera that has never sent.
+
+        Waits for a window to have closed, because every declared camera is silent until its
+        first frame: a line at `open()` would fire on every healthy run. Measured on the C++
+        plane 11 Sep -- a chain declaring `cam-01 … cam-04` against a fleet of `cam00 … cam11`
+        closed not ONE instant complete in six runs, and nothing said why.
+        """
+        if self._warned_silent or not self._closed_on_window or self._barrier is None:
+            return
+        silent = sorted(self._barrier.silent_cameras)
+        if not silent:
+            return
+        self._warned_silent = True
+        _LOG.warning(
+            "mtmc element %r: an instant closed on its window while %s in `params: cameras:` "
+            "has never sent a frame. A declared camera is waited for whether it exists or not, "
+            "so a roster that names cameras this fleet does not have makes a complete instant "
+            "unreachable: %s",
+            self.name,
+            "camera(s) " + ", ".join(silent),
+            "either correct the roster or remove it and let the group close on evidence",
+        )
 
     def _note_cameras(self) -> None:
         """Publish the live-camera count, and only when it changed.

@@ -901,6 +901,71 @@ class TestTheCameraLifecycle:
 
 
 @needs_shipvision
+class TestARosterNobodyAnswersIsSaidOutLoud:
+    """`MTMC-ROSTER-NAMES-NO-CAMERA-A-RUN-HAS`: a declared camera is waited for whether it
+    exists or not, so a roster naming cameras this fleet does not have makes a complete instant
+    unreachable and every one closes on its window — which reads as a clock or a lane-depth
+    problem. Measured on the C++ plane 11 Sep: a chain declaring `cam-01 … cam-04` against a
+    fleet of `cam00 … cam11` closed not one instant complete in six runs.
+    """
+
+    def _warnings(self, caplog) -> list[str]:
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno >= logging.WARNING and "has never sent a frame" in r.getMessage()
+        ]
+
+    def built(self, cameras: list[str]) -> ShipvisionMtmc:
+        """A narrow window, so an instant gives up in milliseconds rather than parking a test."""
+        return opened({"group": "quay", "cameras": cameras, "sync_window_ms": 20.0})
+
+    def test_the_camera_nobody_answers_for_is_named_once(self, caplog) -> None:
+        """The camera is ANNOUNCED and then never sends, which is what this plane can reach
+        today: it announces what the runner tells it, not the declared roster
+        (`MTMC-THE-TWO-PLANES-DISAGREE-ABOUT-THE-ROSTER`). The C++ plane announces the roster
+        at graph build, which is how the measured fault arose there."""
+        with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
+            element = self.built(["cam-a", "cam-ghost"])
+            try:
+                element.camera_added("cam-a")
+                element.camera_added("cam-ghost")
+                # The first frame closes on the window -- the group is waiting for a camera
+                # that will never send -- and the second is when the element says so.
+                for frame in range(3):
+                    element.process(item("cam-a", frame, instant=frame * 1.0, tracks=[]))
+            finally:
+                element.close()
+
+        warned = self._warnings(caplog)
+        assert len(warned) == 1, warned
+        assert "cam-ghost" in warned[0], "it names the camera"
+        assert "cam-a" not in warned[0], "and only the silent one"
+        assert "complete instant" in warned[0], "and says what the fault costs"
+
+    def test_a_roster_every_camera_answers_says_nothing(self, caplog) -> None:
+        with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
+            element = self.built(["cam-a"])
+            try:
+                element.camera_added("cam-a")
+                for frame in range(3):
+                    element.process(item("cam-a", frame, instant=frame * 1.0, tracks=[]))
+            finally:
+                element.close()
+
+        assert self._warnings(caplog) == [], "a group of one that reports is healthy"
+
+    def test_nothing_is_said_before_an_instant_has_given_up(self, caplog) -> None:
+        """At `open()` every declared camera is silent, so a line there would fire on every
+        healthy run. The signal is a window that closed while one of them had never sent."""
+        with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
+            element = self.built(["cam-a", "cam-ghost"])
+            element.camera_added("cam-ghost")
+            element.close()
+
+        assert self._warnings(caplog) == []
+
+
 class TestAGroupItsWorkersCannotCoverIsSaidOutLoud:
     """The never-starve guard is honest, bounded and counted — and at the shipped default of
     four workers it answers half of an eight-camera group without anybody being told.

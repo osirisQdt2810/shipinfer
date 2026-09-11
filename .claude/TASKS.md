@@ -3024,6 +3024,32 @@ hook down, for when the operator asked to see something before it is executed.
       deployment's, so the fix is not to rename it to suit the bench: either the bench chain is
       a variant whose roster is its fleet, or a mismatch is REFUSED at open() -- the barrier
       knows both lists, and a group that never completes is a silent configuration fault today.
+      NO LONGER SILENT, 11 Sep (#233): both barriers answer `silent_cameras()` -- announced
+      minus seen -- the bench prints `mtmc_cameras_silent <slot> cam-a,cam-b` when the set is
+      non-empty, and the Python element warns once, naming the cameras, the first time an
+      instant closes on its window while one of them has never sent. WHAT IS STILL OPEN is
+      which roster a group waits for, and it is now a stated divergence rather than a guess:
+      `MTMC-THE-TWO-PLANES-DISAGREE-ABOUT-THE-ROSTER`.
+
+- [ ] MTMC-THE-TWO-PLANES-DISAGREE-ABOUT-THE-ROSTER · FOUND 11 Sep while making the fault
+      above visible, and it is a V88 divergence with a comment claiming the opposite.
+      `graph/from_plan.cpp:43` announces EVERY declared camera to the barrier before any worker
+      starts (#222), and its comment says "the Python element does the same, per member, in
+      `mtmc.py`" -- it does not. `elements/mtmc.py` announces only what the runner hands it
+      through `camera_added`, and uses `params: cameras:` for a placement warning and a
+      worker-coverage warning. So one chain file gives two instant memberships: the C++ plane
+      waits for a phantom camera forever (measured: not one complete instant in six runs), the
+      Python plane closes on evidence and never notices.
+      THE DECISION, and it belongs with `docs/arch.md` §4's placement rule rather than with a
+      diagnostic: (a) the declared roster IS the group on both planes -- correct for a group
+      that is an atomic unit of placement, and it makes a broken camera cost a full window per
+      instant until `camera_removed` fires, forever if it never connected; or (b) both close on
+      evidence and the roster stays a placement check -- forgiving, and a group of four that
+      associates three-camera instants issues ids that CHANGE when the fourth connects.
+      Whichever wins, the loser's comment comes out and the parity harness gets a scenario
+      where a declared camera never sends. Note (a) needs a way to stop waiting for a camera
+      that has never appeared -- a health timeout, or the operator removing it from the roster,
+      which is what the new warning tells them to do.
       Note the announce path already exists (`mtmc_runtime` calls `camera_added` for every
       declared camera before any worker starts), so the check costs one comparison.
       AND THE PRECEDENCE IS A THIRD OPTION, which #226's review found: that announce loop
