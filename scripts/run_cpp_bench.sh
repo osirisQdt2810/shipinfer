@@ -88,11 +88,45 @@ else
   export SHIPINFER_CPP_COMMAND="bash /work/scripts/cpp_bench_over_rtsp.sh"
 fi
 
+# A CHAIN THAT TRACKS NEEDS FOOTAGE A TRACKER CAN FOLLOW, and the default data is not that:
+# ten unrelated photographs at N fps, so a camera's scene changes completely every frame and a
+# per-camera tracker confirms almost nothing. Measured 11 Sep: the graph offered `mtmc` 0.36
+# observations per frame against ~9.5 embedded rows, and the age gate admitted NOTHING; on the
+# pan fixture (`benchmarks/harness/pan.py`, a 1080p window panned across one 4K frame) the same
+# chain offers 4.42 and admits 62% at the reference's own defaults.
+#
+# So the fixture follows the CHAIN rather than a flag nobody sets: a plan with a `track` or
+# `mtmc` node gets the pan, everything else keeps the photographs, and an explicit
+# `SHIPINFER_RTSP_*_DATA` always wins. The detection-only numbers on `benchmarks/RESULTS.md`
+# stay comparable with their own history, and a chain whose point is identity stops being
+# measured on input that cannot have any.
+PERSON_FRAMES="${SHIPINFER_BENCH_PERSON_FRAMES:-/work/benchmarks/baseline/data/person_2K}"
+SHIP_FRAMES="${SHIPINFER_BENCH_SHIP_FRAMES:-/work/benchmarks/baseline/data/ship_2K}"
+if grep -qE "^node [a-z_0-9]+ (track|mtmc) " "$PLAN" &&
+   [ -z "${SHIPINFER_RTSP_PERSON_DATA:-}" ] && [ -z "${SHIPINFER_RTSP_SHIP_DATA:-}" ]; then
+  for pair in "person:person_4K" "ship:ship_4K"; do
+    name="${pair%%:*}"
+    src="$REPO/benchmarks/baseline/data/${pair##*:}"
+    out="$REPO/.artifacts/pan/$name"
+    # GENERATED ONCE and reused: `pan_frames` refuses a non-empty directory rather than mixing
+    # two laps, so the guard is "is it there" and not "--force".
+    if [ -z "$(ls -A "$out" 2>/dev/null)" ]; then
+      echo "pan fixture: generating $out from $(basename "$src")" >&2
+      python "$REPO/scripts/make_pan_fixture.py" --src "$src" --out "$out" --frames 400
+    fi
+  done
+  export SHIPINFER_RTSP_PERSON_DATA=/work/.artifacts/pan/person
+  export SHIPINFER_RTSP_SHIP_DATA=/work/.artifacts/pan/ship
+  PERSON_FRAMES=/work/.artifacts/pan/person
+  SHIP_FRAMES=/work/.artifacts/pan/ship
+  echo "pan fixture: this plan tracks, so the cameras show a scene rather than a slideshow" >&2
+fi
+
 status=0
 timeout "${SHIPINFER_BENCH_TIMEOUT:-900}" "$REPO/deploy/rootless/cpp.sh" \
   "${SOURCE_ARGS[@]}" \
-  --person-frames /work/benchmarks/baseline/data/person_2K \
-  --ship-frames   /work/benchmarks/baseline/data/ship_2K \
+  --person-frames "$PERSON_FRAMES" \
+  --ship-frames   "$SHIP_FRAMES" \
   --plan          "/work/.artifacts/cpp/${LABEL}.plan" \
   --repository    /work/model_repository \
   --gpu-ids "$GPU_IDS" \

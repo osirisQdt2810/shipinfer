@@ -3133,7 +3133,7 @@ hook down, for when the operator asked to see something before it is executed.
       `pipeline/runner.py` calls `collector.open(state)` with no expected set at all and lets
       `planned()` widen it, which is what the C++ side does now.
 
-- [ ] BENCH-DEFAULT-FIXTURE-IS-A-SLIDESHOW · `scripts/rtsp_serve.py`'s default data is
+- [x] BENCH-DEFAULT-FIXTURE-IS-A-SLIDESHOW · DECIDED AND DONE 11 Sep. `scripts/rtsp_serve.py`'s default data is
       `person_2K`, ten unrelated photographs, and every number on `benchmarks/RESULTS.md` was
       measured on it. It is a fine detection and throughput fixture and it exercises NO
       tracking and NO cross-camera identity, which is what took three items and two days to
@@ -3142,6 +3142,15 @@ hook down, for when the operator asked to see something before it is executed.
       argues for switching is that the deployment tracks; what argues against is that every
       historical figure becomes incomparable in one commit. RECOMMENDATION: keep both, make the
       pan the default for any run that includes `track` or `mtmc`, and mark the page's rows.
+      DONE that way (#235): `run_cpp_bench.sh` reads the plan it has just written and, when it
+      holds a `track` or `mtmc` node and no `SHIPINFER_RTSP_*_DATA` is set, generates the pan
+      fixture from the 4K sources if it is not there yet and serves that instead. So the
+      fixture follows the CHAIN rather than a flag nobody sets: detection-only numbers stay
+      comparable with their own history, and a chain whose point is identity stops being
+      measured on input that cannot have any. MEASURED: the stock chain with nothing set now
+      generates both fixtures and answers `mtmc_identities 4 14` in a 15 s run, where the
+      photographs answered 0. An explicit fixture always wins, which is what makes the
+      two-fixture comparison on one chain possible at all.
 
 - [x] MTMC-GATE-COMMITS-BEFORE-THE-GRAM-CAN-THROW · NOT A PORT DEFECT, pinned 11 Sep. `ShipvisionCluster::ids()` is not atomic on
       refusal while the half it wraps promises it is: `identity.h` says "EVERY EMBEDDING IS
