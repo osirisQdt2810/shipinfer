@@ -1,0 +1,44 @@
+# The two gates before the expensive part, instant by instant. Read by both planes.
+#
+#   scenario <name> <min_hits> <min_height_fraction>
+#   instant  <camera>#<track>:<box_height_px> ...      (frames are 1920x1080 throughout)
+#
+# Heights are pixels of a 1080-tall frame so the fraction is readable: 200 is well over a
+# ninth, 50 is well under, and 120 is exactly 1/9 of 1080 -- which is the boundary the
+# comparison's strictness decides.
+
+# Three consecutive qualifying frames, then admitted every frame after.
+scenario min_hits_3 3 0.1111111111111111
+instant cam0#1:200
+instant cam0#1:200
+instant cam0#1:200
+instant cam0#1:200
+
+# HEIGHT FIRST, THEN AGE: five frames too small bank no age at all, so the track still needs
+# its three qualifying frames once it comes close. Swap the order and it would be admitted on
+# the first usable frame.
+scenario too_small_banks_nothing 3 0.1111111111111111
+instant cam0#1:50
+instant cam0#1:50
+instant cam0#1:50
+instant cam0#1:50
+instant cam0#1:50
+instant cam0#1:200
+instant cam0#1:200
+instant cam0#1:200
+
+# One missed instant restarts the run -- which is also what bounds the map.
+scenario gap_restarts 3 0.1111111111111111
+instant cam0#1:200
+instant cam0#1:200
+instant cam1#9:200
+instant cam0#1:200
+
+# Strictly greater than the threshold: 120 of 1080 is exactly 1/9 and is OUT.
+scenario boundary 1 0.1111111111111111
+instant cam0#1:120
+instant cam0#2:121
+
+# The admitted keep their INPUT order, because the caller zips them against the labels.
+scenario order 1 0.1111111111111111
+instant cam2#1:200 cam0#1:200 cam1#1:200

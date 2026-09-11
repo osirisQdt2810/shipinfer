@@ -12,10 +12,12 @@ namespace shipinfer::mtmc {
             double sum = 0.0;
             for (const float value : embedding) sum += static_cast<double>(value) * value;
             const double norm = std::sqrt(sum);
-            // A ZERO VECTOR IS REFUSED, because the reference refuses it -- measured, in
-            // `shipvision/types.py::_as_unit_vector`: "an all-zero track embedding has no
-            // direction ... Left alone it sits at cosine 0 from every gallery entry, which is
-            // a plausible-looking answer to every query rather than an obvious failure." A
+            // A ZERO VECTOR IS REFUSED here as well as in `check_embeddings`, which is the
+            // only caller that reaches this today: this is the last line of defence for a
+            // future one that skips the pre-pass, and it is the reference's own rule --
+            // measured, in `shipvision/types.py::_as_unit_vector`: "an all-zero embedding has
+            // no direction ... Left alone it sits at cosine 0 from every gallery entry, which
+            // is a plausible-looking answer to every query rather than an obvious failure." A
             // port that answered 0 here would diverge in a REFUSAL, which no golden can
             // catch: the reference raises before it answers anything to compare against.
             if (!(norm > 0.0)) {
@@ -99,21 +101,56 @@ namespace shipinfer::mtmc {
         last_seen_.clear();
     }
 
-    void GlobalIdAssigner::observe(const std::vector<IdentityObservation>& observations) {
+    void GlobalIdAssigner::check_embeddings(
+        const std::vector<IdentityObservation>& observations) {
+        // SEEDED FROM THE FIRST OBSERVATION, not only from previous instants. Guarding on
+        // `width_ != 0` compared nothing inside a virgin assigner's first instant, so a chain
+        // with two embedders merged two incomparable tracks into one global id and only then
+        // began refusing -- and `gate.h` is explicit that a merge is the unrecoverable
+        // direction. #220's review found it; the width is local to the pass now.
+        size_t width = width_;
         for (const IdentityObservation& observation : observations) {
+            const std::string who = observation.key.str();
             if (observation.embedding.empty()) {
-                throw InferenceError(observation.key.str() +
+                throw InferenceError(who +
                                      " has no embedding; cross-camera identity is decided on "
                                      "appearance, so an un-embedded track cannot be assigned");
             }
-            const TrackKey& key = observation.key;
-            try {
-                features_[key] = normalised(observation.embedding);
-            } catch (const InferenceError& error) {
-                // NAMED, because "some track has a zero embedding" sends the reader to 750 of
-                // them. The reason is `normalised`'s; the subject is this key.
-                throw InferenceError(key.str() + ": " + error.what());
+            if (width == 0) width = observation.embedding.size();
+            if (observation.embedding.size() != width) {
+                // HERE rather than in `similarity`, which is reached only after groups have
+                // been assigned: a second embedder is a load-time misconfiguration and this is
+                // the first place that can say so without having changed anything.
+                throw InferenceError(
+                    who + " carries a " + std::to_string(observation.embedding.size()) +
+                    "-dimensional embedding and this identity space was built on " +
+                    std::to_string(width) + "; one identity space is fed by one embedder");
             }
+            double sum = 0.0;
+            for (const float value : observation.embedding) {
+                sum += static_cast<double>(value) * value;
+            }
+            if (!(sum > 0.0)) {
+                throw InferenceError(who +
+                                     ": an all-zero track embedding has no direction, so it "
+                                     "cannot be normalised; at cosine 0 from everything it is "
+                                     "a plausible answer to every query rather than an "
+                                     "obvious failure");
+            }
+        }
+        // LAST, so a refusal above leaves even this untouched: the instant is unapplied and
+        // the caller may send it again.
+        width_ = width;
+    }
+
+    void GlobalIdAssigner::observe(const std::vector<IdentityObservation>& observations) {
+        for (const IdentityObservation& observation : observations) {
+            // NO CHECKS HERE. `check_embeddings` owns them and runs before anything moves;
+            // repeating them was two places encoding one rule, which is the drift its own
+            // comment warns about. `normalised` keeps its refusal as the last line of defence
+            // for a caller that is not `assign`, and says so at the line.
+            const TrackKey& key = observation.key;
+            features_[key] = normalised(observation.embedding);
             // CONSECUTIVE hits, which is what `select_by_oldest` reads as age: a track seen
             // at this instant and the one before continues its run, and any gap restarts it.
             const auto seen = last_seen_.find(key);
@@ -359,6 +396,13 @@ namespace shipinfer::mtmc {
             }
             // COPIED, because `place`/`forget` below mutate the member vector this points into.
             const TrackKey incumbent = *incumbent_ptr;
+            // AND `overlap_features` HOLDS RAW POINTERS INTO `features_`, which `forget`
+            // erases from a few lines down. Safe for one reason and only one: `forget` is
+            // reached only when the incumbent was NOT observed this instant, so it is not in
+            // `keys`, so its feature is not among the pointers. An edit that lets an observed
+            // incumbent be forgotten makes this a use-after-free, and ASan will not see it
+            // until a scenario contains that case -- so it is stated rather than left to be
+            // rediscovered.
 
             const auto seen = last_seen_.find(incumbent);
             if (seen == last_seen_.end() || seen->second < step_) {
@@ -493,6 +537,10 @@ namespace shipinfer::mtmc {
                               " observations; these come from one clustering call and must "
                               "line up");
         }
+        // BEFORE `++step_` and before `observe`, which is the whole point: this used to throw
+        // on the second of five observations with the first already written and the step
+        // advanced, and nothing could retry the instant.
+        check_embeddings(observations);
         ++step_;
         observe(observations);
 

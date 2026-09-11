@@ -1,0 +1,31 @@
+# The REFERENCE's answer to scenarios/gate/*.txt. Emitted, never hand-edited:
+#   python scripts/emit_parity_golden.py --kind gate --scenario basic --emit-golden
+scenario min_hits_3
+admitted
+admitted
+admitted cam0#1
+admitted cam0#1
+held 1
+scenario too_small_banks_nothing
+admitted
+admitted
+admitted
+admitted
+admitted
+admitted
+admitted
+admitted cam0#1
+held 1
+scenario gap_restarts
+admitted
+admitted
+admitted
+admitted
+held 1
+scenario boundary
+admitted
+admitted cam0#2
+held 1
+scenario order
+admitted cam2#1 cam0#1 cam1#1
+held 3

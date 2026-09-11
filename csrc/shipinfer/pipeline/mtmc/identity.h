@@ -18,6 +18,13 @@
 // two representations of one fact can disagree, and when they do the output stays PLAUSIBLE --
 // an identity quietly holding two tracks from one camera, an id nothing can be found under.
 //
+// AND THE SECOND HALF OF THAT INVARIANT IS NOT SAFE TO RELY ON YET. A contested cluster can
+// reach it -- the algorithm's flaw, shared with the reference, reproduced on both planes and
+// pinned by `two_challengers_from_one_camera_BOTH_land_and_the_reference_does_the_same`. In
+// production `validate_every_step` is off, so it is silent. See
+// `MTMC-ONE-CAMERA-TWICE-IN-A-CONTESTED-CLUSTER`; a caller that must not see two tracks from
+// one camera has to check, not assume.
+//
 // NOT THREAD-SAFE, deliberately. The stage that owns it takes the barrier's lock for the whole
 // association, which is the level where one instant is one atomic step.
 #pragma once
@@ -101,6 +108,10 @@ namespace shipinfer::mtmc {
         // EQUALITY between labels is read. Never partial and never absent: an observation
         // that reached this point is a track the caller decided to trust, so one that matches
         // nothing starts a new identity rather than being dropped.
+        //: EVERY EMBEDDING IS CHECKED BEFORE ANYTHING IS MUTATED, so a refusal leaves the
+        //: instant unapplied and the caller may retry it. `++step_` and `observe`'s writes
+        //: used to run first, so a bad fifth observation left a half-written history the next
+        //: instant read as fact -- and `reset()` was the only way back.
         std::map<TrackKey, int64_t> assign(const std::vector<IdentityObservation>& observations,
                                            const std::vector<int>& labels);
 
@@ -129,6 +140,14 @@ namespace shipinfer::mtmc {
 
       private:
         void observe(const std::vector<IdentityObservation>& observations);
+        //: The pre-pass: empty, all-zero and mixed-width embeddings, refused before any state
+        //: moves -- including two widths inside ONE instant, which is the case a virgin
+        //: assigner has and #220's review found missing. Width is carried across instants
+        //: too, so a second embedder shows up here rather than deep inside a similarity that
+        //: has already assigned two groups. NOT `const`: `width_` is the identity space's
+        //: embedder width, which changes this class's future answers, and marking the method
+        //: `const` with a `mutable` member is what made "seed the width first" look illegal.
+        void check_embeddings(const std::vector<IdentityObservation>& observations);
         //: Indices grouped by label, LARGEST GROUP FIRST, ties by first appearance. The
         //: reference's `reorderCluster`. Deterministic ordering is the point: the same input
         //: produces the same ids twice, which is the difference between a reproducible bug
@@ -167,6 +186,9 @@ namespace shipinfer::mtmc {
         Options options_;
         int64_t counter_ = 0;
         int64_t step_ = 0;
+        //: The embedding width this identity space was built on, 0 until the first
+        //: observation. One identity space is fed by one embedder.
+        size_t width_ = 0;
         //: Identity -> its member tracks, in the order they joined. A vector and not a set
         //: because `member_from_camera` answers with the FIRST match and that has to be
         //: stable.
