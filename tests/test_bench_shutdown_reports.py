@@ -101,6 +101,42 @@ class TestOneReporterServesBothExits:
                 "abandoned path now reads it with them still running"
             )
 
+    def test_the_missing_stage_tally_is_written_and_read_under_its_mutex(self) -> None:
+        """`events_incomplete` says how many frames lost a stage and never which one -- which
+        reads as a timeout and is not one: measured 11 Sep, 1 483 of 9 520 with
+        `collector_timeouts 0`. The tally is written from the collector's emit callback, which
+        runs on whichever worker sealed the frame, and read at the end; both sides take
+        `missing_lock`, and the reason the lock is pinned rather than its position is the one
+        `test_the_refused_map_is_read_under_its_mutex` gives.
+        """
+        lines = BENCH.read_text(encoding="utf-8").splitlines()
+        uses = [
+            n
+            for n, row in enumerate(lines)
+            if "missing_by_stage" in row
+            and "std::map<" not in row
+            and "&missing_lock" not in row
+        ]
+
+        assert len(uses) >= 2, f"expected at least a write and a read, found {len(uses)}"
+        for n in uses:
+            near = "\n".join(lines[max(0, n - 4) : n])
+            assert "lock(missing_lock)" in near, (
+                f"bench.cpp:{n + 1} touches `missing_by_stage` with no `missing_lock` in the "
+                "four lines above it; every worker writes it as it seals a frame"
+            )
+
+    def test_the_report_names_the_stage_rather_than_only_counting(self) -> None:
+        """A number nobody can act on is not a diagnostic: the line has to carry the stage's
+        own name, which is what `FrameResult::missing` holds."""
+        text = BENCH.read_text(encoding="utf-8")
+
+        assert 'events_missing_stage " << stage' in text
+        assert "for (const std::string& stage : result.missing)" in text, (
+            "the tally has to come from the collector's own missing list rather than be "
+            "inferred from the reason"
+        )
+
     def test_the_message_says_which_report_this_is(self) -> None:
         """Otherwise a reader takes a partial record for a full one -- and the counters that
         are missing are the ones a throughput claim is made from."""

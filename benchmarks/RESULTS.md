@@ -278,12 +278,16 @@ only thing that changed is that the camera now shows a scene instead of a slides
 the observations reach the gate, three fifths of them qualify, and 72 per-camera tracks resolve
 to a dozen global identities.
 
-**And the cost appears where the old runs could not see it.** With the gate admitting, the same
-40 s leaves **1 483 of 9 520 events incomplete** (15.6%) against **zero** on the old fixture at
-the same reassembly window — the barrier and the clusterer are doing per-instant work now, and
-the reassembly window has not been re-chosen since they started
-(`MTMC-REAL-WORK-COSTS-A-SIXTH-OF-THE-EVENTS`). The throughput table further up this page was
-measured with `mtmc` admitting nothing, so it is a floor for this chain rather than its rate.
+**And one number here was a counting artefact, corrected.** These runs reported *1 483 of 9 520
+events incomplete* (15.6%) against zero on the old fixture, and this page blamed the barrier's
+per-instant work against a reassembly window nobody had re-chosen. It was neither.
+`collector_timeouts` was 0 the whole time, and a counter for **which** stage never answered
+(`events_missing_stage`) named `crop` for every one of them: the run opened each frame expecting
+`crop` unconditionally, `Dag::runnable` requires a stage's inputs to be non-empty, and a frame
+the detector found nothing in therefore never makes `crop` runnable. With `crop` off that list
+the same run answers `events_complete 7 118`, `events_incomplete 0` — **nothing was ever lost**.
+The throughput table further up this page is still a floor rather than a rate, because it was
+measured with `mtmc` admitting nothing.
 
 ### Pushed to saturation, the useful rate is not the retired rate
 

@@ -5,6 +5,18 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-11 — the run names the missing stage, and the one it named was never missing
+
+`events_incomplete` said 1 483 of 9 520 frames lost a stage and never which one, so the page
+blamed the reassembly window -- with `collector_timeouts 0` sitting right above it. One tally by
+stage name (`events_missing_stage`, from `FrameResult::missing`, under the same kind of mutex the
+refused-by-camera map uses) answered it in one run: `crop`, for every single one. `cli/bench.cpp`
+opened each frame expecting `{"detect", "crop"}`, and `Dag::runnable` requires a stage's
+`needs()` inputs to be NON-EMPTY -- so a frame the detector found nothing in never makes `crop`
+runnable and was sealed Incomplete for a stage with nothing to do. `detect` stays on the list
+because an empty expected set makes `complete()` trivially true; everything else is added by
+`planned()` as it becomes runnable, which is what the Python plane has always done. The same run
+now answers `events_complete 7118`, `events_incomplete 0`.
 ## 2026-09-11 — a roster nobody answers for says so, on both planes
 
 A declared camera is waited for whether it exists or not, so a roster naming cameras the fleet

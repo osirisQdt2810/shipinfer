@@ -3077,7 +3077,7 @@ hook down, for when the operator asked to see something before it is executed.
       observations per frame** (42 063 in 9 517 frames) against 0.36, with no code change. The
       counter for tracked ROWS is still worth having, but it would have measured the input.
 
-- [ ] MTMC-REAL-WORK-COSTS-A-SIXTH-OF-THE-EVENTS · MEASURED 11 Sep on the pan fixture, which is
+- [x] MTMC-REAL-WORK-COSTS-A-SIXTH-OF-THE-EVENTS · REFUTED 11 Sep -- IT WAS NOT mtmc AND NOT THE WINDOW. MEASURED on the pan fixture, which is
       the first run where `mtmc` does real per-instant work: **1 483 of 9 520 events incomplete
       (15.6%)**, against ZERO on the old fixture at the same reassembly window, same cameras,
       same rate, same workers. `reassembly_us_max` 303 ms. Nothing is dropped upstream
@@ -3086,6 +3086,16 @@ hook down, for when the operator asked to see something before it is executed.
       RE-CHOSEN since either landed (`pipeline.reassembly`, `core/settings/`), and every
       latency number on the page was measured with the gate admitting nothing. Sweep the window
       against completeness on the pan fixture before changing the default.
+      REFUTED the same day, and no sweep was needed: `collector_timeouts 0` already said the
+      window was not it, so the first step was a counter for WHICH stage never answered
+      (`events_missing_stage`, #234). The answer was `crop`, for 1 123 of 1 123 incomplete
+      events. `cli/bench.cpp` opened every frame expecting `{"detect", "crop"}`, and
+      `Dag::runnable` requires every `needs()` input NON-EMPTY -- so a frame the detector found
+      nothing in never makes `crop` runnable and was sealed Incomplete for a stage that had
+      nothing to do. Nothing was lost in any of them. With `crop` off that list the SAME run
+      answers `events_complete 7118`, `events_incomplete 0`. The Python plane never had this:
+      `pipeline/runner.py` calls `collector.open(state)` with no expected set at all and lets
+      `planned()` widen it, which is what the C++ side does now.
 
 - [ ] BENCH-DEFAULT-FIXTURE-IS-A-SLIDESHOW · `scripts/rtsp_serve.py`'s default data is
       `person_2K`, ten unrelated photographs, and every number on `benchmarks/RESULTS.md` was
