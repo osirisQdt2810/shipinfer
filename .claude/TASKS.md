@@ -2868,7 +2868,7 @@ hook down, for when the operator asked to see something before it is executed.
       `create_cluster_tracker`. The one design question worth stating: a tracker is cached per
       (impl, slot), so two chains asking for different options on one slot must be REFUSED
       rather than silently sharing the first one's gate.
-      DONE 11 Sep: both numbers on the plan's `mtmc` node and in `MtmcStageSpec::gate`,
+      DONE 11 Sep, #225: both numbers on the plan's `mtmc` node and in `MtmcStageSpec::gate`,
       one set of bounds per plane, and `create_cluster_tracker(impl, slot, options)` refuses a
       second set on one slot. Eight red probes; `test_plan_parity` 127, `test_plan_stages` 65,
       `test_mtmc_cluster` 20, `test_tracking_cluster_parity` 11, offline suite 4246 passed. The
