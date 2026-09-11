@@ -2828,11 +2828,24 @@ hook down, for when the operator asked to see something before it is executed.
       buffers are overwritten by the NEXT batch on that instance, and `ObjectStage`'s `combine`
       runs after `infer()` has returned and the instance is free again -- so folding there is a
       use-after-overwrite race. The fold has to happen while the instance still owns the batch
-      (an optional device-side reduction on the request, run by the instance thread after
-      `execute` and before the response is published), which is the same seam
-      `ENGINE-COPIES-EVERY-OUTPUT-HOME` needs and is where the 3.1 MB per crop stops being
-      copied. The Python plane needs the same move in `PoolSegment._reduced` (V88), where the
-      equivalent is reducing with torch before `.cpu()`.
+      (an optional device-side reduction run by the instance thread after `execute` and before
+      the response is published), which is the same seam `ENGINE-COPIES-EVERY-OUTPUT-HOME` needs
+      and is where the 3.1 MB per crop stops being copied. The Python plane needs the same move
+      in `PoolSegment._reduced` (V88), where the equivalent is reducing with torch before
+      `.cpu()`.
+      CORRECTION 11 Sep, from reading `engine/instance.cpp` before writing any of it: the fold
+      does NOT belong on the REQUEST, which is where this item first put it. One batch holds up
+      to `max_batch` requests and the instance scatters each one's SPAN of every output, so a
+      per-request fold would have to run per span (and two requests in one batch could carry
+      different folds, which nothing can reconcile). It belongs on the MODEL: one fold per
+      model, attached where the models are built from `planned.objects[i].fold`, run ONCE per
+      batch over all `offset` rows, and its answer becomes one more output of width 1 that the
+      existing span logic scatters like any other. That also keeps `engine->execute`'s
+      device-only skip list a per-model fact rather than a per-request one.
+      SHAPE, then: `request.h` gains a `DeviceOutput` view type; `TrtEngine::execute` takes the
+      names to leave on the device and exposes `output_device(i)`; `Model`/`ModelInstance` hold
+      the fold; `graph/mask_area_device.{h,cpp}` is a NEW unit on the CUDA line, because
+      `graph/mask_area.cpp` must stay pure -- it is the offline tier's and the golden's.
 
 - [ ] ENGINE-COPIES-EVERY-OUTPUT-HOME · `backends/tensorrt/engine.cpp` ends every `execute`
       with one `gpuMemcpyAsync(host_outputs_[i], output_buffers_[i], ..., DeviceToHost)` per
