@@ -290,6 +290,34 @@ the same rig at 30 s answers `events_complete 7 118` of 7 118 accepted frames,
 The throughput table further up this page is still a floor rather than a rate, because it was
 measured with `mtmc` admitting nothing.
 
+### The design load, on four of the sixteen GPUs
+
+50 cameras × 20 fps — the sizing every decision in this repository is arranged around — on the
+pan fixture, GPUs 0/2/5/6, `--source nvdec` over gstreamer RTSP from the offline H.264, 92
+workers, 40 s. The `mtmc` group stays twelve cameras, because a group is an atomic unit of
+placement and the waiter budget has to cover it.
+
+| offered | accepted | refused at the queue | untracked | **tracked img/s** | host cores | frame p50 / p95 |
+|---|---|---|---|---|---|---|
+| 954.5 img/s | 739.1 img/s | 23% | 3.7% | **711.5** | 15.5 of 48 (+1.0 for the RTSP servers) | 294 ms / 1.12 s |
+
+**711.5 tracked img/s on four A5000s**, which is 2.7× the ~260 this page reported before the
+fixture could be tracked at all — and the difference is the fixture, not the code. The fleet
+delivered 95% of the 1 000 img/s it was asked for; a quarter of that is refused at the pipeline
+queue, evenly, and what gets through is tracked.
+
+**What decides the 3 000 target is the host, not the devices.** 15.5 cores for 739 img/s is
+21 ms of CPU per image: 63 cores at 3 000, and this box has 48. Two measured levers bring that
+under the line — the blocking-sync default (−39% host CPU, #214) and the mask fold on the device
+(1.44 ms of CPU per crop today, 10 µs as a kernel) — and four devices at this rate extrapolate to
+~2 850 on sixteen. So the figure to quote is **711.5 tracked img/s per four A5000s**, with the
+host budget as the thing that has to be fixed for the full box to reach the target.
+
+**Identity does not survive this load, and that is a separate ceiling.** 170 of 56 050
+observations admitted, zero global ids: a quarter of each camera's frames are refused at the
+queue, and `min_hits` counts *consecutive* instants. Frames, yes; identities, not yet — the same
+mechanism as the saturation table below, and `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY`'s territory.
+
 ### Pushed to saturation, the useful rate is not the retired rate
 
 The rows above run the design rate — 20 fps per camera, which twelve cameras deliver and this
