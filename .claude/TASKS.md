@@ -2719,7 +2719,14 @@ hook down, for when the operator asked to see something before it is executed.
       which is what stops the port drifting the first time either side is edited. A verified
       port whose verification is not in the tree is a verified port for exactly one afternoon.
 
-- [ ] MTMC-WINDOW-IS-NOT-CONFIGURABLE · `mtmc_runtime` builds every barrier with
+- [~] MTMC-WINDOW-IS-NOT-CONFIGURABLE · **OPEN AS PART OF #222**: `sync_window_ms` and
+      `max_instants` are on the `mtmc` node on both planes now, refused rather than clamped
+      when zero or non-finite, and the golden plan carries `sync_window_ms 60.0`. MEASURED with
+      it: 200 ms instead of 60 moves the barrier's closes from `window` to `advanced` (15 vs
+      522 window closes at 12x20) and changes nothing about what the gate admits -- which is
+      how the real cause was found (`CSRC-MTMC-GATE-OPTIONS`). The sweep the item asked for is
+      now possible; what it showed first is that the window was not the binding constraint.
+      ORIGINAL: `mtmc_runtime` builds every barrier with
       `BarrierOptions`'s default 60 ms window and the plan cannot say otherwise, while the
       window is the knob the whole chain's throughput turns on: a worker parked in the barrier
       is a worker not draining its lane, and free-running cameras make most instants close on
