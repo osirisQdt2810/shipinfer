@@ -259,6 +259,38 @@ class TestATimeoutEmitsRatherThanDrops:
         assert metrics.late_arrivals.value(camera="cam0", stage="detect") == 1
 
 
+class TestAFrameThatDiesBeforeAnyStageIsNotComplete:
+    """`PYTHON-COLLECTOR-HAS-NO-UNCONDITIONAL-STAGE`, found by #234's review on the other plane.
+
+    `Pending.complete` is `expected <= delivered`, so an EMPTY expected set is trivially true:
+    a frame opened with nothing expected and then lost -- between `open` and the graph's first
+    `planned()` -- was reported COMPLETE. The runner opens with the graph's entry stage now, and
+    these two tests are the property rather than the caller.
+    """
+
+    def test_an_empty_expected_set_reports_a_lost_frame_as_complete(self):
+        """The hole itself, pinned so the reason the runner names a stage cannot be deleted as
+        redundant: nothing was delivered and the frame is Complete."""
+        subject, reported = collector()
+        subject.open(make_state("cam0", 0))
+
+        subject.seal(("cam0", 0))
+
+        (result,) = reported
+        assert result.reason == COMPLETE, "an empty expected set is satisfied by nothing"
+        assert result.missing == ()
+
+    def test_one_expected_stage_reports_it_as_partial(self):
+        subject, reported = collector()
+        subject.open(make_state("cam0", 0), expected=("detect",))
+
+        subject.seal(("cam0", 0))
+
+        (result,) = reported
+        assert result.reason == INCOMPLETE
+        assert result.missing == ("detect",)
+
+
 class TestSealingIsTheNormalPath:
     """The worker says when a frame is finished; the timeout is only the safety net."""
 

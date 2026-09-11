@@ -486,7 +486,11 @@ class PipelineRunner:
         # the collector will refuse the newcomer, and clobbering the entry here would leave
         # the *first* frame's caller waiting on a future nobody will ever resolve.
         self._awaiting.setdefault(key, item.future)
-        if not self._collector.open(state):
+        # THE ENTRY STAGE, not an empty set: `PipelineGraph.unconditional_stage` says why --
+        # an empty expected set makes a frame that dies before the graph's first `planned()`
+        # report COMPLETE, which is the one failure this pipeline was rebuilt to remove. The
+        # C++ plane keeps its detector's slot on the list for the same reason (#234).
+        if not self._collector.open(state, expected=(self._graph.unconditional_stage,)):
             if self._awaiting.get(key) is item.future:
                 del self._awaiting[key]
             self._metrics.frames_failed.inc(camera=camera)

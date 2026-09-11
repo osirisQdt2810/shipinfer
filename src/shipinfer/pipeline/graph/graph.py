@@ -193,6 +193,18 @@ class PipelineGraph:
         """The model the first stage drives — what an ingest frame is aimed at."""
         return self._stages[0].model_name
 
+    @property
+    def unconditional_stage(self) -> str:
+        """The one stage every frame reaches, for the collector to expect at `open`.
+
+        `execute` widens the expected set through `planned()` as stages become runnable, so a
+        frame that dies BEFORE the first of those calls would be expected to deliver nothing --
+        and `Pending.complete` is `expected <= delivered`, trivially true on an empty set, so a
+        lost frame would be reported Complete. One stage on the list closes that, and it has to
+        be the entry: it consumes the frame itself, so it is runnable for every frame there is.
+        """
+        return self._stages[0].name
+
     def models(self) -> tuple[str, ...]:
         """Every model this graph needs loaded, in stage order, without duplicates."""
         seen: list[str] = []
