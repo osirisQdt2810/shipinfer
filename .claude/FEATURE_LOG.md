@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-11 — footage a tracker can follow, and the first global ids at the shipped defaults
+
+Every bench run replayed ten unrelated photographs at 20 fps, so a camera's scene changed
+completely every 50 ms and the per-camera tracker confirmed almost nothing: the graph offered
+`mtmc` 0.36 observations per frame while its embedders processed ~9.5 rows per frame, and the
+age gate admitted zero. `harness/pan.py` makes the other input from the same photographs -- a
+1080p window panned across one 4K frame on a path that closes on itself, ~15 px per step, so the
+RTSP loop has no cut. On it, at the reference's PRODUCTION defaults, the chain offers 4.42
+observations per frame, admits 61.9%, and resolves 72 tracks to 13 global ids. Two ledger items
+close as answered rather than fixed; one opens, because real mtmc work leaves 15.6% of events
+incomplete at a reassembly window nobody has re-chosen. `cpp.sh` forwards the two variables
+that pick the fixture, which the wrapper had read and no caller outside the container could set.
+
+---
+
 ## 2026-09-11 — the chain sets the mtmc gate, so cross-camera identity can be measured
 
 The reference admits an observation after `min_hits` consecutive qualifying instants and only
