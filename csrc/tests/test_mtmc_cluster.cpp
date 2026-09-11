@@ -54,15 +54,26 @@ namespace {
         int calls = 0;
     };
 
-    const mtmc::ClusterRegistrar kFake("fake",
-                                       [] { return std::make_shared<CountingTracker>(); });
+    const mtmc::ClusterRegistrar kFake("fake", [](const mtmc::ClusterOptions&) {
+        return std::make_shared<CountingTracker>();
+    });
 
     // A FACTORY THAT FAILS, which is what makes the null-cache fix testable. Registered here
     // rather than in the lane because the shape is the seam's, not the algorithm's: the lane's
     // real tracker is simply the first factory in the tree that CAN throw.
-    const mtmc::ClusterRegistrar kThrows("throws", []() -> std::shared_ptr<ClusterTracker> {
-        throw ConfigError("bad algorithm config");
+    // WHAT THE FACTORY WAS HANDED, so a test can check the chain's numbers arrived rather
+    // than only that something was built.
+    mtmc::ClusterOptions kSeen;
+
+    const mtmc::ClusterRegistrar kOptions("options", [](const mtmc::ClusterOptions& options) {
+        kSeen = options;
+        return std::make_shared<CountingTracker>();
     });
+
+    const mtmc::ClusterRegistrar kThrows(
+        "throws", [](const mtmc::ClusterOptions&) -> std::shared_ptr<ClusterTracker> {
+            throw ConfigError("bad algorithm config");
+        });
 
     void the_registry_hands_out_one_tracker_per_slot() {
         // A cross-camera tracker IS the identity space for a group, so two instances would
@@ -123,6 +134,43 @@ namespace {
               "and does not call a correctly-spelled name unknown");
     }
 
+    void the_chain_s_gate_options_reach_the_implementation() {
+        // The knob this whole item exists for: the reference's production floor admits nothing
+        // on footage whose subjects are small in frame, and until now no chain could say so.
+        mtmc::ClusterOptions options;
+        options.min_hits = 1;
+        options.min_height_fraction = 0.02;
+        const auto tracker = mtmc::create_cluster_tracker("options", "quay", options);
+
+        check(tracker != nullptr, "the tracker is built with the chain's thresholds");
+        check(kSeen.min_hits && *kSeen.min_hits == 1, "min_hits reached the factory");
+        check(kSeen.min_height_fraction && *kSeen.min_height_fraction == 0.02,
+              "and so did the height floor");
+    }
+
+    void one_slot_is_one_gate_and_a_second_answer_is_refused() {
+        // The tracker is CACHED per (impl, slot), so a second caller asking for different
+        // thresholds would silently get the first caller's gate -- a running configuration
+        // that is in no file. One slot is one camera group is one gate.
+        mtmc::ClusterOptions first;
+        first.min_hits = 2;
+        mtmc::create_cluster_tracker("options", "contested", first);
+        mtmc::ClusterOptions second;
+        second.min_hits = 5;
+        std::string message;
+
+        try {
+            mtmc::create_cluster_tracker("options", "contested", second);
+        } catch (const ConfigError& error) {
+            message = error.what();
+        }
+
+        check(message.find("different gate options") != std::string::npos,
+              "the second set is refused, got: " + (message.empty() ? "(nothing)" : message));
+        check(mtmc::create_cluster_tracker("options", "contested", first) != nullptr,
+              "and asking again with the SAME options is the ordinary cache hit");
+    }
+
     void a_factory_that_throws_caches_nothing() {
         // `made()[{impl, slot}]` default-inserted BEFORE the factory ran, so a constructor that
         // threw left a null `shared_ptr` under that key -- and `made_cluster_trackers()` copies
@@ -178,6 +226,8 @@ int main() {
     an_unknown_impl_is_refused_by_name();
     the_registry_refuses_an_absent_name_with_its_own_error();
     a_lane_less_build_blames_the_LANE_and_not_the_name();
+    the_chain_s_gate_options_reach_the_implementation();
+    one_slot_is_one_gate_and_a_second_answer_is_refused();
     a_factory_that_throws_caches_nothing();
     what_was_built_is_listable();
     the_seam_takes_a_whole_instant();

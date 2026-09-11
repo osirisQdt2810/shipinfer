@@ -19,5 +19,12 @@ elements:
   embed_ship: {impl: pool, model: ship_embedder, params: {classes: [ship]}, after: segment}
   embed_person: {impl: pool, model: person_embedder, params: {classes: [person]}, after: detect}
   track: {impl: shipvision, per: camera, after: [embed_ship, embed_person]}
-  mtmc: {impl: shipvision, scope: global}
+  mtmc:
+    impl: shipvision
+    scope: global
+    # The gate the chain sets, which is the whole point of carrying these two across:
+    # the reference's production floor (3 hits, 1/9 of frame height) admits nothing on
+    # footage whose subjects are small in frame.
+    params:
+      options: {min_hits: 1, min_height_fraction: 0.02}
   output: {impl: jsonlines}

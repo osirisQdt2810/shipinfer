@@ -58,6 +58,8 @@ per camera
 
 node mtmc mtmc shipvision
 scope global
+min_hits 1
+min_height_fraction 0.02
 
 node output output jsonlines
 

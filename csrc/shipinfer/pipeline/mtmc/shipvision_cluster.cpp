@@ -119,8 +119,23 @@ namespace shipinfer::mtmc {
             return gram;
         }
 
+        // THE CHAIN'S THRESHOLDS OR THE REFERENCE'S, and the defaults live in ONE place:
+        // `gate.h`'s `GateOptions`. An absent option means the chain did not say, so the
+        // member's own default stands -- rather than a second copy of 3 and 1/9 here.
+        ObservationGate::Options gate_options_of(const ClusterOptions& options) {
+            ObservationGate::Options built;
+            if (options.min_hits) built.min_hits = *options.min_hits;
+            if (options.min_height_fraction) {
+                built.min_height_fraction = *options.min_height_fraction;
+            }
+            return built;
+        }
+
         class ShipvisionCluster : public ClusterTracker {
           public:
+            explicit ShipvisionCluster(const ClusterOptions& options)
+                : gate_(gate_options_of(options)) {}
+
             std::map<TrackKey, int64_t> ids(
                 const std::vector<ClusterObservation>& instant) override {
                 std::lock_guard<std::mutex> held(lock_);
@@ -191,8 +206,8 @@ namespace shipinfer::mtmc {
         };
 
         // `impl: shipvision` in the chain, which is the name the plan carries.
-        const ClusterRegistrar kShipvision("shipvision", [] {
-            return std::make_shared<ShipvisionCluster>();
+        const ClusterRegistrar kShipvision("shipvision", [](const ClusterOptions& options) {
+            return std::make_shared<ShipvisionCluster>(options);
         });
 
     }  // namespace

@@ -23,7 +23,8 @@ namespace shipinfer::mtmc {
         return out;
     }
 
-    std::shared_ptr<ClusterTracker> ClusterRegistry::create(const std::string& impl) const {
+    std::shared_ptr<ClusterTracker> ClusterRegistry::create(
+        const std::string& impl, const ClusterOptions& options) const {
         // `find` and a TYPED refusal, not `at`: this is public, so a caller that had not asked
         // `has` first would get `std::out_of_range` out of a registry whose whole vocabulary is
         // `ConfigError`. The same hole `AssociatorRegistry::create` was reviewed for.
@@ -31,7 +32,7 @@ namespace shipinfer::mtmc {
         if (entry == entries_.end()) {
             throw ConfigError("no cross-camera tracker is registered as '" + impl + "'");
         }
-        return entry->second();
+        return entry->second(options);
     }
 
     ClusterRegistry& CLUSTERERS() {
@@ -50,10 +51,16 @@ namespace shipinfer::mtmc {
             return lock;
         }
 
-        std::map<std::pair<std::string, std::string>, std::shared_ptr<ClusterTracker>>& made() {
-            static std::map<std::pair<std::string, std::string>,
-                            std::shared_ptr<ClusterTracker>>
-                cache;
+        // The OPTIONS are cached beside the tracker, because a second caller asking for
+        // different ones on the same slot has to be refused rather than handed the first
+        // caller's gate -- which would be a running configuration that is in no file.
+        struct Made {
+            std::shared_ptr<ClusterTracker> tracker;
+            ClusterOptions options;
+        };
+
+        std::map<std::pair<std::string, std::string>, Made>& made() {
+            static std::map<std::pair<std::string, std::string>, Made> cache;
             return cache;
         }
 
@@ -62,14 +69,15 @@ namespace shipinfer::mtmc {
     std::vector<MadeClusterTracker> made_cluster_trackers() {
         std::lock_guard<std::mutex> held(made_lock());
         std::vector<MadeClusterTracker> out;
-        for (const auto& [key, tracker] : made()) {
-            out.push_back(MadeClusterTracker{key.first, key.second, tracker});
+        for (const auto& [key, made] : made()) {
+            out.push_back(MadeClusterTracker{key.first, key.second, made.tracker});
         }
         return out;
     }
 
     std::shared_ptr<ClusterTracker> create_cluster_tracker(const std::string& impl,
-                                                           const std::string& slot) {
+                                                           const std::string& slot,
+                                                           const ClusterOptions& options) {
         // `has` OUTSIDE the lock and the factory INSIDE it, both deliberate and both narrow:
         // registrars are file-scope statics that run before main, so the name table is not
         // written concurrently; and holding the lock across a trivial factory is what makes
@@ -80,7 +88,20 @@ namespace shipinfer::mtmc {
             std::lock_guard<std::mutex> held(made_lock());
             const auto key = std::make_pair(impl, slot);
             const auto found = made().find(key);
-            if (found != made().end()) return found->second;
+            if (found != made().end()) {
+                // REFUSED, not silently shared. The tracker is cached per (impl, slot), so a
+                // second caller asking for different thresholds would get the FIRST caller's
+                // gate -- a running configuration that is in no file. One slot is one group
+                // is one gate; two chains disagreeing about it is a start-up fault.
+                if (!(found->second.options == options)) {
+                    throw ConfigError(
+                        "cross-camera slot '" + slot +
+                        "' was already built with different gate options; one slot is one "
+                        "camera group and one gate, so two callers cannot configure it twice "
+                        "-- say it once in the chain");
+                }
+                return found->second.tracker;
+            }
             // BUILT INTO A LOCAL FIRST. `made()[key]` default-inserts before the factory runs,
             // so a constructor that threw left a NULL shared_ptr cached under that key --
             // `made_cluster_trackers()` would then report an entry whose `tracker` is null and
@@ -88,8 +109,8 @@ namespace shipinfer::mtmc {
             // was trivial; the lane's tracker is the first one that can fail on a bad
             // algorithm config, which is this PR. (`tracking/associator.cpp` has the same
             // shape and the same fix is owed there -- `MTMC-TWO-SLOT-CACHED-REGISTRIES`.)
-            std::shared_ptr<ClusterTracker> built = CLUSTERERS().create(impl);
-            made().emplace(key, built);
+            std::shared_ptr<ClusterTracker> built = CLUSTERERS().create(impl, options);
+            made().emplace(key, Made{built, options});
             return built;
         }
         std::ostringstream known;

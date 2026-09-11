@@ -196,6 +196,20 @@ namespace {
               "a doubly-negative count, which the Python reader took down with a ValueError");
         check(refused("plan 3 x\nnode a b c\nmax_instants 99999999999\n"),
               "and a count past a 32-bit int");
+        // THE GATE'S TWO NUMBERS, at the bounds the reference states for itself and with the
+        // same spellings the other plane refuses: a floor of zero hits associates a track on
+        // the frame it first appeared, and 1.0 of frame height admits nothing at all.
+        check(refused("plan 3 x\nnode a b c\nmin_hits 0\n"), "a floor of zero observations");
+        check(refused("plan 3 x\nnode a b c\nmin_hits -1\n"), "and a negative count");
+        check(refused("plan 3 x\nnode a b c\nmin_hits 3abc\n"), "a hit count with a tail");
+        check(refused("plan 3 x\nnode a b c\nmin_height_fraction 1.0\n"),
+              "a height floor of 1.0, which admits nothing rather than thresholding");
+        check(refused("plan 3 x\nnode a b c\nmin_height_fraction -0.1\n"),
+              "and a fraction below zero");
+        check(refused("plan 3 x\nnode a b c\nmin_height_fraction nan\n"),
+              "a non-finite height floor, which every comparison answers false for");
+        check(refused("plan 3 x\nnode a b c\nmin_height_fraction abc\n"),
+              "and a floor that is not a number at all");
         check(refused("plan 3 x\nsetting nonsense 1\n"),
               "a setting key neither plane would use");
         check(refused("plan 3 x\nsetting workers four\n"),
@@ -236,6 +250,8 @@ namespace {
         check(!refused("plan 3 x\nnode a b c\nfold_score 0.0\n"),
               "a floor of zero: every crop is an area");
         check(!refused("plan 3 x\nnode a b c\nqueue_delay_us 0\n"), "0 is batching off");
+        check(!refused("plan 3 x\nnode a b c\nmin_hits 1\nmin_height_fraction 0.0\n"),
+              "the loosest gate a chain can ask for: every track, at any height");
         check(!refused("plan 3 x\nnode a b c\ninstances 1\n"), "the smallest count");
         check(!refused("plan 3 x\nnode a b c\nartefact m/1/model.plan\n"),
               "a repository-relative artefact");
