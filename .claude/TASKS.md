@@ -3618,7 +3618,28 @@ hook down, for when the operator asked to see something before it is executed.
           accesses holding the mutex, and a 40-line control program in the same
           `condition_variable::wait_for` shape reproduces them, so they are the toolchain's
           modelling rather than this code.
-        * **3c-ii -- OPEN AS #221 (`feat/the-cross-camera-lane-unit`, 1 commit, 17 files):**
+        * **3c-iii -- OPEN AS #222 (`feat/the-cpp-graph-associates-instants`, 1 commit, 23
+          files), AND IT CLOSES `MTMC-WINDOW-IS-NOT-CONFIGURABLE`:** `MtmcStage` (barrier +
+          scatter, keyed by the stage's OUTPUT name), `MtmcStageSpec`/`mtmc_runtime()` with one
+          barrier per slot and ONE budget for the process, `sync_window_ms` and `max_instants`
+          on the plan on both planes, and the counters that make the stage legible -- refused
+          instants, observations offered/ADMITTED, the barrier's own ledger and identities live.
+          The stage's policy is stated and tested: one camera's bad row costs the GROUP its ids
+          for that instant and does NOT fail the frame that closed the bucket. Also carries the
+          `instance.cpp` ordering fix (counters published before the future that releases a
+          reader -- the `test_engine` flake that red-legged #221) and #221's three approval
+          notes. Container tier green (`test_mtmc_stage` 25), 30 offline+lane binaries green,
+          4 221 offline Python green, four measured runs on the mandated route.
+        * **3c-ii -- MERGED as #221 (11 Sep), APPROVE on round 3 after two BLOCKING rounds.**
+          Round 1: the parity binary was BUILT BY CI AND NEVER RUN (the lane job globs
+          `test_tracking_*`), the cluster golden had no Python-side guard, and `gram_of` was
+          the triple loop `matchers/appearance/matcher.h` names as the thing not to write --
+          with "Measurements: N/A" under it. Round 2: the two `gram_of` refusals were the PR's
+          advertised content and nothing executed them, and the null-cache fix had no
+          regression test in the PR that made the bug reachable. The golden also could not
+          discriminate the thresholds it pins, and placing the scenarios found WHY: the two
+          thresholds are complements (1 - 0.86 = 0.14), so only an UPWARD move is visible.
+          ORIGINAL (3c-ii, as opened as #221 (`feat/the-cross-camera-lane-unit`, 1 commit, 17 files):**
           the `shipvision` impl behind the seam -- gate, gram, `GatedMatcher::build`,
           `AgglomerativeClusterer::fit_predict`, `GlobalIdAssigner::assign` -- plus
           `--kind cluster`, whose golden is the only gate that catches a piece wired to the
