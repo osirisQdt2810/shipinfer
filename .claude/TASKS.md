@@ -2923,6 +2923,12 @@ hook down, for when the operator asked to see something before it is executed.
       knows both lists, and a group that never completes is a silent configuration fault today.
       Note the announce path already exists (`mtmc_runtime` calls `camera_added` for every
       declared camera before any worker starts), so the check costs one comparison.
+      AND THE PRECEDENCE IS A THIRD OPTION, which #226's review found: that announce loop
+      landed in #222 (`git log -L 40,50:csrc/shipinfer/pipeline/graph/from_plan.cpp`), and
+      declared cameras WIN over merely-seen ones (`barrier.h`) -- so before it the barrier fell
+      back to what it saw and an older run recorded `complete 282` on this same 4-camera
+      roster. The fault is therefore recent and its cause is the precedence, so "declared wins
+      over seen" is itself a candidate alongside a bench-specific chain and a refusal at open().
 
 - [ ] MTMC-OFFERS-A-THIRD-OF-A-FRAMES-ROWS · MEASURED 11 Sep: 3 480 observations from 9 538
       frames is 0.36 per frame, while the same run's embedders processed 77 777 person crops
@@ -3710,6 +3716,11 @@ hook down, for when the operator asked to see something before it is executed.
       an empty instant (`CSRC-MTMC-GATE-OPTIONS`, `BENCH-FOOTAGE-IS-BELOW-THE-MTMC-GATE`).
       Both are priced, neither is a defect in the port: the gate is the reference's own, and
       lowering its floor on the same run issues 20 global ids across 52 tracks.
+      SUPERSEDED 11 Sep (#226): the floor excluded NOTHING. That experiment lowered `min_hits`
+      and `min_height_fraction` together; separated, the height floor admits everything it is
+      offered and the AGE test is what closes --
+      `MTMC-MIN-HITS-CANNOT-BE-MET-BY-A-FREE-RUNNING-FLEET`, and
+      `BENCH-FOOTAGE-IS-BELOW-THE-MTMC-GATE` is closed as refuted rather than fixed.
       ORIGINAL: PR 2 of 3 MERGED 10 Sep as #215 (squash `d71af8c`), APPROVE on round 4 after three BLOCKING rounds. PR 3 (`mtmc`) is what remains.** #169 was merged by the operator (`a9867e3`), so
       PR 2 of 3 is mine to build and needs no stacking.**
       **PR 3 (`mtmc`) SCOPED BY READING THE SUBMODULE, 10 Sep, and it is THREE PRs rather than
