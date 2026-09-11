@@ -784,7 +784,8 @@ namespace {
             /*fail=*/true));
         auto state = a_frame();
         check(collector.open(state, {"detect", "crop"}),
-              "opened with the unconditional stages");
+              "opened with both stages, which is what this test needs rather than what the "
+              "run now opens with");
         CollectorObserver observer(collector, state->tag());
         dag.execute(*state, observer);
         collector.seal(state->tag());
@@ -816,6 +817,53 @@ namespace {
         check(results.size() == 1 && results[0].reason == FinishReason::Complete &&
                   results[0].missing.empty(),
               "a frame with no ships is Complete: the segmenter was a skip, not a failure");
+    }
+
+    // doc: long the expectation that made a frame with nothing to crop a loss
+    void test_a_frame_with_no_detections_is_complete() {
+        // `Dag::runnable` requires every `needs()` input NON-EMPTY, so a frame the detector
+        // found nothing in never makes `crop` runnable -- and `crop` was on the run's
+        // unconditional expected list, so every such frame was sealed Incomplete for a stage
+        // that had nothing to do. Measured 11 Sep on the pan fixture: 1 123 of 7 123 events,
+        // every one of them `events_missing_stage crop`, with `collector_timeouts 0`. Nothing
+        // was lost in any of them. Both halves are pinned here, because the second is the
+        // reason the first changed.
+        Dag dag;
+        dag.add(std::make_unique<FakeStage>("detect", std::vector<std::string>{FRAME_INPUT},
+                                            std::vector<std::string>{FRAME_INPUT}, DETECTIONS,
+                                            /*rows=*/0));
+        dag.add(std::make_unique<FakeStage>(
+            "crop", std::vector<std::string>{DETECTIONS, FRAME_INPUT},
+            std::vector<std::string>{DETECTIONS}, "person_crops", 1));
+
+        std::vector<FrameResult> expected_detect;
+        FrameCollector one([&](FrameResult&& r) { expected_detect.push_back(std::move(r)); },
+                           16, 1500);
+        auto first = a_frame();
+        one.open(first, {"detect"});
+        CollectorObserver watching(one, first->tag());
+        dag.execute(*first, watching);
+        one.seal(first->tag());
+
+        check(expected_detect.size() == 1 &&
+                  expected_detect[0].reason == FinishReason::Complete &&
+                  expected_detect[0].missing.empty(),
+              "a frame with no detections is Complete: there was nothing to crop");
+
+        std::vector<FrameResult> expected_crop;
+        FrameCollector two([&](FrameResult&& r) { expected_crop.push_back(std::move(r)); }, 16,
+                           1500);
+        auto second = a_frame();
+        two.open(second, {"detect", "crop"});
+        CollectorObserver also(two, second->tag());
+        dag.execute(*second, also);
+        two.seal(second->tag());
+
+        check(expected_crop.size() == 1 &&
+                  expected_crop[0].reason == FinishReason::Incomplete &&
+                  expected_crop[0].missing == std::vector<std::string>{"crop"},
+              "and expecting `crop` unconditionally is what made it a loss -- the run's list "
+              "is `{\"detect\"}` for this reason");
     }
 
 }  // namespace
@@ -868,6 +916,7 @@ int main() {
     test_a_failing_stage_does_not_end_the_frame();
     test_the_collector_sees_planned_delivered_and_missing();
     test_a_skipped_branch_is_a_complete_frame();
+    test_a_frame_with_no_detections_is_complete();
     test_a_frame_carrying_only_a_surface_still_has_pixels();
     test_a_frame_with_no_pixels_is_refused_by_name();
     test_an_incomplete_surface_never_becomes_a_buffer();
