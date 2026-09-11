@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-11 — a chain that tracks gets footage it can track, without being told
+
+`run_cpp_bench.sh` reads the plan it has just written: a `track` or `mtmc` node and no
+`SHIPINFER_RTSP_*_DATA` set means the run generates the pan fixture (once, from the 4K sources,
+refusing to mix laps) and serves that instead of the ten photographs. The fixture follows the
+CHAIN rather than a flag nobody sets -- which is the whole reason the gate looked broken for two
+days. Detection-only plans keep the photographs, so those numbers stay comparable with their own
+history, and an explicit fixture always wins, which is what makes a two-fixture comparison on one
+chain possible. MEASURED: the stock chain with nothing set generates both fixtures and answers
+`mtmc_identities 4 14` in a 15 s run where the photographs answer 0. The predicate is tested
+against the golden plans plus two written in the test, because no golden separates a plan that
+segments from one that tracks -- and a pattern matching every kind would pass by coincidence.
+
+---
+
 ## 2026-09-11 — the run names the missing stage, and the one it named was never missing
 
 `events_incomplete` said 1 483 of 9 520 frames lost a stage and never which one, so the page
