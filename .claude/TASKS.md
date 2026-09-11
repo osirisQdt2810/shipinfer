@@ -2843,7 +2843,7 @@ hook down, for when the operator asked to see something before it is executed.
       NOTE the same pattern sits in `DetectStage::do_run`, which calls `scratch_.synchronise()`
       after the letterbox kernel before it even enqueues inference.
 
-- [ ] THE-BUILD-NEVER-VECTORISES · `scripts/build_csrc.py` compiles with `-O2` and nothing else
+- [x] THE-BUILD-NEVER-VECTORISES · MEASURED AND CLOSED 11 Sep. `scripts/build_csrc.py` compiles with `-O2` and nothing else
       (`optimise = ["-O0", "-g"] if args.debug else ["-O2"]`), and this box's g++ is 11.4, where
       `-O2` does NOT auto-vectorise (that arrived in GCC 12). MEASURED on the mask fold, which
       is the data plane's hottest host loop: 1 488 us/crop as shipped; 425 us/crop -- **3.5x** --
@@ -2854,6 +2854,17 @@ hook down, for when the operator asked to see something before it is executed.
       for a container that may run on another host class: `-O3` alone is portable, `-march=native`
       is not. Try `-O3` plus explicit `-mavx2 -mfma` against the box's own floor, and pin the
       measurement per loop.
+      CLOSED 11 Sep, and the reason is that the loop it would have helped is going away. For the
+      fold AS SHIPPED the flags buy nothing -- 1 488 us/crop at `-O2`, 1 595 at
+      `-O3 -march=native` (slightly WORSE; the strided inner loop cannot vectorise) -- and the
+      3.5x only appeared with the loop ORDER changed too, which `mask_area_into` supersedes at
+      10.0 us/crop (#232). Nothing else in this plane's hot path is a vectorisable loop of ours:
+      the profile puts 58.9 s of 121.6 s in the model instance threads (TensorRT's own kernels
+      and launches), and of the 19.8 s in the pipeline workers the fold was ~10 s and the rest is
+      the tracker and the gram (both in `shipvision`, built by its own pipeline) plus record and
+      JSON building, which is string work. REOPEN IT if a hot host loop of ours appears -- the
+      obvious candidate is `MTMC-GRAM-WANTS-A-REAL-GEMM` if the gram lands in tree -- and measure
+      that loop rather than flipping a flag and claiming a speed-up.
 
 - [ ] MTMC-TWO-SLOT-CACHED-REGISTRIES · `pipeline/mtmc/cluster.cpp` is
       `pipeline/tracking/associator.cpp` transcribed: `add`/`has`/`names`/`create`, `made_lock`,
