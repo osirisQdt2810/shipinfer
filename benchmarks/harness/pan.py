@@ -73,6 +73,19 @@ def pan_frames(
             f"{source.name} is {picture.width}x{picture.height} and the window is "
             f"{size[0]}x{size[1]}; the source has to be larger, in at least one direction"
         )
+    # THE REFUSAL `crowd.py` MAKES, and this fixture needs it harder: 400 frames then 100
+    # leaves 300 of the old lap, the encoder globs and sorts by name, and the stream becomes
+    # one pan cut into another -- then cached under the directory's name and reused.
+    if out.exists() and not out.is_dir():
+        raise ValueError(f"--out {out} exists and is not a directory")
+    if out.is_dir() and any(out.iterdir()):
+        raise ValueError(
+            f"{out} is not empty; panning into it would mix these frames with whatever is "
+            f"already there, and the encoder takes the directory in name order. Choose a "
+            f"fresh directory or empty this one."
+        )
+    if frames < 2:
+        raise ValueError(f"--frames must be at least 2 for a path to exist, got {frames}")
     out.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for index in range(frames):

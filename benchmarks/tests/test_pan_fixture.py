@@ -67,6 +67,21 @@ def test_a_source_no_larger_than_the_window_is_refused(tmp_path: Path) -> None:
         pan_frames(source(tmp_path, 1920, 1080), tmp_path / "out", frames=8)
 
 
+def test_a_non_empty_output_directory_is_refused(tmp_path: Path) -> None:
+    """`--frames 400` then `--frames 100` would leave 300 frames of the old lap behind, and
+    the encoder globs and sorts by name: one stream, two pans, a cut where they meet."""
+    src, out = source(tmp_path), tmp_path / "out"
+    pan_frames(src, out, size=(1280, 720), frames=6)
+
+    with pytest.raises(ValueError, match="not empty"):
+        pan_frames(src, out, size=(1280, 720), frames=4)
+
+
+def test_an_empty_or_absent_directory_is_fine(tmp_path: Path) -> None:
+    """The refusal must not make the ordinary case harder."""
+    assert pan_frames(source(tmp_path), tmp_path / "absent", size=(1280, 720), frames=4)
+
+
 def test_every_frame_is_the_window_size(tmp_path: Path) -> None:
     written = pan_frames(source(tmp_path), tmp_path / "out", size=(1280, 720), frames=4)
 
