@@ -26,6 +26,8 @@
 #include "shipinfer/pipeline/graph/dag.h"
 #include "shipinfer/pipeline/graph/plan_stages.h"
 #include "shipinfer/pipeline/graph/stages.h"
+#include "shipinfer/pipeline/mtmc/barrier.h"
+#include "shipinfer/pipeline/mtmc/cluster.h"
 
 namespace shipinfer {
 
@@ -36,7 +38,25 @@ namespace shipinfer {
     std::set<std::string> loaded_names(const ModelMap& models);
 
     // The plan's decision, as stages on one worker's scratch. Refusals are `plan_stages`'s.
+    // doc: long why the barrier and its budget are the CALLER's and not built here
+    //: The cross-camera pieces one process shares, because a Dag is per WORKER and these are
+    //: not. The barrier turns per-camera frames into instants and must see every worker's
+    //: frames to do it; the budget caps the waiters across every barrier in the process, which
+    //: is its whole reason to exist (`mtmc/barrier.h`: two barriers each admitting
+    //: `workers - 1` would park every worker between them). Built once by whoever owns the
+    //: fleet -- `cli/bench.cpp` -- and handed to every worker's `build_dag`. Absent means the
+    //: plan runs no `mtmc` slot, and one that does with these empty is a refusal.
+    struct MtmcRuntime {
+        std::shared_ptr<mtmc::WaiterBudget> budget;
+        //: Slot -> its barrier. One per slot, because one barrier is one camera group.
+        std::map<std::string, std::shared_ptr<mtmc::InstantBarrier>> barriers;
+    };
+
+    // Every `mtmc` slot the plan runs, with its barrier and tracker built. Called ONCE per
+    // process, before the workers start: two calls would be two identity spaces for one group.
+    MtmcRuntime mtmc_runtime(const PlanStages& planned, const PlanSettings& settings);
+
     Dag build_dag(const PlanStages& planned, const ModelMap& models, WorkerScratch& scratch,
-                  std::chrono::milliseconds timeout);
+                  std::chrono::milliseconds timeout, const MtmcRuntime& mtmc = {});
 
 }  // namespace shipinfer

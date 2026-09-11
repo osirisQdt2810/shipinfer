@@ -211,13 +211,57 @@ namespace shipinfer {
             } else if (verb == "scope") {
                 want(args, 1, where, "scope <value>");
                 node.scope = args[0];
+            } else if (verb == "group") {
+                want(args, 1, where, "group <name>");
+                node.group = args[0];
+            } else if (verb == "camera") {
+                want(args, 1, where, "camera <id>");
+                // REFUSED, not deduplicated: a roster is a SET of cameras, and a duplicate
+                // would have the barrier wait for one camera twice and never close on
+                // evidence. The other plane's reader refuses it the same way.
+                if (std::find(node.cameras.begin(), node.cameras.end(), args[0]) !=
+                    node.cameras.end()) {
+                    throw ConfigError(where + ": camera '" + args[0] +
+                                      "' is listed twice in this group; a roster is a set of "
+                                      "cameras and a duplicate would have the barrier wait "
+                                      "for one camera twice");
+                }
+                node.cameras.push_back(args[0]);
+            } else if (verb == "sync_window_ms") {
+                want(args, 1, where, "sync_window_ms <milliseconds>");
+                // `as_double`, NOT `std::stod`: this file's own parsers exist so the C++
+                // reader refuses the same text the Python one does, and raw `stod` accepts
+                // `0x10` as 16.0 and lets `std::invalid_argument` escape the plan reader's
+                // typed vocabulary entirely (#222's review measured both).
+                const double window = as_double(args[0], where);
+                // REFUSED rather than clamped, the same reading the writer applies: a
+                // zero-width instant admits one camera and calls the rest of its group late,
+                // which reads as a synchronisation failure rather than as a bad setting.
+                if (!(window > 0.0) || !std::isfinite(window)) {
+                    throw ConfigError(where + ": sync_window_ms is " + args[0] +
+                                      "; an instant's width is a positive finite number of "
+                                      "milliseconds");
+                }
+                node.sync_window_ms = window;
+            } else if (verb == "max_instants") {
+                want(args, 1, where, "max_instants <count>");
+                // `as_int` for the same reason, plus the bound: raw `stoi` takes `3abc` as
+                // 3 and throws an untyped `out_of_range` past INT_MAX.
+                const int count = as_int(args[0], where);
+                if (count < 1) {
+                    throw ConfigError(where + ": max_instants is " + args[0] +
+                                      "; zero open instants means every frame evicts itself");
+                }
+                node.max_instants = count;
             } else {
                 throw ConfigError(where + ": unknown verb '" + verb +
                                   "'; expected one of artefact, classes, crop, edge, field, "
                                   "fold_detections, fold_mask, fold_prototypes, fold_score, "
-                                  "instances, label, letterbox, max_detections, model, node, "
-                                  "per, plan, policy, policy_option, queue_delay_us, score, "
-                                  "scope, setting, when");
+                                  "camera, group, instances, label, letterbox, "
+                                  "max_detections, "
+                                  "max_instants, model, node, per, plan, policy, "
+                                  "policy_option, queue_delay_us, score, scope, setting, "
+                                  "sync_window_ms, when");
             }
         }
 
@@ -502,6 +546,16 @@ namespace shipinfer {
             if (!node.when.empty()) out += "when " + node.when + "\n";
             if (!node.per.empty()) out += "per " + node.per + "\n";
             if (!node.scope.empty()) out += "scope " + node.scope + "\n";
+            if (!node.group.empty()) out += "group " + node.group + "\n";
+            // IN THE ROSTER'S ORDER, which is the order the other writer emits and therefore
+            // the order a byte compare is entitled to.
+            for (const std::string& camera : node.cameras) out += "camera " + camera + "\n";
+            if (node.sync_window_ms) {
+                out += "sync_window_ms " + events::json_number(*node.sync_window_ms) + "\n";
+            }
+            if (node.max_instants) {
+                out += "max_instants " + std::to_string(*node.max_instants) + "\n";
+            }
         }
         out += "\n";
         for (const PlanEdge& edge : plan.edges) {

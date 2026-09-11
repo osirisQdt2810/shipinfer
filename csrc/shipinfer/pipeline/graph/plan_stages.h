@@ -61,9 +61,36 @@ namespace shipinfer {
         std::optional<MaskAreaSpec> fold;
     };
 
+    //: The cross-camera slot. `track_source` and `embedding_sources` are OUTPUT names and not
+    //: slot names, because an `ObjectBatch` is keyed by a stage's output (`stages.cpp`:
+    //: `out.name = output_`) -- the same derivation `fields` uses, so one spelling serves both.
+    struct MtmcStageSpec {
+        std::string slot;
+        std::string output;
+        //: The chain's `impl:`, which is `mtmc/cluster.h`'s registry key.
+        std::string impl;
+        std::string track_source;
+        //: The barrier's knobs as the CHAIN states them, absent when it does not. Absent
+        //: means the barrier's own defaults, which is the only sense in which "not stated"
+        //: and "stated as the default" differ here -- and the reason they are carried at all
+        //: is that `ship_person_cpu.yaml` states the window and this plane ignored it.
+        //: The group's name and its DECLARED ROSTER, announced to the barrier before any
+        //: worker starts. `barrier.h`: an announced camera wins over a merely-seen one the
+        //: moment anything announces, so a chain that names its four cameras forms instants
+        //: over those four -- which is what the other plane does, and what this plane did not
+        //: until #222's review found the two rosters differing.
+        std::string group;
+        std::vector<std::string> cameras;
+        std::optional<double> sync_window_ms;
+        std::optional<int> max_instants;
+        //: EVERY embedder's output. Several, because a chain embeds people and ships
+        //: separately and one row is in exactly one of them.
+        std::vector<std::string> embedding_sources;
+    };
+
     //: The tracker's slot, when the plan declares one this plane can run. `output` is the
     //: `ObjectBatch` name its ids arrive under, derived by `output_of` like every other
-    //: stage's so the plan's `field track_id <slot>` line finds them.
+    //: stage's, so the plan's `field track_id <slot>` line finds them.
     struct TrackStageSpec {
         std::string slot;
         std::string output;
@@ -90,6 +117,12 @@ namespace shipinfer {
         //: trackers whose selections overlap and allows two that are disjoint, so a plane that
         //: refused the second outright would throw on a chain the other plane loads.
         std::vector<TrackStageSpec> tracks;
+        //: The cross-camera slot, when the plan declares one this plane can run. At most one
+        //: is a REFUSAL rather than a convention (`plan_stages.cpp`): two `mtmc` slots are two
+        //: camera GROUPS, which the Python plane supports and this plane's barrier budget is
+        //: sized for -- but the two would need their group memberships from the chain, and no
+        //: chain states them yet, so both would silently be the whole fleet.
+        std::vector<MtmcStageSpec> mtmcs;
         std::vector<std::string> stage_names;
         pipeline::events::ClassLabels labels;
         pipeline::events::FieldMap fields;

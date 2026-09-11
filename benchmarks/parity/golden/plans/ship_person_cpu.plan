@@ -57,6 +57,12 @@ per camera
 
 node mtmc mtmc shipvision
 scope global
+group quay_north
+camera cam-01
+camera cam-02
+camera cam-03
+camera cam-04
+sync_window_ms 60.0
 
 node output output jsonlines
 
@@ -69,5 +75,6 @@ edge embed_ship track bgr@cpu
 edge track mtmc meta@cpu
 edge mtmc output meta@cpu
 field embedding embed_person embed_ship
+field global_id mtmc
 field mask_area_px segment
 field track_id track

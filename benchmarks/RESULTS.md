@@ -141,12 +141,13 @@ frames than its own pass's knob-off arm.
 
 ## What is not in any number above
 
-- **MTMC — but tracking is now IN, and this bullet used to exclude both.** The C++ plane grew a
-  `track` stage on 10 Sep, so a run of the `ship_person_cpu` chain reports **6 stages, "not run
-  here: decode mtmc output"** where it used to report 5 and name `track` among them. The
-  binary's stamped note is derived from that list now rather than asserting the exclusion, so it
-  says "fused kernels are NOT in this measurement" and adds ", and neither is tracking" only
-  when the run really had none.
+- **Nothing in the chain. Both exclusions are gone, and the page owes the numbers instead.**
+  `track` landed 10 Sep and `mtmc` on 11 Sep, so a run of the `ship_person_cpu` chain now
+  reports **7 stages, "not run here: decode output"** where it once reported 5 and named both
+  among them. The binary's stamped note is derived from that list rather than asserting an
+  exclusion, so it says "fused kernels are NOT in this measurement" and adds ", and neither is
+  tracking" only when a run really had none. **The whole-chain measurement is its own section
+  below**, because it changed what the per-worker numbers above mean.
   **What that costs, and the first answer was wrong.** The lane-in/lane-out pair at 8 cameras ×
   10 fps × 20 s on two GPUs read 1 595 complete events tracked against 1 600 untracked, and
   this page called it 0.3%, inside the noise floor above. It was not noise: it was a defect in
@@ -159,7 +160,9 @@ frames than its own pass's knob-off arm.
   more often.
   Every ratio above still predates the stage, so they are measured on a chain one stage shorter
   than the one that now ships — in the direction that understates us.
-- **The fused kernels.** `ldd csrc/build/bench` links no shipvision library.
+- **The fused kernels.** `ldd csrc/build/bench` links no shipvision library. (The `shipvision`
+  *lane* is in the binary now — the cross-camera tracker is compiled from that submodule's C++
+  — but the fused IMAGE kernels still are not: the letterbox and the crops are ours.)
 - **A baseline that reads video.** V156's fairness condition — the same bench for both arms,
   video in and targets out — cannot be met by this baseline: its input is a folder of JPEGs,
   it has no decoder and no RTSP, and the submodule is read-only by design. Our side does meet
@@ -168,6 +171,70 @@ frames than its own pass's knob-off arm.
 - **The previous system** (`references/`, the one this project replaces) is the only candidate
   that could be given video, and it is not runnable here: no image, no weights, and the image
   cannot be built on this kernel. It needs artefacts, not a measurement.
+
+## The whole chain, end to end, and the number that is not the throughput
+
+`decode → detect → crop → segment → embed_person → embed_ship → track → mtmc`, over **gstreamer
+RTSP** from the offline H.264 (`--source nvdec`, which is RTSP → NV12 → VRAM with no host
+round trip), 4 GPUs (0/2/5/6), 12 cameras × 200 fps × 40 s, fp16, `shipinfer-gst:jammy-nvdec`.
+One variable: `workers`.
+
+| workers | accepted img/s | untracked | **tracked img/s** | complete / incomplete |
+|---|---|---|---|---|
+| 24 | 265.8 | 188 (1.8%) | **261.1** | 10 633 / 0 |
+| 48 | 331.4 | 2 679 (20.2%) | **264.4** | 13 256 / 0 |
+| 92 | 442.6 | 7 409 (41.9%) | **257.3** | 17 662 / 40 |
+
+**The tracked rate is flat.** Accepted frames rise 1.67× across that range and the frames that
+leave with track ids do not move: every worker past ~24 buys a frame the tracker refused, and a
+frame with no ids is one `mtmc` cannot associate. So **~260 img/s** is this chain's answer on
+four A5000s, and the "throughput scales with workers" reading of the numbers further up this
+page was counting refusals.
+
+**Why, and it is not a defect.** One shared worker pool reorders a camera's frames, and a
+per-camera tracker refuses a frame that does not advance its own stream
+(`graph/stages.cpp`, and `topology/elements/track.py` catches the same refusal). More workers,
+more reordering, more refusals. `track_frames_untracked` is the counter that makes it visible,
+and it exists because #215's review found the stage FAILING on that refusal instead of
+publishing the frame untracked.
+
+**Neither the host nor the engines is the wall there.** At 92 workers the run used 12.4 of 48
+cores (26%), and the four models' busy percentages sum to ~430% of the 800% that eight instances
+per device could use. What binds is the barrier's latency trade and the ordering above.
+
+**AND THE CHAIN ISSUES NO GLOBAL IDS AT THESE DEFAULTS, which the throughput table cannot
+show.** The counters the stage added say why: at 12 cameras × 20 fps — 20 fps per camera, zero
+frames dropped, instants closing on evidence — the barrier is healthy and the gate admits
+**nothing**:
+
+```
+mtmc_instants mtmc complete 282   advanced 184   window 522
+mtmc_observations mtmc offered 3768   admitted 0
+mtmc_identities mtmc 0 0
+```
+
+It is not the window (200 ms instead of 60 moves the closes from `window` to `advanced` and
+still admits 0) and it is not the barrier. It is `ObservationGate`'s production defaults against
+this footage: `min_height_fraction = 1/9` is 120 px of a 1080-tall frame, which is
+["roughly the smallest crop its re-ID model was trained to handle"](../3rdparty/shipvision/shipvision/mtmc/gating.py)
+— and the benchmark's 2K crowd frames have people smaller than that. With the floor and
+`min_hits` lowered, the same run issues identities:
+
+```
+mtmc_observations mtmc offered 4046   admitted 4046
+mtmc_identities mtmc 20 52            # 20 global ids across 52 tracks
+```
+
+So the chain is proven end to end **and** the measurement is honest about what it did not
+exercise: the association ran on 4 046 observations, and at the reference's defaults this
+footage offers none. Two consequences, both filed: the gate's thresholds are not settable from
+the chain (`CSRC-MTMC-GATE-OPTIONS`), and a benchmark that means to exercise mtmc needs footage
+whose subjects clear the floor (`BENCH-FOOTAGE-IS-BELOW-THE-MTMC-GATE`).
+
+The fix for the *throughput* half is placement **affinity**, not more threads — a camera's frames reaching one worker, or
+a per-camera sequencer in front of the tracker — and it trades load balance for ordering, which
+is the trade this project exists to get right. Priced and open as
+`PIPELINE-WORKERS-NEED-CAMERA-AFFINITY`.
 
 ## The verdict, and the one open question
 

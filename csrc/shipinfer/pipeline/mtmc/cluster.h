@@ -17,6 +17,7 @@
 // interface promises is only that `ids()` is called with a whole instant.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -49,6 +50,13 @@ namespace shipinfer::mtmc {
 
     // Cross-camera identities for one instant. Stateful across calls by definition -- that is
     // what makes an id an identity rather than a label.
+    //: "This observation has no identity", which is a different fact from "this observation
+    //: does not exist": the gate admits nothing for a track that is too small or too new, and
+    //: `records.cpp` leaves the event's `global_id` null for it. NAMED so a second
+    //: implementation cannot pick a different sentinel -- `assign()` only ever issues
+    //: non-negative ids, so -1 is unambiguous (#221 round 3).
+    inline constexpr int64_t kUnidentified = -1;
+
     class ClusterTracker {
       public:
         virtual ~ClusterTracker() = default;
@@ -63,6 +71,38 @@ namespace shipinfer::mtmc {
         // How many identities and tracks are live. For the run's report, and for a test that
         // wants to see the bounds hold.
         virtual IdentitySizes sizes() const = 0;
+
+        // AN INSTANT THIS SEAM REFUSED, counted rather than lost -- the same shape
+        // `Associator::note_untracked` has and for the same reason: one camera's malformed row
+        // (a duplicate key, a zero embedding, a second width) is an ordinary outcome of real
+        // data, and the stage publishes the group's frames with null ids instead of failing
+        // the frame that happened to close the bucket. The caller counts it HERE, because one
+        // tracker serves every worker on a slot and this is the run's answer.
+        void note_refused() { refused_.fetch_add(1, std::memory_order_relaxed); }
+        uint64_t refused_instants() const { return refused_.load(std::memory_order_relaxed); }
+
+        // HOW MUCH OF AN INSTANT SURVIVED THE GATE, counted by the implementation because it
+        // is the only thing that knows. Without it "no identities" is indistinguishable from
+        // "nothing to identify": a site whose boxes are all under `min_height_fraction`, or a
+        // stream where no track is present in `min_hits` CONSECUTIVE instants, admits nothing
+        // and issues nothing -- and the run used to report that as `mtmc_identities 0 0` with
+        // no way to tell it from a barrier that never closed. Measured: that is exactly what
+        // happened (`MTMC-GATE-ADMITS-NOTHING-AT-THE-MEASURED-LOAD`).
+        void note_instant(uint64_t offered, uint64_t admitted) {
+            offered_.fetch_add(offered, std::memory_order_relaxed);
+            admitted_.fetch_add(admitted, std::memory_order_relaxed);
+        }
+        uint64_t observations_offered() const {
+            return offered_.load(std::memory_order_relaxed);
+        }
+        uint64_t observations_admitted() const {
+            return admitted_.load(std::memory_order_relaxed);
+        }
+
+      private:
+        std::atomic<uint64_t> refused_{0};
+        std::atomic<uint64_t> offered_{0};
+        std::atomic<uint64_t> admitted_{0};
     };
 
     using ClusterTrackerFactory = std::function<std::shared_ptr<ClusterTracker>()>;

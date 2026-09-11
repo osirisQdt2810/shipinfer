@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-11 — the C++ graph associates instants, and the chain's real rate is 260 img/s
+
+`MtmcStage` is barrier + scatter and nothing else: read each row's track id and embedding, hand
+this camera's rows to the `InstantBarrier`, scatter the group's answer back BY KEY. The plan's
+`mtmc` node carries `sync_window_ms` and `max_instants` on both planes now, so the window the
+chain's latency turns on is a chain decision rather than an unmeasured default.
+`mtmc_runtime()` builds ONE barrier per slot and ONE `WaiterBudget` for the process before any
+worker starts, and `build_dag` refuses rather than building its own -- a barrier per Dag is a
+barrier per worker, which is within-camera deduplication. Two refusals with reasons: a second
+runnable `mtmc` slot, and an `mtmc` slot with no runnable tracker. MEASURED end to end over
+gstreamer RTSP on four A5000s: 442.6 accepted img/s at 92 workers, but 41.9% of those frames
+are UNTRACKED and the tracked rate is FLAT at ~260 from 24 workers up -- one shared worker pool
+reorders a camera's frames and the per-camera tracker refuses them. RESULTS.md carries it.
+---
+
 ## 2026-09-10 — the lane unit behind the cross-camera seam
 
 The `shipvision` half, composed rather than reimplemented: `gate.filter`, the (n, n) gram

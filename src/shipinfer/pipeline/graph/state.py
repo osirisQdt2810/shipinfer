@@ -95,6 +95,10 @@ RECORD_CONVERTERS: Mapping[str, Callable[[np.ndarray], Any]] = {
     "mask_area_px": _as_float,
     "track_id": _as_int,
     "track_state": _as_str,
+    #: The cross-camera id. Both planes' tables lacked it, so a plan naming the field was
+    #: refused here and silently filled nothing there -- which is how the C++ `mtmc` stage ran
+    #: and published `global_id: null` on every event (#222's review).
+    "global_id": _as_int,
 }
 
 

@@ -22,6 +22,8 @@
 #include "shipinfer/pipeline/graph/plan_stages.h"
 #include "shipinfer/pipeline/graph/stage.h"
 #include "shipinfer/pipeline/graph/state.h"
+#include "shipinfer/pipeline/mtmc/barrier.h"
+#include "shipinfer/pipeline/mtmc/cluster.h"
 #include "shipinfer/pipeline/tracking/associator.h"
 
 namespace shipinfer {
@@ -164,6 +166,40 @@ namespace shipinfer {
         //: `CropStage` follows with `WorkerScratch` -- a per-frame vector on the dispatch
         //: path is an allocation a thousand times a second for nothing.
         std::vector<Detection> selected_;
+    };
+
+    // doc: long what this stage owns and what it deliberately does not
+    // CROSS-CAMERA IDENTITY, and the stage owns none of it. Two components do the work -- the
+    // barrier turns the chain's one-frame-at-a-time stream back into synchronised instants,
+    // and the cluster tracker turns an instant into global ids -- and this class is the join:
+    // it reads each detection's box, track id and embedding out of the frame's batches, hands
+    // its camera's rows to the barrier, and scatters whatever comes back onto the rows the
+    // detector produced.
+    //
+    // WHY IT READS THE TRACK ID AT ALL. Cross-camera identity is keyed by (camera, TRACK),
+    // never by (camera, detection): a detection is one frame's observation and an identity has
+    // to persist across frames, so an untracked row has nothing for the identity map to hold
+    // on to. Such a row is passed over rather than published with somebody else's id.
+    class MtmcStage : public Stage {
+      public:
+        MtmcStage(std::string name, std::string output, std::string track_source,
+                  std::vector<std::string> embedding_sources,
+                  std::shared_ptr<mtmc::InstantBarrier> barrier,
+                  std::shared_ptr<mtmc::ClusterTracker> tracker);
+
+      protected:
+        size_t do_run(FrameState& state) override;
+
+      private:
+        std::string output_;
+        //: The track stage's OUTPUT name, which is where the ids are (`stages.cpp`:
+        //: `out.name = output_`), not the slot's own.
+        std::string track_source_;
+        //: Every embedder's output name. Several, because a chain embeds people and ships
+        //: separately and one row is in exactly one of them.
+        std::vector<std::string> embedding_sources_;
+        std::shared_ptr<mtmc::InstantBarrier> barrier_;
+        std::shared_ptr<mtmc::ClusterTracker> tracker_;
     };
 
     class ObjectStage : public ModelStage {

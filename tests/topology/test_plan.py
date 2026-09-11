@@ -83,6 +83,50 @@ def _resolved(name: str) -> ResolvedPlan:
     )
 
 
+class TestTheGroupsRosterCrossesThePlane:
+    """A roster decides which frames form an instant, so it has to reach the other plane.
+
+    #222's review: this plane read `cameras:` and the C++ barrier accreted every camera its
+    shard happened to see, so one chain file produced two instant memberships and two sets of
+    global ids -- the same class of divergence as the capture clock one round earlier.
+    """
+
+    def test_the_chain_s_roster_reaches_the_plan(self) -> None:
+        from shipinfer.topology.plan import parse_plan
+
+        text = (GOLDEN / "ship_person_cpu.plan").read_text(encoding="utf-8")
+        node = next(n for n in parse_plan(text).nodes if n.kind == "mtmc")
+
+        assert node.group == "quay_north"
+        assert node.cameras == ("cam-01", "cam-02", "cam-03", "cam-04")
+
+    def test_a_roster_listing_one_camera_twice_is_refused(self) -> None:
+        from shipinfer.topology.plan import PlanSyntaxError, parse_plan
+
+        with pytest.raises(PlanSyntaxError, match="listed twice"):
+            parse_plan("plan 3 x\nnode mtmc mtmc shipvision\ncamera cam-01\ncamera cam-01\n")
+
+    @pytest.mark.parametrize(
+        ("params", "match"),
+        [
+            ({"sync_window_ms": "fast"}, "positive finite"),
+            ({"max_instants": 2.9}, "whole count"),
+            ({"max_instants": True}, "whole count"),
+        ],
+    )
+    def test_a_param_that_is_not_a_number_is_refused_by_name(
+        self, params: dict[str, object], match: str
+    ) -> None:
+        """`float(value)` and `int(value)` raised bare ValueErrors past the reader's own
+        vocabulary, and `int(2.9)` truncated to 2 with nothing said."""
+        from shipinfer.core.errors import ConfigurationError
+        from shipinfer.topology.plan import _barrier_instants, _barrier_window
+
+        read = _barrier_window if "sync_window_ms" in params else _barrier_instants
+        with pytest.raises(ConfigurationError, match=match):
+            read(params, "mtmc element 'mtmc'")
+
+
 class TestTheCommittedGoldensAreWhatThisPlaneEmits:
     """The Python half of the byte compare, which no other seam has yet.
 
@@ -177,6 +221,10 @@ class TestWhatTheChainResolvesTo:
             # two -- which is also what makes "two trackers over one camera's rows" a LOAD
             # refusal rather than a per-frame one.
             "track_id": ("track",),
+            # And an mtmc slot fills `global_id`. Without this entry the plan carried no field
+            # line for it, so the C++ graph attached the stage's answer and NOTHING read it:
+            # the stage ran and every event said null (#222's review).
+            "global_id": ("mtmc",),
         }
 
     def test_edges_carry_the_cap_the_loader_negotiated(
@@ -290,6 +338,22 @@ class TestBothPlanesRefuseTheSameText:
         ("plan 3 x\nnode a b c\nfold_mask 1.5\n", "and past it"),
         ("plan 3 x\nnode a b c\nfold_score nan\n", "a non-finite score floor"),
         ("plan 3 x\nnode a b c\nfold_detections a b\n", "an output name holding a space"),
+        (
+            "plan 3 x\nnode a b c\nsync_window_ms 0\n",
+            "a zero-width instant, which admits one camera and calls its group late",
+        ),
+        ("plan 3 x\nnode a b c\nsync_window_ms inf\n", "and a window with no end"),
+        (
+            "plan 3 x\nnode a b c\nmax_instants 0\n",
+            "zero open instants, where every frame evicts itself",
+        ),
+        # The spellings raw `stod`/`stoi` took on the other plane (#222): `0x10` as 16 ms,
+        # `3abc` as 3, `--5` as a bare ValueError, and anything past a 32-bit int untyped.
+        ("plan 3 x\nnode a b c\nsync_window_ms 0x10\n", "a hex window"),
+        ("plan 3 x\nnode a b c\nsync_window_ms abc\n", "a window that is not a number"),
+        ("plan 3 x\nnode a b c\nmax_instants 3abc\n", "a count with a tail"),
+        ("plan 3 x\nnode a b c\nmax_instants --5\n", "a doubly-negative count"),
+        ("plan 3 x\nnode a b c\nmax_instants 99999999999\n", "a count past a 32-bit int"),
         ("plan 3 x\nsetting nonsense 1\n", "a setting key neither plane would use"),
         ("plan 3 x\nsetting workers four\n", "a setting value that is not an integer"),
         ("plan 3 x\nsetting workers 4\n", "one setting, so seven a reader would default"),
@@ -404,6 +468,63 @@ class TestTheSettingsCrossFromTheRealTree:
         assert carried.instance_queue != carried.pipeline_queue
         assert carried.instance_queue == 64, "scheduler.max_queue_size, per instance"
         assert carried.pipeline_queue == 256, "pipeline.queue_capacity, frames from ingest"
+
+
+class TestTheBarriersWindowCrosses:
+    """`MTMC-WINDOW-IS-NOT-CONFIGURABLE`: `ship_person_cpu.yaml` has stated
+    `sync_window_ms: 60` all along and the C++ barrier ran its own default, so the two planes
+    bucketed instants differently for one chain file. The window is also what the whole
+    chain's throughput turns on -- a worker parked in the barrier is a worker not draining its
+    lane -- so an unstated one is a measurement of a configuration nobody chose."""
+
+    def chain(self, mtmc: str) -> str:
+        return (
+            "name: window\nelements:\n"
+            "  decode: {impl: replay}\n"
+            "  detect: {impl: pool, model: ship_detector}\n"
+            "  embed: {impl: pool, model: person_embedder, params: {classes: [person]}}\n"
+            "  track: {impl: shipvision, after: embed}\n"
+            f"  mtmc: {mtmc}\n"
+            "  output: {impl: none}\n"
+        )
+
+    def resolved(self, mtmc: str, dims: dict[str, tuple[int, int]]) -> str:
+        chain = Topology.from_spec(ChainSpec.from_yaml(self.chain(mtmc)))
+        return plan_text(resolve_plan(chain, dims=dims))
+
+    def test_the_chains_window_reaches_the_plan(self, dims: dict[str, tuple[int, int]]) -> None:
+        text = self.resolved(
+            "{impl: shipvision, params: {scope: global, sync_window_ms: 25, "
+            "max_instants: 4}, after: track}",
+            dims,
+        )
+
+        assert "sync_window_ms 25.0" in text
+        assert "max_instants 4" in text
+
+    def test_an_unstated_window_emits_no_line(self, dims: dict[str, tuple[int, int]]) -> None:
+        """Absent means "the barrier's own default", and that decision belongs to the
+        barrier: a number written here would be one more place the default lives."""
+        text = self.resolved("{impl: shipvision, params: {scope: global}, after: track}", dims)
+
+        assert "sync_window_ms" not in text and "max_instants" not in text
+
+    def test_a_zero_width_instant_is_refused_by_the_ELEMENT_first(
+        self, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """And that is the right place: earlier than the plan.
+
+        A zero-width instant admits one camera and calls the rest of its group late, which
+        reads as a synchronisation failure rather than as a bad setting. The element refuses it
+        at construction, so `resolve_plan` never sees one from a chain file -- the plan reader's
+        own refusal (`test_the_format_refuses_a_zero_width_instant`) is for a plan written by
+        something other than this writer, which is the case the two planes have to agree on.
+        """
+        with pytest.raises(ConfigurationError, match="must be positive"):
+            self.resolved(
+                "{impl: shipvision, params: {scope: global, sync_window_ms: 0}, after: track}",
+                dims,
+            )
 
 
 class TestTheFoldCutsCross:

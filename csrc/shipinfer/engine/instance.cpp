@@ -222,6 +222,22 @@ namespace shipinfer {
             outputs.push_back({engine_->output_name(o), engine_->output_dims(o),
                                engine_->output_row_elems(o), engine_->output(o)});
         }
+        // COUNTED BEFORE ANY WAITER IS RELEASED. `item.complete()` below resolves a future,
+        // so a caller can be running the instant it returns -- and with the counters updated
+        // after the loop, a reader that woke in that window saw a batch that had finished and
+        // not been counted. `test_engine`'s "two serialised requests are two batches" failed
+        // on a loaded CI runner for exactly that, five-for-five green locally.
+        {
+            const double latency_us = (end_ns - start_ns) / 1000.0;
+            const double previous = ewma_latency_us_.load();
+            ewma_latency_us_.store(
+                previous == 0.0 ? latency_us : previous + kEwmaAlpha * (latency_us - previous));
+            std::lock_guard<std::mutex> lock(stats_mutex_);
+            ++stats_.batches;
+            stats_.rows += offset;
+            stats_.requests += items.size();
+            stats_.compute_us += latency_us;
+        }
         const int64_t completed_ns = monotonic_ns();
         for (size_t i = 0; i < items.size(); ++i) {
             WorkItem& item = items[i];
@@ -252,15 +268,6 @@ namespace shipinfer {
             response.timings.completed_ns = completed_ns;
             item.complete(std::move(response));
         }
-        const double latency_us = (end_ns - start_ns) / 1000.0;
-        const double previous = ewma_latency_us_.load();
-        ewma_latency_us_.store(
-            previous == 0.0 ? latency_us : previous + kEwmaAlpha * (latency_us - previous));
-        std::lock_guard<std::mutex> lock(stats_mutex_);
-        ++stats_.batches;
-        stats_.rows += offset;
-        stats_.requests += items.size();
-        stats_.compute_us += latency_us;
     }
 
 }  // namespace shipinfer

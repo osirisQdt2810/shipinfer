@@ -322,6 +322,172 @@ namespace shipinfer {
         return rows;
     }
 
+    MtmcStage::MtmcStage(std::string name, std::string output, std::string track_source,
+                         std::vector<std::string> embedding_sources,
+                         std::shared_ptr<mtmc::InstantBarrier> barrier,
+                         std::shared_ptr<mtmc::ClusterTracker> tracker)
+        // CONSUMES the track ids and does NOT need them, for the reason `TrackStage` does not
+        // need the detections: a camera with nothing to report still has to REPORT, or the
+        // instant it belongs to waits for it until the window runs out and every other camera
+        // in the group is answered late. `needs` is "present and non-empty".
+        : Stage(std::move(name), {track_source}, {}, {output}),
+          output_(std::move(output)),
+          track_source_(std::move(track_source)),
+          embedding_sources_(std::move(embedding_sources)),
+          barrier_(std::move(barrier)),
+          tracker_(std::move(tracker)) {}
+
+    namespace {
+
+        //: One detection's embedding, from whichever embedder holds that row. `nullptr` when
+        //: no embedder ran for it -- a person row in a chain whose ship embedder answered, or
+        //: a row every embedder's crop selection passed over.
+        const float* embedding_of(const FrameState& state,
+                                  const std::vector<std::string>& sources, int index,
+                                  int& width) {
+            for (const std::string& source : sources) {
+                const ObjectBatch* batch = state.batch(source);
+                if (batch == nullptr) continue;
+                for (size_t row = 0; row < batch->rows(); ++row) {
+                    if (batch->object_indices[row] != index) continue;
+                    width = batch->width;
+                    return batch->row(row);
+                }
+            }
+            return nullptr;
+        }
+
+    }  // namespace
+
+    size_t MtmcStage::do_run(FrameState& state) {
+        // WHAT THIS CAMERA CAN CONTRIBUTE: a row needs a TRACK id (identity is keyed by
+        // (camera, track), so an untracked row has nothing to hold on to) and an EMBEDDING
+        // (cross-camera identity is decided on appearance). A row missing either is passed
+        // over here and published with a null global id, which is a different fact from
+        // "this row does not exist".
+        std::vector<mtmc::ClusterObservation> mine;
+        const ObjectBatch* tracks = state.batch(track_source_);
+        if (tracks != nullptr) {
+            for (size_t row = 0; row < tracks->rows(); ++row) {
+                const int index = tracks->object_indices[row];
+                if (index < 0 || static_cast<size_t>(index) >= state.detections().size()) {
+                    continue;
+                }
+                int width = 0;
+                const float* embedding = embedding_of(state, embedding_sources_, index, width);
+                if (embedding == nullptr || width <= 0) continue;
+                const Detection& detection = state.detections()[static_cast<size_t>(index)];
+                mtmc::ClusterObservation observation;
+                observation.key = mtmc::TrackKey{state.tag().camera_id,
+                                                 static_cast<int64_t>(tracks->row(row)[0])};
+                observation.embedding.assign(embedding, embedding + width);
+                observation.box[0] = detection.x1;
+                observation.box[1] = detection.y1;
+                observation.box[2] = detection.x2;
+                observation.box[3] = detection.y2;
+                observation.box_index = index;
+                observation.frame_width = state.width();
+                observation.frame_height = state.height();
+                mine.push_back(std::move(observation));
+            }
+        }
+
+        // THE INSTANT, not this camera. `barrier.h` states the constraint: a cross-camera
+        // tracker consumes every camera of a group at one synchronised instant and refuses
+        // anything less, because one camera at a time turns cross-camera association into
+        // within-camera deduplication. The callback below runs on whichever worker closes the
+        // bucket, over EVERY camera's entries.
+        // MOVED, not copied. Only `key` and `box_index` are read back after `submit`, so the
+        // scatter keeps those two and the embeddings travel once -- a copy here was 2048
+        // floats per row per frame on the dispatch path (#222's review).
+        std::vector<std::pair<mtmc::TrackKey, int>> scatter;
+        scatter.reserve(mine.size());
+        for (const mtmc::ClusterObservation& observation : mine) {
+            scatter.emplace_back(observation.key, observation.box_index);
+        }
+        const auto payload =
+            std::make_shared<std::vector<mtmc::ClusterObservation>>(std::move(mine));
+        const mtmc::Association associate =
+            [this](const std::vector<mtmc::InstantEntry>& entries) -> mtmc::Results {
+            std::vector<mtmc::ClusterObservation> instant;
+            for (const mtmc::InstantEntry& entry : entries) {
+                const auto& camera =
+                    *std::static_pointer_cast<std::vector<mtmc::ClusterObservation>>(
+                        entry.payload);
+                instant.insert(instant.end(), camera.begin(), camera.end());
+            }
+            return std::make_shared<const std::map<mtmc::TrackKey, int64_t>>(
+                tracker_->ids(instant));
+        };
+        // SECONDS FROM THE CAPTURE (WALL) STAMP, because the other plane keys the same
+        // barrier on `item.context.captured_unix_ns` and two planes bucketing one clip into
+        // different instants is two different sets of global ids -- the sync rule's whole
+        // subject, and #222's review caught the divergence. The steady stamp was the first
+        // choice for a real reason (NTP can step the wall clock, including backwards, and a
+        // stepped frame lands in the wrong instant rather than merely late) but it is also
+        // PER PROCESS, so a fleet's shards could never share an instant with it. The NTP risk
+        // is `MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK`.
+        //
+        // REFUSED AT ZERO, the way the Python element's validator is: a source that never
+        // stamps would otherwise put every camera's every frame into ONE instant that closes
+        // once and makes everything after it late for the life of the process -- which reads
+        // as clock skew and is a wiring fault.
+        if (state.tag().captured_unix_ns <= 0) {
+            throw ConfigError("stage " + name() + ": frame " +
+                              std::to_string(state.tag().frame_id) + " of camera '" +
+                              state.tag().camera_id +
+                              "' carries no capture stamp, and an instant is keyed on when a "
+                              "frame was captured; the source must set captured_unix_ns");
+        }
+        const double capture_s = static_cast<double>(state.tag().captured_unix_ns) / 1e9;
+        // CAUGHT AT THE SUBMIT CALL SITE, which is where the other plane catches it
+        // (`elements/mtmc.py`) -- and that matters twice over. ONE CAMERA'S FAULT COSTS THE
+        // GROUP'S INSTANT AND NOT THE CLOSING FRAME: `barrier.h` says a throwing association
+        // releases every waiter with `kDroppedFailed` and rethrows here, so without this the
+        // frame that happened to close the bucket would fail its stage and be retired as a
+        // reassembly TIMEOUT -- #215's lesson one level up. And catching HERE rather than
+        // inside the association keeps the two planes' LEDGERS the same: the barrier records
+        // the instant as failed for its waiters rather than as `complete`, which is what
+        // #222's review found diverging when the catch was one level down. A `ConfigError` is
+        // still fatal: a misconfigured tracker is not data.
+        mtmc::InstantOutcome outcome;
+        try {
+            outcome = barrier_->submit(state.tag().camera_id, capture_s, payload, associate);
+        } catch (const InferenceError&) {
+            tracker_->note_refused();
+            outcome = mtmc::InstantOutcome{mtmc::kDroppedFailed, nullptr, false, 0};
+        }
+
+        ObjectBatch batch;
+        batch.name = output_;
+        batch.width = 1;
+        if (outcome.associated && outcome.results) {
+            const auto& ids =
+                *std::static_pointer_cast<const std::map<mtmc::TrackKey, int64_t>>(
+                    outcome.results);
+            // KEYED, never positional. The association answers for the whole group in one
+            // map, so camera A's three results and camera B's one mean nothing to each other
+            // by position -- and each frame reads its OWN entries out by the key it chose.
+            // Scattering by list position is the classic reassembly bug one layer up.
+            for (const auto& [key, box_index] : scatter) {
+                const auto found = ids.find(key);
+                // `kUnidentified` IS NOT AN ID. The gate admits nothing for a track that is
+                // too small or too new and the seam answers `-1` for it, which the event
+                // schema means as a null `global_id` -- publishing it as a row would put -1
+                // on the screen as an identity.
+                if (found == ids.end() || found->second == mtmc::kUnidentified) continue;
+                batch.object_indices.push_back(box_index);
+                batch.data.push_back(static_cast<float>(found->second));
+            }
+        }
+        const size_t rows = batch.rows();
+        // Attached even when EMPTY, like every other per-object payload: the name exists, so
+        // a reader that joins on it finds an answer rather than a missing key -- and an
+        // instant this frame missed is a gap the event records as a null id.
+        state.attach(std::move(batch));
+        return rows;
+    }
+
     size_t ObjectStage::do_run(FrameState& state) {
         const DevicePayload* payload = state.payload(source_);
         if (payload == nullptr)

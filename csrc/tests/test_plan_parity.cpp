@@ -176,6 +176,26 @@ namespace {
         check(refused("plan 3 x\nnode a b c\nfold_score nan\n"), "a non-finite score floor");
         check(refused("plan 3 x\nnode a b c\nfold_detections a b\n"),
               "an output name holding a space");
+        check(refused("plan 3 x\nnode a b c\nsync_window_ms 0\n"),
+              "a zero-width instant, which admits one camera and calls its group late");
+        check(refused("plan 3 x\nnode a b c\nsync_window_ms inf\n"),
+              "and a window with no end");
+        check(refused("plan 3 x\nnode a b c\nmax_instants 0\n"),
+              "zero open instants, where every frame evicts itself");
+        // THE SPELLINGS RAW `stod`/`stoi` TOOK, which is what #222's review measured: `0x10`
+        // came back as 16.0 ms and `3abc` as 3, while the other plane refused both -- one plan
+        // file, two barriers -- and a non-numeric token escaped as `std::invalid_argument`,
+        // outside this reader's typed vocabulary and therefore outside this very table.
+        check(refused("plan 3 x\nnode a b c\nsync_window_ms 0x10\n"),
+              "a hex window, which one reader read as 16 ms");
+        check(refused("plan 3 x\nnode a b c\nsync_window_ms abc\n"),
+              "and a window that is not a number at all");
+        check(refused("plan 3 x\nnode a b c\nmax_instants 3abc\n"),
+              "a count with a tail, which one reader read as 3");
+        check(refused("plan 3 x\nnode a b c\nmax_instants --5\n"),
+              "a doubly-negative count, which the Python reader took down with a ValueError");
+        check(refused("plan 3 x\nnode a b c\nmax_instants 99999999999\n"),
+              "and a count past a 32-bit int");
         check(refused("plan 3 x\nsetting nonsense 1\n"),
               "a setting key neither plane would use");
         check(refused("plan 3 x\nsetting workers four\n"),

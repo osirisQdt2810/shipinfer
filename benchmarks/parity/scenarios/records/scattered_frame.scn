@@ -44,6 +44,12 @@ row 0 4.0
 batch similarity_out 1
 row 0 0.75
 
+# THE CROSS-CAMERA ID, which no scenario carried until the `mtmc` stage had a consumer: the
+# field's converter existed on neither plane's table, so a plan naming it was refused on one
+# and silently filled nothing on the other (#222's review).
+batch global_out 1
+row 1 4.0
+
 # An empty batch is not a missing one: it must be skipped without becoming a null field.
 batch person_embed_out 2
 
@@ -51,3 +57,4 @@ field embedding ship_embed_out person_embed_out
 field mask_area_px mask_out
 field ship_id ident_out
 field similarity similarity_out
+field global_id global_out

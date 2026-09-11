@@ -437,6 +437,11 @@ int main(int argc, char** argv) {
         // labels said a ship was class 1 while the crop specs said 8, so every ship left the
         // event writer as `unknown` while the right rows were cropped.
         const PlanStages planned = plan_stages(plan, loaded_names(models));
+        // ONCE FOR THE PROCESS, before any worker starts. A barrier per Dag is a barrier per
+        // WORKER, and a cross-camera tracker that saw one worker's frames would be doing
+        // within-camera deduplication -- which is the failure `mtmc/barrier.h` exists to
+        // prevent, so `build_dag` refuses rather than building its own.
+        const MtmcRuntime cross_camera = mtmc_runtime(planned, tuning);
         const std::vector<std::string>& stage_names = planned.stage_names;
         std::cerr << "chain '" << plan.name << "': " << stage_names.size() << " stage(s)";
         if (!planned.unsupported.empty()) {
@@ -659,7 +664,8 @@ int main(int argc, char** argv) {
                     // thread's `WorkerScratch`; from the same plan as the tables above, so
                     // the collector's expectations and the stages cannot disagree.
                     Dag dag = build_dag(planned, models, scratch,
-                                        std::chrono::milliseconds(tuning.stage_timeout_ms));
+                                        std::chrono::milliseconds(tuning.stage_timeout_ms),
+                                        cross_camera);
 
                     PipelineLanes::Queue& queue = lanes.lane(lane_index);
                     while (!stopping.load()) {
@@ -880,6 +886,43 @@ int main(int argc, char** argv) {
             for (const tracking::MadeAssociator& made : tracking::made_associators()) {
                 std::cout << "track_frames_untracked " << made.slot << " "
                           << made.associator->untracked_frames() << "\n";
+            }
+            // The same shape for the cross-camera half: one tracker per (impl, slot), and an
+            // instant it refused is published with null ids rather than failing a frame. A run
+            // with a non-zero count here has real data the gate or the assigner would not take.
+            // CLOSED FIRST, because `barrier.h` says that is what `close_all` is for: a
+            // worker parked in `submit` would otherwise hold shutdown for the rest of its
+            // window, and every instant still open at stop is counted as `window` or
+            // `expired` rather than `shutdown` -- the run's own ledger mislabelling its last
+            // instants (#222's review).
+            for (const auto& [slot, barrier] : cross_camera.barriers) {
+                const size_t closed = barrier->close_all();
+                std::cout << "mtmc_instants " << slot << " closed_at_stop " << closed << "\n";
+            }
+            // THE BARRIER'S OWN LEDGER, per slot, and it is the line that says whether the
+            // stage contributed at all: an instant that never closed on evidence answers no
+            // ids, and without this the run reports `mtmc_identities 0 0` with no way to tell
+            // "nothing to associate" from "every instant missed its window".
+            for (const auto& [slot, barrier] : cross_camera.barriers) {
+                for (const auto& [reason, count] : barrier->instant_stats()) {
+                    std::cout << "mtmc_instants " << slot << " " << reason << " " << count
+                              << "\n";
+                }
+                for (const auto& [reason, count] : barrier->frame_stats()) {
+                    std::cout << "mtmc_frames " << slot << " " << reason << " " << count
+                              << "\n";
+                }
+            }
+            for (const mtmc::MadeClusterTracker& made : mtmc::made_cluster_trackers()) {
+                std::cout << "mtmc_instants_refused " << made.slot << " "
+                          << made.tracker->refused_instants() << "\n";
+                std::cout << "mtmc_observations " << made.slot << " offered "
+                          << made.tracker->observations_offered() << "\n";
+                std::cout << "mtmc_observations " << made.slot << " admitted "
+                          << made.tracker->observations_admitted() << "\n";
+                const mtmc::IdentitySizes sizes = made.tracker->sizes();
+                std::cout << "mtmc_identities " << made.slot << " " << sizes.identities << " "
+                          << sizes.tracks << "\n";
             }
         };
 

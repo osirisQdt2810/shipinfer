@@ -976,6 +976,11 @@ ROW_FIELD_KINDS = {
     ElementKind.EMBED: "embedding",
     ElementKind.SEGMENT: "mask_area_px",
     ElementKind.TRACK: "track_id",
+    #: The cross-camera id. Without this line the plan carries no `field global_id <slot>`, so
+    #: the C++ graph attaches the stage's answer and nothing reads it -- the stage ran and
+    #: every event said `null` (#222's review). `output.py` publishes the field on this plane
+    #: from `meta["global_ids"]`, which is the divergence that made it visible.
+    ElementKind.MTMC: "global_id",
 }
 
 
