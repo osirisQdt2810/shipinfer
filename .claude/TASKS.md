@@ -2876,7 +2876,7 @@ hook down, for when the operator asked to see something before it is executed.
       floor and is identified on the FIRST instant at the chain's. The MEASUREMENT with the
       floor set from the chain is `BENCH-FOOTAGE-IS-BELOW-THE-MTMC-GATE`'s option (c).
 
-- [ ] BENCH-FOOTAGE-IS-BELOW-THE-MTMC-GATE · `benchmarks/baseline/data/{person_2K,ship_2K}` is
+- [x] BENCH-FOOTAGE-IS-BELOW-THE-MTMC-GATE · REFUTED 11 Sep. `benchmarks/baseline/data/{person_2K,ship_2K}` is
       what every measurement uses, and its subjects are shorter than the gate's 120 px floor at
       1080p -- so a bench run cannot exercise cross-camera association at the reference's
       defaults, whatever else it proves (measured, see `CSRC-MTMC-GATE-OPTIONS`). THE OPTIONS:
@@ -2886,6 +2886,53 @@ hook down, for when the operator asked to see something before it is executed.
       are proportionally taller, which changes what the detector sees and is therefore a
       different measurement; (c) set the gate's floor from the chain and say in the report what
       it was. (c) is honest and cheap; (a) is the one that measures the deployment.
+      REFUTED 11 Sep, with the knob #225 added: the premise is false. Nine arms at 12 cameras x
+      20 fps x 40 s (GPUs 0/2/5/6, 24 workers, `--source nvdec`), one variable each. At
+      `min_hits 1` the gate admits EXACTLY what it is offered -- 3 680 of 3 680, and 3 317 of
+      3 317 -- with the height floor at the reference's own 1/9, so every box already clears
+      120 px. Lowering ONLY the floor (0.02, `min_hits` left at 3) admits 0. The first reading
+      lowered both at once and blamed the footage. Options (a) and (b) are moot: (a) is
+      additionally impossible with this data, because `person_4K` is `person_2K`'s own scenes
+      at 2x (mean |diff| 1.8/255 after downscaling), so the FRACTION a subject occupies is
+      identical. What actually closes the gate is the AGE test, filed as
+      `MTMC-MIN-HITS-CANNOT-BE-MET-BY-A-FREE-RUNNING-FLEET`; `benchmarks/RESULTS.md` has the
+      table.
+
+- [ ] MTMC-MIN-HITS-CANNOT-BE-MET-BY-A-FREE-RUNNING-FLEET · MEASURED 11 Sep: at the reference's
+      `min_hits = 3` the gate admits NOTHING on a 12-camera run; at 2 it admits ~25% (969/3 739
+      and 847/3 330 in two independent arms); at 1 it admits 100%. It is not the window (200 ms
+      still admits 0, with the closes moved from `window` to `advanced`) and not the roster
+      (25.4% against 25.9% at `min_hits 2`, with and without a roster that matches the fleet).
+      WHY: `min_hits` counts CONSECUTIVE qualifying instants and `ObservationGate` REPLACES its
+      hit map each instant -- deliberately, so that "consecutive" means consecutive -- while an
+      instant here is a wall-clock bucket that one camera lands in intermittently: 3 480
+      observations over 905 instants is 3.8 per instant across 12 cameras, so a given
+      (camera, track) is present in under a tenth of them. The reference's default assumes
+      instants that hold every camera's current frame. THE QUESTION, and it is a semantics one:
+      should hits be counted over the GROUP's instants (today) or over the instants that
+      CONTAINED that camera? Read `shipvision/mtmc/gating.py` and its tests before changing the
+      port -- a divergence here is a parity break, not a fix.
+
+- [ ] MTMC-ROSTER-NAMES-NO-CAMERA-A-RUN-HAS · `topology/ship_person_cpu.yaml` declares
+      `cameras: [cam-01, cam-02, cam-03, cam-04]` and every bench fleet is `cam00 ... cam11`, so
+      the barrier waits for four cameras that never connect. MEASURED 11 Sep: not ONE instant
+      closed `complete` in six runs (they close on `advanced` or `window`); with the roster
+      naming the run's own cameras, 421 of 905 closed complete. The chain file is the
+      deployment's, so the fix is not to rename it to suit the bench: either the bench chain is
+      a variant whose roster is its fleet, or a mismatch is REFUSED at open() -- the barrier
+      knows both lists, and a group that never completes is a silent configuration fault today.
+      Note the announce path already exists (`mtmc_runtime` calls `camera_added` for every
+      declared camera before any worker starts), so the check costs one comparison.
+
+- [ ] MTMC-OFFERS-A-THIRD-OF-A-FRAMES-ROWS · MEASURED 11 Sep: 3 480 observations from 9 538
+      frames is 0.36 per frame, while the same run's embedders processed 77 777 person crops
+      and 13 124 ship crops -- about 9.5 embedded rows per frame. `MtmcStage::do_run` builds one
+      observation per TRACK row that also has an embedding, so the rows go missing at the track
+      batch, and nothing measures that: `track_frames_untracked` counts FRAMES with no ids at
+      all, and there is no counter for tracked ROWS. Suspected: the associator confirms a track
+      after N frames and the replayed stream is a 10-image loop, so few rows ever carry an id --
+      52 distinct tracks in a 40 s, 12-camera run. Count tracked rows first; the number decides
+      whether this is a tracker configuration or a scatter defect.
 
 - [ ] MTMC-GATE-COMMITS-BEFORE-THE-GRAM-CAN-THROW · `ShipvisionCluster::ids()` is not atomic on
       refusal while the half it wraps promises it is: `identity.h` says "EVERY EMBEDDING IS
