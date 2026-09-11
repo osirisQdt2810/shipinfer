@@ -3187,7 +3187,7 @@ hook down, for when the operator asked to see something before it is executed.
       discover it. No caller retries today: the stage catches the refusal and publishes the
       frame unidentified.
 
-- [ ] MTMC-GRAM-WANTS-A-REAL-GEMM · `shipvision_cluster.cpp::gram_of` is a scalar triple loop,
+- [x] MTMC-GRAM-WANTS-A-REAL-GEMM · MEASURED 11 Sep: 14.5 OBSERVATIONS PER INSTANT, not 750, so neither way out is needed yet. `shipvision_cluster.cpp::gram_of` is a scalar triple loop,
       and `matchers/appearance/matcher.h` names exactly this code as the thing not to write:
       "`features @ features.T` is what BLAS is for -- multithreaded, blocked for the cache --
       and a triple loop in this file would be slower than the thing it replaced while looking
@@ -3212,6 +3212,16 @@ hook down, for when the operator asked to see something before it is executed.
       count per instant, which is what `ObservationGate` is for, and state the bound. Measure
       the group size a deployment actually produces before choosing: 750 is the sizing table's
       number, not an observation.
+      MEASURED, which is what this item asked for first. At the DESIGN load -- 50 cameras x
+      20 fps x 40 s on four A5000s, the pan fixture -- the run answers 56 050 observations over
+      3 866 instants: **14.5 per instant**. At 12 cameras it is 41.1. The sizing table's 750 is
+      not what a barrier collects, because an instant holds a fraction of the fleet's frames
+      rather than all of them: 26% of instants were evicted and 11 858 frames arrived late.
+      At n = 15 the gram is microseconds and invisible, so (a) and (b) are both unnecessary now.
+      REOPEN WHEN an instant carries hundreds -- and note what that implies: the number that
+      makes the gram matter is the number that says the barrier is finally collecting whole
+      groups, so the ordering work (`PIPELINE-WORKERS-NEED-CAMERA-AFFINITY`) comes first and
+      this gets re-measured after it, not before.
 
 - [ ] CPP-LANE-JOB-GLOBS-ONE-PREFIX · `.github/workflows/cpp.yml:98`'s lane job collects
       binaries with `for candidate in csrc/build/test_tracking_*`, so a lane binary named
