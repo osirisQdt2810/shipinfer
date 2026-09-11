@@ -601,6 +601,11 @@ class TestTheGateCrosses:
             ("{min_hits: 2.5}", "whole number"),
             ("{min_height_fraction: 1.0}", "admits nothing"),
             ("{min_height_fraction: -0.1}", r"\[0, 1\)"),
+            # `float()` took both: `False` as 0.0 -- the loosest gate there is, from a key
+            # written as an off switch -- and the string as a number, so the plan carried one
+            # while the element handed the reference tracker `"0.02"`.
+            ("{min_height_fraction: false}", "written as a number"),
+            ('{min_height_fraction: "0.02"}', "written as a number"),
         ],
     )
     def test_the_references_own_bounds_are_refused_from_the_chain(
