@@ -2806,6 +2806,16 @@ hook down, for when the operator asked to see something before it is executed.
       camera), so 17-41% of a camera's frames reach a tracker and a track cannot be present in
       three CONSECUTIVE instants. So affinity's worth has to be measured as admission at a load
       the queue does not decimate -- 12 x 20 fps with workers swept -- and not from these rows.
+      AND THE PRIORITY IS LOWER THAN THIS ITEM READS, which is the useful thing today's
+      measurements say about it. At the DESIGN load -- 50 cameras x 20 fps, the sizing this box
+      is arranged around -- the tracker refuses **3.7%** of accepted frames, not 37%: 1 105 of
+      29 565, with 711.5 tracked img/s. The 37% is a 10x-rate artefact. So affinity or a
+      sequencer buys at most ~4% at the load the deployment runs, while the host budget buys
+      39% (blocking sync, #214) plus 1.44 ms per crop (the fold on the device). BUILD THOSE
+      FIRST: this item trades load balance for ordering, and a sequencer in front of the tracker
+      parks a pipeline worker per camera -- the starvation the barrier's budget exists to bound
+      -- for a gain that only appears above the design rate. What it IS still needed for is
+      identity at saturation (0.3% admitted), which is a different promise from throughput.
 
 - [ ] MASK-FOLD-BELONGS-ON-THE-DEVICE · HALF DONE 11 Sep (the kernel). PROFILED 11 Sep and it is the largest host item after
       the engines. `ship_segmenter` answers `(300, 38)` rows and a `(32, 160, 160)` prototype
