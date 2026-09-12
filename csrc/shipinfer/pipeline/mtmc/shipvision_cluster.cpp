@@ -136,10 +136,10 @@ namespace shipinfer::mtmc {
             explicit ShipvisionCluster(const ClusterOptions& options)
                 : gate_(gate_options_of(options)) {}
 
-            std::map<TrackKey, int64_t> ids(
-                const std::vector<ClusterObservation>& instant) override {
+            std::map<TrackKey, int64_t> ids(const std::vector<ClusterObservation>& instant,
+                                            const std::vector<std::string>& cameras) override {
                 std::lock_guard<std::mutex> held(lock_);
-                const std::vector<ClusterObservation> admitted = gate_.filter(instant);
+                const std::vector<ClusterObservation> admitted = gate_.filter(instant, cameras);
                 // COUNTED HERE, because the gate is the only place that knows how much of an
                 // instant it kept -- and "no identities" has two causes that look identical
                 // from outside: nothing admitted, or nothing that matched.
