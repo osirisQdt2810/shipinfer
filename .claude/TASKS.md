@@ -3405,7 +3405,7 @@ hook down, for when the operator asked to see something before it is executed.
       groups, so the ordering work (`PIPELINE-WORKERS-NEED-CAMERA-AFFINITY`) comes first and
       this gets re-measured after it, not before.
 
-- [ ] CPP-LANE-JOB-GLOBS-ONE-PREFIX · `.github/workflows/cpp.yml:98`'s lane job collects
+- [x] CPP-LANE-JOB-GLOBS-ONE-PREFIX · DONE 11 Sep, NEEDS A MANUAL MERGE. `.github/workflows/cpp.yml`'s lane job collected
       binaries with `for candidate in csrc/build/test_tracking_*`, so a lane binary named
       anything else is BUILT BY CI AND NEVER RUN -- the `CSRC-BENCH-UNCOMPILED` shape, found by
       #221's review on `test_cluster_parity`. The offline job globs `test_*` and counts, but it
@@ -3416,6 +3416,14 @@ hook down, for when the operator asked to see something before it is executed.
       IT NEEDS A MANUAL MERGE -- a PR touching `.github/workflows/**` cannot pass the review
       job (CLAUDE.md's known permanent exception), which is why it is not folded into a normal
       PR.
+      DONE: the lane job globs `csrc/build/test_*` with a count guard, exactly as the offline
+      job does. Rehearsed against this tree WITHOUT running anything: the loop would run 30
+      binaries where the prefix ran 3, so 27 were built by that job and never run. It re-runs
+      the offline binaries, which is a feature -- they are compiled there WITH the lane, so
+      running them proves the lane changed nothing they assert. "Was the lane compiled at all"
+      is guarded by the BUILD step, which refuses outright when `3rdparty/shipvision/csrc` is
+      absent, rather than by counting names. `tests/test_ci_runs_what_it_builds.py` holds the
+      rule for every job that builds binaries, and a prefix restored turns it red.
 
 - [x] WHOSE-LIBCUDART-DOES-THE-PYTHON-FLAG-SET · MEASURED 11 Sep: ONE RUNTIME, and the flag is read back. Whether this plane's blocking-sync
       flag reaches torch's streams at all. #214's review predicted that a second
