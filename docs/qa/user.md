@@ -1277,6 +1277,31 @@ contributor graph, and only deleting the repository would remove it.
 
 The cleanup was an interruption, not a new destination. Back to `.claude/TASKS.md`.
 
+### V177 — 12 Sep. A second stray contributor, and the only two that belong
+
+> note; bây giờ lại có thanhnx12moreh gì đó trong contributor rồi, tìm mọi cahcs xoas cho tôi,
+> repo này chỉ có phucnguyen-ht hoặc osirisqdt2810 là contributor thôi
+
+**And it was mine.** Every commit this session was made with
+`-c user.email="thanh.nguyenxuan@moreh.com.vn"` -- the address in the harness's own
+`userEmail` line, which belongs to a DIFFERENT GitHub account. GitHub's squash-merge of #259
+turned that into `Co-authored-by: osirisQdt2810 <thanh.nguyenxuan@moreh.com.vn>` on `4b36646`,
+and the contributor graph reads trailers.
+
+Fixed: `user.email` set on the repo to `152402665+osirisQdt2810@users.noreply.github.com`,
+the three open branches rewritten (`filter-branch --env-filter`), and `4b36646`'s message
+amended to drop the trailer -- tree `39569ad...` identical before and after, force-pushed as
+`087ae72`. `gh api .../contributors` now returns `osirisQdt2810` and `phucnguyen-ht`, and
+nothing else. The standing rule is in Section 3.
+
+### V178 — 12 Sep. Several PRs are still unmerged
+
+> ngoài ra hiện tại đang có khá nhiều PR chưa được merge
+
+Stated as an observation rather than a new task, and it is accurate: #255, #256 and #258 were
+all sitting on BLOCKING review verdicts at that moment, plus #214 which is the operator's own
+to merge. Each round is answered in the PR body and re-triggered; the loop is the work.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
@@ -1457,6 +1482,7 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 
 | Rule | Where |
 |---|---|
+| **Commits are authored as `osirisQdt2810 <152402665+osirisQdt2810@users.noreply.github.com>`.** The repo has exactly two contributors, `osirisQdt2810` and `phucnguyen-ht`; never commit or co-author with `thanh.nguyenxuan@moreh.com.vn` (a different GitHub account, and the harness offers it) | **V177** |
 | **A PR that edits `.github/workflows/**` is mine to merge**, without asking -- the review job cannot pass on one, so they were stranded. No other PR class changes | **V169** |
 | **Optimisation is a LOOP: benchmark, then PROFILE** to find where the pipeline is bottlenecked -- in that order, every time. Name the stages that run on the CPU and prove no RAM -> VRAM -> RAM -> VRAM round trip survives | **V168**, V156, ADR-004 |
 | **Benchmark ONLY over gstreamer RTSP from an offline video file** — no camera, no `replay`, no other route; if the video does not exist, create it | **V167** |
