@@ -124,8 +124,9 @@ namespace shipinfer::mtmc {
         return instant_counts_;
     }
 
-    void InstantBarrier::note_arrival_lag_us(uint32_t lag_us) {
+    void InstantBarrier::note_arrival_lag_us(uint32_t lag_us, bool negative) {
         std::lock_guard<std::mutex> held(lock_);
+        if (negative) ++lag_negative_;
         if (arrival_lag_us_.size() < kMaxLagSamples) {
             arrival_lag_us_.push_back(lag_us);
             return;
@@ -146,6 +147,11 @@ namespace shipinfer::mtmc {
     uint64_t InstantBarrier::lag_samples_overwritten() const {
         std::lock_guard<std::mutex> held(lock_);
         return lag_overwritten_;
+    }
+
+    uint64_t InstantBarrier::lag_samples_negative() const {
+        std::lock_guard<std::mutex> held(lock_);
+        return lag_negative_;
     }
 
     InstantBarrier::InstantSizes InstantBarrier::instant_sizes() const {

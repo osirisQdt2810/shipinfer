@@ -279,11 +279,22 @@ namespace shipinfer::mtmc {
         //: the first version and it froze the distribution at whatever the first three minutes
         //: held -- while the frame percentiles printed beside it covered the whole run, so the
         //: two numbers a reader compares would have spanned different windows.
-        void note_arrival_lag_us(uint32_t lag_us);
+        //: `negative` says this sample was clamped: the frame arrived before its capture
+        //: stamp, so what it measures is the two clocks disagreeing and not a fast chain.
+        void note_arrival_lag_us(uint32_t lag_us, bool negative = false);
         std::vector<uint32_t> arrival_lag_us() const;
         //: How many samples have been overwritten. Non-zero says the ring wrapped, so the
         //: percentiles above describe the last `kMaxLagSamples` frames and not the run.
         uint64_t lag_samples_overwritten() const;
+        //: And how many arrived BEFORE they were captured, clamped to zero by the caller.
+        //: Non-zero says the server's wall clock and the source's disagree -- an NTP step or
+        //: a source stamping ahead -- and that the percentiles are pulled toward zero by it.
+        //: Counted rather than inferred: `backward` cannot see this. It compares a camera's
+        //: capture stamp against that camera's OWN history, both in the capture domain, so a
+        //: server clock that steps leaves every camera monotonic among itself and `backward`
+        //: at zero while every lag clamps to 0 -- a barrier every frame appears to reach
+        //: instantly, which is the inversion this whole measurement exists to prevent.
+        uint64_t lag_samples_negative() const;
 
         //: Declared cameras that have never sent a frame. EMPTY is the healthy answer, and a
         //: non-empty one is a configuration fault that is otherwise silent: announced cameras
@@ -370,6 +381,7 @@ namespace shipinfer::mtmc {
         //: Where the next sample goes once the ring is full, and how often it has wrapped.
         size_t lag_next_ = 0;
         uint64_t lag_overwritten_ = 0;
+        uint64_t lag_negative_ = 0;
         OnEvent on_event_;
 
         mutable std::mutex lock_;

@@ -1008,7 +1008,8 @@ int main(int argc, char** argv) {
                 // against `sync_window_ms`: a p50 of several windows is the chain's latency.
                 std::vector<uint32_t> lag = barrier->arrival_lag_us();
                 std::cout << "mtmc_arrival_lag_us " << slot << " samples " << lag.size()
-                          << " overwritten " << barrier->lag_samples_overwritten() << "\n";
+                          << " overwritten " << barrier->lag_samples_overwritten()
+                          << " negative " << barrier->lag_samples_negative() << "\n";
                 std::cout << "mtmc_arrival_lag_us " << slot << " p50 " << percentile(lag, 0.50)
                           << " p95 " << percentile(lag, 0.95) << " p99 "
                           << percentile(lag, 0.99) << " max "

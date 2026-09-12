@@ -421,6 +421,7 @@ class InstantBarrier:
         "_hooked",
         "_instant_counts",
         "_instants_ended",
+        "_lag_negative",
         "_lag_next",
         "_lag_overwritten",
         "_live_set",
@@ -489,6 +490,7 @@ class InstantBarrier:
         self._arrival_lag_us: list[int] = []
         self._lag_next = 0
         self._lag_overwritten = 0
+        self._lag_negative = 0
         #: How much of the fleet each ended instant held — :attr:`instant_sizes`.
         self._cameras_held = 0
         self._instants_ended = 0
@@ -546,7 +548,7 @@ class InstantBarrier:
         with self._cond:
             return self._live_set
 
-    def note_arrival_lag_us(self, lag_us: int) -> None:
+    def note_arrival_lag_us(self, lag_us: int, *, negative: bool = False) -> None:
         """Record how late one frame was: microseconds from its capture stamp to its submit.
 
         HANDED IN rather than measured here, and the C++ twin says the same. The capture
@@ -556,6 +558,8 @@ class InstantBarrier:
         separates a window too narrow from a chain too slow to reach one.
         """
         with self._cond:
+            if negative:
+                self._lag_negative += 1
             if len(self._arrival_lag_us) < MAX_LAG_SAMPLES:
                 self._arrival_lag_us.append(int(lag_us))
                 return
@@ -571,6 +575,18 @@ class InstantBarrier:
         """A copy of the samples, because a percentile reorders what it is given."""
         with self._cond:
             return list(self._arrival_lag_us)
+
+    @property
+    def lag_samples_negative(self) -> int:
+        """How many samples arrived BEFORE they were captured and were clamped to zero.
+
+        Non-zero says this shard's wall clock and the sources' disagree — an NTP step, or a
+        source stamping ahead. Counted rather than inferred: ``backward`` compares a camera's
+        stamps against that camera's own history, so a stepped server clock leaves it at zero
+        while every lag reads 0, and the pair reads as a barrier every frame reaches at once.
+        """
+        with self._cond:
+            return self._lag_negative
 
     @property
     def lag_samples_overwritten(self) -> int:

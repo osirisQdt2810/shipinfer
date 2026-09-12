@@ -457,11 +457,14 @@ namespace shipinfer {
                                     std::chrono::system_clock::now().time_since_epoch())
                                     .count();
         const int64_t lag_ns = arrival_ns - state.tag().captured_unix_ns;
-        // CLAMPED AT ZERO rather than skipped: a negative lag is a clock that stepped, which
-        // `backward` already counts, and dropping the sample would make the histogram quietly
-        // disagree with the frame count beside it.
-        barrier_->note_arrival_lag_us(static_cast<uint32_t>(std::min<int64_t>(
-            std::max<int64_t>(lag_ns, 0) / 1000, std::numeric_limits<uint32_t>::max())));
+        // CLAMPED AT ZERO AND COUNTED. A frame arriving before its own capture stamp is the
+        // two clocks disagreeing -- an NTP step on this shard, or a source stamping ahead --
+        // and `backward` cannot see it: that compares a camera's stamps against its OWN
+        // history, so a stepped server clock leaves it at zero while every lag reads 0.
+        barrier_->note_arrival_lag_us(
+            static_cast<uint32_t>(std::min<int64_t>(std::max<int64_t>(lag_ns, 0) / 1000,
+                                                    std::numeric_limits<uint32_t>::max())),
+            lag_ns < 0);
         // CAUGHT AT THE SUBMIT CALL SITE, which is where the other plane catches it
         // (`elements/mtmc.py`) -- and that matters twice over. ONE CAMERA'S FAULT COSTS THE
         // GROUP'S INSTANT AND NOT THE CLOSING FRAME: `barrier.h` says a throwing association
