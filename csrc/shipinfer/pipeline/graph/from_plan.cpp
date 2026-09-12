@@ -38,8 +38,9 @@ namespace shipinfer {
             // merely-seen one the moment anything announces, so a chain that names its four
             // cameras forms instants over those four -- and without this the barrier accreted
             // every camera the shard saw while the other plane waited for the declared list,
-            // which is two instant memberships for one chain file (#222's review). The
-            // Python element does the same, per member, in `mtmc.py`.
+            // which is two instant memberships for one chain file (#222's review). The Python
+            // element does the same at `open()` now (`_announce_roster`); until it did, this
+            // comment was the only place the two planes agreed.
             for (const std::string& camera : spec.cameras) barrier->camera_added(camera);
             runtime.barriers[spec.slot] = barrier;
         }
