@@ -627,6 +627,46 @@ in, and a camera is in 24% of them. The gate's intent (three confirmations befor
 a counter over the instants a camera *was* in; until it has one, the design load's identities are
 singletons whatever the window does.
 
+## The gate at the design load, after it counted sightings
+
+`MTMC-GATE-COUNTS-INSTANTS-NOT-SIGHTINGS` predicted this arithmetic and the tables above
+measured the symptom: a camera is in 24% of instants, `min_hits` counted three *consecutive*
+instants, so 0.24³ = 1.4% — and the gate admitted 2.2% with every identity holding exactly one
+track. shipvision#16 and its port (#249) make a streak survive an instant its camera was not
+in. Same load, same route, same fixture, two arms:
+
+| | before (11 Sep) | arm 1 | arm 2 |
+|---|---|---|---|
+| observations offered | 90 265 | 135 496 | 134 304 |
+| admitted | **1 987 (2.2%)** | **114 084 (84.2%)** | **112 538 (83.8%)** |
+| identities / tracks | 18 / **18** | 16 / **167** | 22 / **193** |
+| cameras an instant held (mean / largest) | 11.8 / 47 | 11.2 / 39 | 11.3 / 37 |
+| instants | 1 951 | 3 296 | 3 318 |
+
+**The second column of the identity pair is the result.** 18 identities over 18 tracks was
+eighteen cameras each holding its own — not cross-camera association at all. It is now about
+nine tracks an identity on both arms, which is what the stage exists to produce.
+
+**Cameras per instant did not move**, which is the control: 11.8 → 11.2 and 11.3. The window
+sweep above had already shown that cameras-per-instant is not the variable identity tracks; this
+says the gate change did not move it either, so the admission jump is the counting rule and not
+a differently-shaped instant.
+
+**What this arm does not claim.** Frames accepted was 61 981 and 61 979 at 279 ms and 267 ms
+p50, on 16.2–16.3 busy cores of 48. The 36 081 in the window table is *not* a control for that:
+several unrelated things merged in between (the mask fold on the device, the instant bound
+following the fleet, the drain fix), so the throughput difference is not attributable to the
+gate. Admission and identities are, because that is what the gate decides.
+
+**One thing worth filing that this run surfaced.** `mtmc_frames late` is 24 950 of 68 538 frames
+read — better than a third of the fleet's frames reach the barrier after their instant has
+closed. That is a different question from the gate's and it now has a number on it.
+
+Run with `SHIPINFER_BENCH_SOURCE=nvdec scripts/run_cpp_bench.sh <label>`: 50 cameras × 20 fps
+over GStreamer RTSP from the pan fixture, 4 GPUs, 70 s with the analysis's 10 s warm-up, the
+binary built inside `shipinfer-gst:jammy-nvdec` because that image is the one with both the
+compiler and the GStreamer headers.
+
 ## The verdict, and the one open question
 
 The ≥5× target needs a ratio to be against, and the four above give opposite answers. Absent
