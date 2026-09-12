@@ -2899,6 +2899,24 @@ hook down, for when the operator asked to see something before it is executed.
       backend-contract change, so it needs the Python plane's `TensorRTBackend` in the same
       PR (V88) and a parity test that a device-resident output reads the same numbers.
 
+- [ ] PROFILE-DIES-AT-THE-DESIGN-LOAD · FOUND 12 Sep while trying to price
+      `EXECUTE-BLOCKS-THE-INSTANCE-THREAD` properly. `deploy/rootless/profile.sh --cpp` at 50
+      cameras over nvdec prints `loading engines...`, ends 1.6 s later with an empty
+      `threads: {}` in its own host-cpu line, and writes a report holding only the driver's
+      context calls (`cuCtxCreate` 60%, 400 `cuStreamSynchronize`) -- no runtime API, no
+      kernels, no pipeline. No error text: the bench is gone before it loads the first engine.
+      The same recipe at TWELVE cameras profiled fine on 11 Sep, which is where every number in
+      `benchmarks/RESULTS.md`'s profile section comes from.
+      WHY IT MATTERS: V168 makes optimisation a LOOP -- benchmark, then profile -- and the loop
+      is broken at the design load, which is the only load whose numbers decide anything. The
+      item it was blocking needs the sync's share of an instance thread's wall time AT FIFTY
+      cameras, and an estimate from a twelve-camera profile is what that item is currently
+      priced on.
+      WHERE TO LOOK FIRST: whether it is nsys's CUDA-event completion trace (the run warns
+      about it and it is on by default), the 50 RTSP servers plus 28 instance threads against
+      nsys's own buffers, or an engine-load failure the profiler swallows -- run the same
+      command with `--seconds 5 --cameras 12` and then 50 to see which variable moves it.
+
 - [ ] EXECUTE-BLOCKS-THE-INSTANCE-THREAD · PROFILED 11 Sep: `cudaStreamSynchronize` is **32.2%
       of all CUDA API time** -- 9.64 s over 5 564 calls, 1.73 ms average -- because
       `TrtEngine::execute` synchronises before returning, so the instance thread stops dead for
