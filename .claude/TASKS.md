@@ -3422,7 +3422,7 @@ hook down, for when the operator asked to see something before it is executed.
       groups, so the ordering work (`PIPELINE-WORKERS-NEED-CAMERA-AFFINITY`) comes first and
       this gets re-measured after it, not before.
 
-- [ ] CI-BUILDING-JOBS-IS-AN-ALLOW-LIST · #236's review, non-blocking, and it turns that PR's
+- [x] CI-BUILDING-JOBS-IS-AN-ALLOW-LIST · DONE 12 Sep. #236's review, non-blocking, and it turns that PR's
       own thesis on the PR: `tests/test_ci_runs_what_it_builds.py`'s `BUILDING_JOBS` is a
       hand-written list, so a future `cpp-<something>-lane` that globs one prefix is not
       covered and nothing goes red. "A convention nobody can see is not a guard" applies to the
@@ -3433,6 +3433,17 @@ hook down, for when the operator asked to see something before it is executed.
       the lane's `-ge 4` cannot tell the 30-binary superset from the 27-binary core, and
       `run_step` joins comments into the text it greps, so a comment quoting the bad glob as an
       example would fail the test that forbids it.
+      DONE: `building_jobs()` derives the set from the workflow, `EXEMPT` carries a reason per
+      entry and `test_an_exempt_job_still_earns_its_exemption` proves each one still deserves
+      it, and a closure test refuses a job that is neither. Comment lines are stripped before
+      anything greps a `run:` block, which closes the third note -- the derivation made it
+      worse, not better: an unstripped grep pulls `cpp-syntax` into the rule on one comment.
+      EVIDENCE, four probes: a new `cpp-future-lane` globbing one prefix is caught with no
+      edit to the test (the case the list could not see); a job that is neither covered nor
+      exempt fails the closure; an exempt job that starts globbing fails its own exemption and
+      then the whole rule; and a comment naming the glob leaves the job out. The `-ge 4` note
+      is left as the review left it -- defensible as written, because the build step refuses
+      outright when the submodule is absent, so the count is not what proves the lane compiled.
 
 - [ ] CI-WORKFLOW-PRS-MAY-BE-REVIEWABLE · OBSERVED 12 Sep on #236: the Claude review job ran to
       completion on a PR that edits `.github/workflows/**` and returned APPROVE, which is not
