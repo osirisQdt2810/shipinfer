@@ -238,6 +238,31 @@ class TestTheRunnerStillReleasesEveryPoolItClaims:
         assert runner._staging_owners == []
 
 
+class TestTheRunnerOpensWithTheStageEveryFrameReaches:
+    """`PYTHON-COLLECTOR-HAS-NO-UNCONDITIONAL-STAGE`. The collector's expected set is widened by
+    `planned()` as stages become runnable, so a frame lost before the first of those calls was
+    expected to deliver nothing -- and nothing satisfies an empty set, so it was reported
+    Complete. `tests/pipeline/test_reassembly.py` pins the property; this pins the caller.
+    """
+
+    def test_the_expected_set_is_the_graphs_entry_stage(self, runner_for) -> None:
+        runner = runner_for()
+        opened: list[tuple[str, ...]] = []
+        real_open = runner.collector.open
+
+        def spy(state, *, expected=()):
+            opened.append(tuple(expected))
+            return real_open(state, expected=expected)
+
+        runner.collector.open = spy  # type: ignore[method-assign]
+        runner.start()
+        publish(runner, 1)
+
+        assert wait_for(lambda: bool(opened)), runner.health()
+        assert opened[0] == (runner.graph.unconditional_stage,), opened
+        assert opened[0] != (), "an empty expected set reports a lost frame as complete"
+
+
 class TestTheRunnerRefusesABadWiring:
     """Validate at start-up, not at first use."""
 

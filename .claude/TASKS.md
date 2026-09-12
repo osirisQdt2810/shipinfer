@@ -3172,7 +3172,7 @@ hook down, for when the operator asked to see something before it is executed.
       which roster a group waits for, and it is now a stated divergence rather than a guess:
       `MTMC-THE-TWO-PLANES-DISAGREE-ABOUT-THE-ROSTER`.
 
-- [ ] PYTHON-COLLECTOR-HAS-NO-UNCONDITIONAL-STAGE · FOUND by #234's review, and it is the hole
+- [x] PYTHON-COLLECTOR-HAS-NO-UNCONDITIONAL-STAGE · DONE 11 Sep. FOUND by #234's review, and it was the hole
       that PR's own reasoning closes on the other plane. `pipeline/runner.py:489` calls
       `collector.open(state)` with no `expected` at all, and `reassembly/collector.py`'s
       `_complete` is `self._expected.issubset(self._delivered)` -- trivially TRUE on an empty
@@ -3186,6 +3186,14 @@ hook down, for when the operator asked to see something before it is executed.
       knows the node order, so it can name it rather than hard-code `detect`).
       NOT a V88 divergence to settle by copying: the C++ side is right and the Python side has
       the hole, so this is a port of a decision rather than a choice between two.
+      DONE: `PipelineGraph.unconditional_stage` names the entry stage -- the one that consumes
+      the frame itself, so it is runnable for every frame there is -- and `PipelineRunner` opens
+      the collector with it. It is a PROPERTY rather than a literal for the reason #234's
+      review gave about the other plane: a stage is named for its slot, and the runner already
+      knows the order. Three tests: the collector reports a frame with an EMPTY expected set as
+      Complete (the hole, pinned so the runner's argument cannot be deleted as redundant), the
+      same frame with one expected stage as Incomplete naming it, and the runner opening with
+      the graph's own entry stage. A probe that restores `open(state)` turns the last one red.
 
 - [ ] MTMC-THE-TWO-PLANES-DISAGREE-ABOUT-THE-ROSTER · FOUND 11 Sep while making the fault
       above visible, and it is a V88 divergence with a comment claiming the opposite.
