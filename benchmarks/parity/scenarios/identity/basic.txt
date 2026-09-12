@@ -20,6 +20,25 @@ instant 5:cam0#1:1,0 5:cam1#7:1,0
 scenario same_camera_twice 30 4096 8192
 instant 0:cam0#1:1,0 0:cam0#2:1,0
 
+# A CONTESTED SLOT, which is the same invariant with an INCUMBENT in the way -- and the case no
+# scenario here could express until now. cam0#1 holds the slot and is orthogonal to the group,
+# so both challengers beat it; a winner is placed at once and the loser leaves in a deferred
+# pass, so the second challenger used to contest a track that had already lost and be adopted
+# beside the first. Two tracks from one camera, which `validate()` refuses.
+# The third component is off-axis on purpose: 0.3 is a better view than 0.8, so the two
+# challengers are ORDERED and the answer says which of them holds the slot rather than only
+# how many do.
+scenario contested_camera_slot 30 4096 8192
+instant 0:cam0#1:0,1 0:cam1#1:1,0 0:cam2#1:1,0
+instant 1:cam0#1:0,1 0:cam1#1:1,0 0:cam2#1:1,0 0:cam0#2:1,0.3 0:cam0#3:1,0.8
+
+# And the other direction, because skipping the displaced track must not mean skipping the
+# CONTEST: the challengers are swapped, so the third is the better one and takes the slot from
+# the second in turn. One per camera either way, a different one.
+scenario contested_camera_slot_reordered 30 4096 8192
+instant 0:cam0#1:0,1 0:cam1#1:1,0 0:cam2#1:1,0
+instant 1:cam0#1:0,1 0:cam1#1:1,0 0:cam2#1:1,0 0:cam0#2:1,0.8 0:cam0#3:1,0.3
+
 # The larger cluster is served first, so it takes the lower id. Ties by first appearance.
 scenario largest_first 30 4096 8192
 instant 3:cam0#1:1,0 9:cam1#1:0,1 9:cam2#1:0,1
