@@ -769,6 +769,43 @@ Measured with `SHIPINFER_BENCH_SOURCE=nvdec scripts/run_cpp_bench.sh <label>` ov
 RTSP from the pan fixture, 4 GPUs, 70 s with the analysis's 10 s warm-up;
 `SHIPINFER_BENCH_CHAIN` points at a chain whose `sync_window_ms` is the swept variable.
 
+## Camera affinity: a saturation effect, not a design-rate one
+
+`PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` said the shared worker pool reorders a camera's frames,
+the per-camera tracker refuses a frame that does not advance its stream, and the refusal rate
+rises with the worker count — 2.8% → 16.2% → 37.3% untracked at 24/48/92 workers. It also said,
+in its own words, what those rows could not settle: they were measured at **saturation**
+(12 cameras × 200 fps), where 50 601–76 420 frames were refused at the pipeline queue, so
+"affinity's worth has to be measured as admission at a load the queue does not decimate —
+12 × 20 fps with workers swept — and not from these rows."
+
+Here is that sweep. `queue_rejected` is **0** on every arm, so nothing is being decimated:
+
+| workers | untracked | untracked % | admitted | ids / tracks | frames accepted | lag p50 |
+|---|---|---|---|---|---|---|
+| **24** | 12 | **0.07%** | 66 384 (89.9%) | 17 / 96 | 16 725 | 21.2 ms |
+| 48 | 13 | **0.08%** | 66 416 (89.9%) | 17 / 96 | 16 733 | 20.8 ms |
+| 92 | 36 | **0.22%** | 66 274 (89.9%) | 17 / 96 | 16 733 | 19.5 ms |
+| 92 (repeat) | 45 | **0.27%** | 66 187 (89.9%) | 17 / 96 | 16 723 | 20.4 ms |
+
+**The reordering is real and it is negligible.** Untracked rises about 3–4× from 24 workers to
+92 — the effect the item describes — on a base of one frame in fifteen hundred. Admission,
+identities and frames accepted do not move at all.
+
+**So the 37.3% was the rate, not the worker count**, which is what the item suspected of its own
+rows and could not prove without this arm. Affinity trades load balance for ordering, and load
+balance is what this project exists to get right; paying that for 0.2% is the wrong trade at the
+design rate. The per-camera sequencer stays unbuilt until a deployment runs saturated, and this
+table is what to re-read when one does.
+
+**And the ceiling it was nominated for is elsewhere.** These arms carry an arrival lag of ~20 ms
+against a 60 ms window — a fleet whose frames arrive in time. At fifty cameras the same number is
+~240 ms, four windows, and that is where the frames that carry no ids actually go.
+
+Measured with `SHIPINFER_BENCH_WORKERS=<n> SHIPINFER_BENCH_SOURCE=nvdec
+SHIPINFER_BENCH_CAMERAS=12 scripts/run_cpp_bench.sh <label>`: GStreamer RTSP from the pan
+fixture, 4 GPUs, 70 s with the analysis's 10 s warm-up.
+
 ## The verdict, and the one open question
 
 The ≥5× target needs a ratio to be against, and the four above give opposite answers. Absent

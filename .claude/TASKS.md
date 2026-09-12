@@ -2808,7 +2808,7 @@ hook down, for when the operator asked to see something before it is executed.
       59 checks / 0 failures with it, 4 parity checks / 0 failures against the re-emitted
       golden.
 
-- [ ] PIPELINE-WORKERS-NEED-CAMERA-AFFINITY · MEASURED 11 Sep and it is the chain's real
+- [x] PIPELINE-WORKERS-NEED-CAMERA-AFFINITY · NOT WORTH BUILDING at the design rate, measured 12 Sep. MEASURED 11 Sep and it is the chain's real
       ceiling: one shared worker pool reorders a camera's frames, the per-camera tracker
       refuses a frame that does not advance its stream, and the refusal rate rises with the
       worker count -- 1.8% at 24 workers, 20.2% at 48, 41.9% at 92, while the TRACKED rate
@@ -2839,6 +2839,19 @@ hook down, for when the operator asked to see something before it is executed.
       camera), so 17-41% of a camera's frames reach a tracker and a track cannot be present in
       three CONSECUTIVE instants. So affinity's worth has to be measured as admission at a load
       the queue does not decimate -- 12 x 20 fps with workers swept -- and not from these rows.
+      THAT SWEEP IS DONE, 12 Sep, and it says DO NOT BUILD IT. 12 x 20 fps with
+      `queue_rejected` 0 on every arm: untracked 12 / 13 / 36 frames at 24 / 48 / 92 workers --
+      0.07% / 0.08% / 0.22%, and 45 (0.27%) on a repeat of the 92 arm. Admission is 89.9% and
+      identities 17 over 96 at EVERY worker count; frames accepted do not move.
+      SO THE 37.3% WAS THE RATE, which this item suspected of its own rows and could not prove
+      without this arm. The reordering is real -- untracked rises 3-4x across the sweep -- and
+      it is one frame in fifteen hundred. Affinity trades load balance for ordering and load
+      balance is what this project exists to get right; paying that for 0.2% is the wrong
+      trade. The per-camera sequencer stays unbuilt until a deployment runs saturated, and
+      `benchmarks/RESULTS.md` holds the table to re-read when one does.
+      AND THE CEILING IT WAS NOMINATED FOR IS ELSEWHERE: these arms carry a ~20 ms arrival lag
+      against a 60 ms window, where fifty cameras carry ~240 ms. That is
+      `MTMC-A-THIRD-OF-FRAMES-ARRIVE-LATE`, and it is chain latency rather than ordering.
       AND THE PRIORITY IS LOWER THAN THIS ITEM READS, which is the useful thing today's
       measurements say about it. At the DESIGN load -- 50 cameras x 20 fps, the sizing this box
       is arranged around -- the tracker refuses **3.7%** of accepted frames, not 37%: 1 105 of
