@@ -87,18 +87,27 @@ jobs:
         # guard, where a failure is an invented identity and not an error — is provable on a
         # machine with no driver. ADR-001's promise, reaching somewhere it was not obvious.
         run: python scripts/build_csrc.py --offline --with-external shipvision
-      - name: Run the tracking binaries
+      - name: Run every binary this build produced
         run: |
           set -e
-          # By glob and then counted, for the same reason as the offline tier above: a
-          # renamed binary must not silently stop being run. `-ge 1` rather than a name,
-          # because this lane owns one test binary today and adding a second is a new file
-          # rather than an edit here.
+          # EVERY binary, not `test_tracking_*`. The prefix glob meant a lane binary named
+          # anything else was BUILT BY CI AND NEVER RUN -- the `CSRC-BENCH-UNCOMPILED` shape,
+          # and the reason `test_cluster_parity` had to be renamed to `test_tracking_cluster_
+          # parity` to be noticed at all. A convention nobody can see is not a guard.
+          #
+          # This re-runs the offline binaries too, and that is a feature rather than waste:
+          # they are compiled HERE with the lane enabled, so running them proves the lane did
+          # not change what they assert. Seconds each.
+          #
+          # "Was the lane actually compiled" is guarded by the BUILD step, not by counting
+          # names: `build_csrc.py --with-external shipvision` refuses outright when
+          # `3rdparty/shipvision/csrc` is absent, naming the submodule. The count guard below
+          # is only for a build that produced nothing at all.
           binaries=()
-          for candidate in csrc/build/test_tracking_*; do
+          for candidate in csrc/build/test_*; do
             [[ -x "$candidate" && "$candidate" != *.o ]] && binaries+=("$candidate")
           done
-          test "${#binaries[@]}" -ge 1 || { echo "the shipvision lane built no test_tracking_* binary; the lane refused itself or the glob is wrong"; exit 1; }
+          test "${#binaries[@]}" -ge 4 || { echo "expected at least 4 binaries from the lane build, found ${#binaries[@]}"; exit 1; }
           for binary in "${binaries[@]}"; do
             echo "== $binary"
             "$binary"
