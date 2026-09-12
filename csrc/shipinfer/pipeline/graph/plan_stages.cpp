@@ -207,11 +207,17 @@ namespace shipinfer {
             } else if (node.kind == "mtmc") {
                 // SEVERAL, NOW. This used to refuse a second slot because nothing routed a
                 // camera to its group, so two would both take every camera the shard saw and
-                // issue contradictory ids. `MtmcStage` takes its `cameras:` roster and passes
-                // over a frame from any other camera, which is what the Python plane has
-                // always done -- the budget there is process-wide precisely so two can
-                // coexist. REFUSED STILL, below, when two rosters claim one camera: that is
-                // the contradiction the old refusal was really about.
+                // issue contradictory ids. With more than one group `MtmcStage` routes by the
+                // `cameras:` roster; with one it does not, because a roster is the FLEET's
+                // placement hint and never was a filter. REFUSED STILL, below, when two
+                // rosters claim one camera: the contradiction the old refusal was about.
+                //
+                // AHEAD OF THE OTHER PLANE, and that is stated rather than glossed: Python has
+                // no roster test anywhere (`elements/mtmc.py::camera_added` warns and
+                // associates), because its fleet puts each group on its own SHARD. Two groups
+                // in one Python process would have both elements take every camera -- the bug
+                // this refusal used to prevent. Registered as `mtmc_group_routing` in
+                // `benchmarks/parity/known.py`, owned by `MTMC-PYTHON-ROUTES-BY-SHARD-ONLY`.
                 groups.push_back(&node);
             } else if (node.kind == "track") {
                 // NOT refused for being a second one. Two trackers over one camera's rows is
@@ -298,6 +304,15 @@ namespace shipinfer {
             for (const std::string& camera : node->cameras) {
                 const auto seen = claimed.find(camera);
                 if (seen != claimed.end()) {
+                    // NAMED FOR WHAT IT IS. `cameras: [cam0, cam0]` hit the same branch and
+                    // said it was given "to two mtmc slots ('quay' and 'quay')", which reads
+                    // as a bug in the checker rather than in the chain (#258 r1).
+                    if (seen->second == node->slot) {
+                        throw ConfigError("plan '" + plan.name + "' lists camera '" + camera +
+                                          "' twice in mtmc slot '" + node->slot +
+                                          "'; a roster is a set of cameras, and a duplicate "
+                                          "would have the barrier wait for one camera twice");
+                    }
                     throw ConfigError("plan '" + plan.name + "' gives camera '" + camera +
                                       "' to two mtmc slots ('" + seen->second + "' and '" +
                                       node->slot +

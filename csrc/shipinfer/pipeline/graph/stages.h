@@ -187,7 +187,12 @@ namespace shipinfer {
                   std::vector<std::string> embedding_sources,
                   std::shared_ptr<mtmc::InstantBarrier> barrier,
                   std::shared_ptr<mtmc::ClusterTracker> tracker,
-                  std::vector<std::string> roster = {});
+                  //: The group's roster, and whether this plan has another group to route to.
+                  //: NO DEFAULT for either: `mtmc/gate.h` makes the argument for its own
+                  //: roster -- "a defaulted roster would be a silent trapdoor with nobody to
+                  //: justify it" -- and `routes_` false is exactly the semantics a defaulted
+                  //: empty roster used to mean, so spelling it is the point (#258 r1).
+                  std::vector<std::string> roster, bool routes);
 
       protected:
         size_t do_run(FrameState& state) override;
@@ -216,6 +221,10 @@ namespace shipinfer {
         //: null id, the same as a row the gate did not admit, because refusing the frame
         //: would make one unlisted camera fail a fleet that is otherwise correct.
         std::set<std::string> roster_;
+        //: Whether this plan has ANOTHER group to route to. False for the single-group chains
+        //: that are every chain in this repository, and then the roster is not consulted at
+        //: all -- see `do_run`.
+        bool routes_ = false;
     };
 
     class ObjectStage : public ModelStage {
