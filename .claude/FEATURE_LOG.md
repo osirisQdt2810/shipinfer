@@ -5,6 +5,24 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-12 — the tracker reads the chain's params, on both planes
+
+`PlanNode` carried nothing a `track` slot said about its tracker, so a chain stating
+`options: {max_age: 90}` and `regression_reset: 0` loaded on both planes, reported `track` as
+having run on both, and emitted different ids -- and the C++ lane recovered from a stream
+restart the operator had asked it never to recover from. Two plan lines carry it now, and
+`TrackerOptions` takes them to `create_associator`. The key table is the LANE's: converting in
+the plan reader would mean guessing a type per key and dropping what it did not recognise,
+which is the same silence. Two seams changed rather than one -- `create_associator(impl, slot,
+options)` now REFUSES a second caller that disagrees about one (impl, slot), because the cache
+hands every later caller the first one's tracker, the rule `create_cluster_tracker` took in
+#225; and the reader's `regression_reset` uses the house `as_int`, since a bare `stoll` threw
+`std::invalid_argument` past every `ConfigError` handler and took the reader down. Two knobs
+deliberately do not cross: `attribution_iou` needs an attribution step this plane has not, and
+`algorithm` needs trackers the lane has not. Both stay in `benchmarks/parity/known.py`.
+
+---
+
 ## 2026-09-12 — an instant says how much of the fleet it held, and the gate is the variable
 
 Every reason the barrier reports is about time; none says how many cameras were in an instant

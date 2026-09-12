@@ -69,6 +69,7 @@ __all__ = [
     "TRACK_ROWS",
     "ShipvisionTrack",
     "TrackerShard",
+    "parse_regression_reset",
 ]
 
 #: The tracker a slot gets when it does not say. ByteTrack, mirroring
@@ -105,6 +106,28 @@ DEFAULT_REGRESSION_RESET = 64
 #: nothing above it gets no row, which serialises as a ``null`` track id rather than as a wrong
 #: one.
 DEFAULT_ATTRIBUTION_IOU = 0.3
+
+
+def parse_regression_reset(declared: Any, *, where: str) -> int:
+    """``params: regression_reset:`` as a frame count, for the element and the plan writer.
+
+    Module level for the reason :func:`~shipinfer.topology.elements.mtmc.parse_group` is: the
+    plan writer has to spell this key for the other plane, and two readers of one YAML shape
+    is how a key drifts. ``where`` names the slot in a refusal.
+    """
+    try:
+        value = int(declared)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"{where}: `params: regression_reset:` must be a number of frames, "
+            f"got {declared!r}"
+        ) from exc
+    if value < 0:
+        raise ConfigurationError(
+            f"{where}: `params: regression_reset:` must not be negative, got {value}; "
+            f"0 refuses every regression"
+        )
+    return value
 
 
 class _CameraShard:
@@ -534,8 +557,9 @@ class ShipvisionTrack(Element):
         self._classes = parse_classes(
             self.params.get("classes"), f"track element {self.name!r}"
         )
-        self._regression_reset = self._parse_regression_reset(
-            self.params.get("regression_reset", DEFAULT_REGRESSION_RESET)
+        self._regression_reset = parse_regression_reset(
+            self.params.get("regression_reset", DEFAULT_REGRESSION_RESET),
+            where=f"track element {self.name!r}",
         )
         self._max_attribution_cost = 1.0 - self._parse_attribution_iou(
             self.params.get("attribution_iou", DEFAULT_ATTRIBUTION_IOU)
@@ -585,21 +609,6 @@ class ShipvisionTrack(Element):
             raise ConfigurationError(
                 f"track element {self.name!r}: `params: attribution_iou:` must be in (0, 1], "
                 f"got {value}"
-            )
-        return value
-
-    def _parse_regression_reset(self, declared: Any) -> int:
-        try:
-            value = int(declared)
-        except (TypeError, ValueError) as exc:
-            raise ConfigurationError(
-                f"track element {self.name!r}: `params: regression_reset:` must be a number "
-                f"of frames, got {declared!r}"
-            ) from exc
-        if value < 0:
-            raise ConfigurationError(
-                f"track element {self.name!r}: `params: regression_reset:` must not be "
-                f"negative, got {value}; 0 refuses every regression"
             )
         return value
 

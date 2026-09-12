@@ -55,6 +55,9 @@ artefact ship_embedder/1/model.plan
 
 node track track shipvision
 per camera
+regression_reset 0
+tracker_option max_age 90
+tracker_option track_threshold 0.4
 
 node mtmc mtmc shipvision
 scope global

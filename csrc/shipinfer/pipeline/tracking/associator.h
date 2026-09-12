@@ -20,6 +20,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -51,13 +52,38 @@ namespace shipinfer::tracking {
         std::atomic<uint64_t> untracked_{0};
     };
 
-    using AssociatorFactory = std::function<std::shared_ptr<Associator>()>;
+    // doc: long what the chain states about a tracker, and why absent is not a default here
+    //: WHAT THE CHAIN SAID ABOUT THIS TRACKER. Absent means "the chain did not say", which is
+    //: the lane's own default and NOT a number chosen here -- two defaults for one knob is how
+    //: they drift, and `ClusterOptions` next door carries its two the same way.
+    //:
+    //: `options` is left as strings on purpose. The plan is a line format both planes read,
+    //: the lane owns the key table, and parsing a value into the wrong type here would move
+    //: that ownership into the plan reader -- where an unknown key could only be dropped.
+    //: `bytetrack.cpp` converts and REFUSES a key it does not have, which is what
+    //: `TrackerShard` does at `open()` on the other plane.
+    //: NO `attribution_iou`, and its absence is the decision rather than an omission: that
+    //: knob maps a tracker's answers back onto detection ROWS, and this plane has no such
+    //: step -- `TrackerShard::update` returns ids per detection already. A plan line nothing
+    //: reads is the same trap as a reader that drops what it does not know, so the remaining
+    //: divergence stays named in `benchmarks/parity/known.py` instead.
+    struct TrackerOptions {
+        std::optional<int64_t> regression_reset;
+        std::map<std::string, std::string> options;
+
+        bool operator==(const TrackerOptions& other) const {
+            return regression_reset == other.regression_reset && options == other.options;
+        }
+    };
+
+    using AssociatorFactory = std::function<std::shared_ptr<Associator>(const TrackerOptions&)>;
 
     class AssociatorRegistry {
       public:
         void add(const std::string& impl, AssociatorFactory factory);
         bool has(const std::string& impl) const;
-        std::shared_ptr<Associator> create(const std::string& impl) const;
+        std::shared_ptr<Associator> create(const std::string& impl,
+                                           const TrackerOptions& options = {}) const;
         std::vector<std::string> names() const;
 
       private:
@@ -78,8 +104,14 @@ namespace shipinfer::tracking {
     // ELEMENT INSTANCE (`track.py::_do_open`) and this is that shape. Fresh per CALLER is
     // wrong too: `bench.cpp` builds one Dag per worker, so that would be a tracker per thread
     // for one camera, which is the identity split `shard.h` exists to prevent.
+    //
+    // REFUSED WHEN TWO CALLERS DISAGREE about one (impl, slot)'s options, for the reason the
+    // cache exists at all: the first caller's tracker is the one every later caller gets, so
+    // a second set of options would be silently ignored and one slot would run a
+    // configuration no chain states.
     std::shared_ptr<Associator> create_associator(const std::string& impl,
-                                                  const std::string& slot);
+                                                  const std::string& slot,
+                                                  const TrackerOptions& options = {});
 
     // What `create_associator` has built so far, so a run can report per-slot counters
     // without reaching into a worker's Dag for a stage.

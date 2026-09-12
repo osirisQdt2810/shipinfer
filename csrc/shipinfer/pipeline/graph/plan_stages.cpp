@@ -284,6 +284,11 @@ namespace shipinfer {
             // `class_of`, the same reader the croppers use: no `classes:` is every row, a
             // declared empty selection is no rows, and a named one is that class's id.
             spec.class_id = class_of(plan, *node);
+            // UNTOUCHED, because the lane owns the key table: converting here would leave a
+            // reader that can only drop what it does not recognise, and a dropped `max_age`
+            // is a chain that runs the default with nothing said.
+            spec.options.regression_reset = node->regression_reset;
+            spec.options.options = node->tracker_options;
             built.tracks.push_back(std::move(spec));
             built.stage_names.push_back(node->slot);
         }
