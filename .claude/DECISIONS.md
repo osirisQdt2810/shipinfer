@@ -888,12 +888,15 @@ plane a resolved configuration"; ADR-017 §4 makes `Topology.from_spec` the one 
 second loader is a second door whose failure is one plane accepting a chain the other refuses
 at deploy time; and vLLM does this (`VllmConfig` resolved in Python, handed to the engine-core
 process), which CLAUDE.md makes the default shape. Choosing *where* a chain runs is control
-plane too, and this plane's execution loop is its binary's composition root under `cli/`.
+plane too, and this plane's one execution loop is its binary's composition root under
+`csrc/shipinfer/cli/`, which `cli` already mirrors.
 
-**Line-oriented, not JSON:** `csrc` has a JSON writer only, the convention is already lines,
-and a plan is a flat list. `score` uses `json_number` because `std::to_string(0.25)` is
-`0.250000` and the gate is a byte compare. What crosses *is* the golden, so both halves are
-automatic -- which is how C++ came to refuse `crop 0 128` while Python did not.
+**Line-oriented, not JSON:** `csrc` has a JSON writer only, the convention is already lines
+(`parity_files.h`), and a plan is a flat list, not a tree. `score` uses `json_number`, because
+`std::to_string(0.25)` is `0.250000` and the gate is a byte compare. What crosses *is* the
+golden, so both halves can be automatic: `tests/topology/test_plan.py` holds the emitter to
+the committed goldens, and the C++ gate re-serialises them. The shared refusal table earned
+itself while the reader was being written -- C++ refused `crop 0 128` and Python did not.
 
 ---
 

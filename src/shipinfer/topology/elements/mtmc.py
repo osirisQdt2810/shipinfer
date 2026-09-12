@@ -492,7 +492,6 @@ class ShipvisionMtmc(Element):
         self._window_closes = 0
         self._judge_roster_at = _SILENT_AFTER_WINDOW_CLOSES
         self._warned_silent = False
-        self._note_cameras()
         if context.workers is None and self._barrier.budget.permits:
             # A supplied budget wins over the worker count, so this barrier *does* wait --
             # saying it would not would send an operator looking for the wrong symptom.
@@ -514,16 +513,30 @@ class ShipvisionMtmc(Element):
             )
         if self._roster:
             self._warn_if_workers_cannot_cover(len(self._roster), "its declared roster")
+            # THE LATCH SET HERE, because the declared roster IS the live set from the next
+            # line: without it the first lifecycle hook fires the "live on this shard" line
+            # with the number the line above just gave, for a group with one camera connected.
+            # That second line is for a shard handed cameras nobody declared.
+            self._starved_group = len(self._roster) > self._barrier.budget.permits + 1
             self._announce_roster()
+        # LAST, once the live set is final: the gauge is documented as "cameras this element's
+        # barrier waits for", and announcing the roster after publishing it made that false for
+        # the life of a process whose runner never drives the lifecycle hooks.
+        self._note_cameras()
 
     def _announce_roster(self) -> None:
         """Tell the barrier the group it waits for, before any frame arrives (ADR-021).
+
+        Guarded like its neighbours, not because this call site can reach it unopened but
+        because every other barrier-touching helper in this file is.
 
         What `graph/from_plan.cpp` does on the other plane, and what its comment already
         claimed this one did — it did not, so one chain file gave two instant memberships. A
         declared camera that never connects is a configuration fault and no longer a silent
         one: :attr:`~shipinfer.topology.barrier.InstantBarrier.silent_cameras` names it.
         """
+        if self._barrier is None:
+            return
         for camera in self._roster:
             self._barrier.camera_added(camera)
 

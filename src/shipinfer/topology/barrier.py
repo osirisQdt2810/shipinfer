@@ -602,10 +602,11 @@ class InstantBarrier:
     def camera_added(self, camera_id: str) -> None:
         """A camera is live on this shard: instants now wait for it.
 
-        **The live set is the announced set, not the configured roster.** A group's roster names
-        every camera in it; a shard runs only the ones placed on it. A barrier that waited for
-        the roster would time out on every instant for the life of the process, and report it as
-        a healthy chain running one window slower.
+        **The live set is what has been announced** — and since ADR-021 the element announces
+        its declared roster at ``open()``, so for a chain that declares one the group an
+        instant waits for is that roster. A declared camera that never connects therefore costs
+        every instant its full window, which is the accepted cost of the decision rather than a
+        fault this class hides: :attr:`silent_cameras` names it.
 
         Before the *first* announcement it falls back to the cameras it has seen traffic from,
         so a runner that never drives the lifecycle hooks degrades to a one-instant warm-up
