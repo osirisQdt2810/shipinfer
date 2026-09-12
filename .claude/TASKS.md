@@ -2863,6 +2863,21 @@ hook down, for when the operator asked to see something before it is executed.
       the cross-plane golden agrees. What diverges is WHERE, and therefore what the backend
       contract advertises: the C++ adapter stops advertising the prototype bank once its
       engine folds, and the Python backend advertises everything.
+      DESIGNED 12 Sep, and the pieces are already there. `bindings.device_tensor(name)` hands
+      back the torch tensor TensorRT wrote into, so the fold itself is a dozen torch lines on
+      the device -- argmax row by score, coefficients against planes, count above the logit
+      cut -- and `execute` then skips that output's `fetch_output`. What needs deciding is the
+      ATTACHMENT, because the model knows nothing about the chain's fold:
+      (a) per request -- refused for the reason the C++ plane refused it: one batch holds many
+      requests and two of them could carry different folds;
+      (b) in the model's `config.yaml`, which is Triton-shaped and needs no new API, but puts
+      the fold's thresholds in two files that can disagree with the chain's;
+      (c) an attach at `open()` through the handle (`ModelResolver`), mirroring the C++
+      composition root: one source of truth, at the cost of widening the structural protocol
+      the topology layer depends on, and it needs the same refusal the C++ side has when two
+      slots attach different folds to one model.
+      LEANING (c), for the single source of truth; (b) is the fallback if widening the handle
+      protocol turns out to reach further than `PoolSegment`.
 
 - [ ] ENGINE-COPIES-EVERY-OUTPUT-HOME · `backends/tensorrt/engine.cpp` ends every `execute`
       with one `gpuMemcpyAsync(host_outputs_[i], output_buffers_[i], ..., DeviceToHost)` per
