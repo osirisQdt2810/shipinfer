@@ -2808,10 +2808,19 @@ hook down, for when the operator asked to see something before it is executed.
       59 checks / 0 failures with it, 4 parity checks / 0 failures against the re-emitted
       golden.
 
-- [x] PIPELINE-WORKERS-NEED-CAMERA-AFFINITY · NOT WORTH BUILDING at the design rate, measured
-      12 Sep. It was OPENED 11 Sep as the chain's real ceiling, and that is the half this item
-      closes against -- the new clause was spliced ahead of the old headline and the line
-      asserted both at once (#256 r1).
+- [x] PIPELINE-WORKERS-NEED-CAMERA-AFFINITY · NOT WORTH BUILDING at the deployment's density,
+      measured 12 Sep. It was OPENED 11 Sep as the chain's real ceiling, and that is the half
+      this item closes against -- the new clause was spliced ahead of the old headline and the
+      line asserted both at once (#256 r1).
+      "DESIGN RATE" WAS THE WRONG PHRASE and #256 r2 was right to block on it: this page uses it
+      for BOTH the fifty-on-four row and this sweep, and they are not the same load. The
+      deployment is 50 cameras on SIXTEEN GPUs = 3.1 per device; this sweep is 12 on four = 3.0
+      per device, the same box, which is why it is the right arm. The fifty-on-four row is 12.5
+      per device -- 4x -- and refuses 23% at the queue, so it fails this measurement's own
+      control and its 3.7% untracked is not evidence against the sequencer.
+      THE RE-OPEN CONDITION IS ARITHMETIC, not a feeling: re-read the table at any load where
+      `queue_rejected` is non-zero, which on four devices is fifty cameras and on the
+      deployment's sixteen is a load this box cannot yet generate.
       WHAT 11 SEP SAW: one shared worker pool reorders a camera's frames, the per-camera tracker
       refuses a frame that does not advance its stream, and the refusal rate rises with the
       worker count -- 1.8% at 24 workers, 20.2% at 48, 41.9% at 92, while the TRACKED rate
@@ -2846,6 +2855,14 @@ hook down, for when the operator asked to see something before it is executed.
       `queue_rejected` 0 on every arm: untracked 12 / 13 / 36 frames at 24 / 48 / 92 workers --
       0.07% / 0.08% / 0.22%, and 45 (0.27%) on a repeat of the 92 arm. Admission is 89.9% and
       identities 17 over 96 at EVERY worker count; frames accepted do not move.
+      RE-MEASURED 12 Sep for #256 r2, because the original logs no longer existed and this
+      item's own thesis is that a number with no raw output gets struck. Four arms, one
+      variable, `queue_rejected 0` and `frames_dropped 0` on every one
+      (`.artifacts/cpp/aff{24,48,92,92b}.log`):
+        24 workers: 12 untracked of 16 730 (0.07%), 66 446/73 844 admitted, ids 17/96
+        48 workers: 23 untracked of 16 746 (0.14%), 66 505/73 924 admitted, ids 17/96
+        92 workers: 32 untracked of 16 737 (0.19%), 66 397/73 781 admitted, ids 17/96
+        92 repeat : 40 untracked of 16 733 (0.24%), 66 199/73 643 admitted, ids 17/91
       SO THE 37.3% WAS THE RATE, which this item suspected of its own rows and could not prove
       without this arm. The reordering is real -- untracked rises 3-4x across the sweep -- and
       it is one frame in fifteen hundred. Affinity trades load balance for ordering and load
