@@ -20,7 +20,7 @@ from shipinfer.topology.elements.masks import InstanceMaskArea
 
 
 class FoldingBackend:
-    """A backend that has somewhere to put a fold."""
+    """A backend that has somewhere to put a fold, and advertises what it then returns."""
 
     def __init__(self) -> None:
         self.fold: Any = None
@@ -28,9 +28,25 @@ class FoldingBackend:
     def set_fold(self, fold: Any) -> None:
         self.fold = fold
 
+    @property
+    def output_specs(self) -> tuple[str, ...]:
+        return ("output0", self.fold.name) if self.fold else ("output0", "output1")
+
 
 class PlainBackend:
     """A backend that does not — onnx, TorchScript, a mock. Not a failure."""
+
+    output_specs: tuple[str, ...] = ("output0", "output1")
+
+
+class RecordingBatcher:
+    """Stands in for `StackingBatcher`, which every instance holds a reference to."""
+
+    def __init__(self) -> None:
+        self.specs: Any = None
+
+    def set_output_specs(self, specs: Any) -> None:
+        self.specs = tuple(specs)
 
 
 def instance_with(backend: Any) -> ModelInstance:
@@ -73,6 +89,9 @@ class FakeModel:
 
         self.name = "ship_segmenter"
         self._fold = None
+        #: The batcher every instance was handed at construction. Recorded so the test can
+        #: see that attaching a fold updates it in place rather than replacing it.
+        self._batcher = RecordingBatcher()
         self._instances = [instance_with(b) for b in backends]
         self.attach_fold = Model.attach_fold.__get__(self)  # type: ignore[attr-defined]
 
@@ -80,11 +99,16 @@ class FakeModel:
 class TestOneModel:
     def test_every_instance_is_offered_the_fold(self) -> None:
         backends = [FoldingBackend(), FoldingBackend()]
+        model = FakeModel(backends)
 
-        took = FakeModel(backends).attach_fold(spec())
+        took = model.attach_fold(spec())
 
         assert took is True
         assert all(b.fold is not None for b in backends), "one model, all of its instances"
+        assert model._batcher.specs == ("output0", "mask_area_px"), (
+            "the batcher follows the backend, or the scatter refuses a response for an "
+            "output the engine no longer returns"
+        )
 
     def test_the_same_fold_twice_is_not_a_conflict(self) -> None:
         """A chain reopened, or two slots that agree. Only disagreement is the fault."""
@@ -101,6 +125,15 @@ class TestOneModel:
 
         with pytest.raises(ConfigurationError, match="already folds"):
             model.attach_fold(spec(name="area_v2"))
+
+    def test_detaching_is_always_allowed(self) -> None:
+        """`None` is "no fold" and cannot conflict with anything, so a chain reopened with a
+        different one must not be refused by the fold the last one left behind."""
+        model = FakeModel([FoldingBackend()])
+        model.attach_fold(spec())
+
+        model.attach_fold(None)
+        model.attach_fold(spec(name="area_v2"))  # a different slot, after a clean detach
 
     def test_a_model_whose_backends_all_decline_says_false(self) -> None:
         """So the caller can report the host path once for the model rather than guess."""

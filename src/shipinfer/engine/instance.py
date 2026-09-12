@@ -135,6 +135,11 @@ class ModelInstance:
     def ewma_latency_us(self) -> float:
         return self._ewma_latency_us
 
+    @property
+    def output_specs(self) -> Any:
+        """What this instance's backend says it returns, which a fold changes."""
+        return self._backend.output_specs
+
     def attach_fold(self, fold: Any) -> bool:
         """Hand this instance's backend a device fold, if its backend has one.
 

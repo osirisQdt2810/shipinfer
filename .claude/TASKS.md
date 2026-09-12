@@ -2925,6 +2925,17 @@ hook down, for when the operator asked to see something before it is executed.
       batch's rows, a moved score floor, the bank fetched anyway, the bank still advertised,
       and last-writer-wins on a second slot. The parity test runs on CPU torch on purpose: the
       arithmetic is the claim, and a parity test that needed a driver is one nobody runs.
+      AND THE REAL ENGINE FOUND TWO THINGS THE FAKES COULD NOT, which is the argument for
+      `tests/system/test_device_fold_on_a_real_engine.py` existing at all: (1) `StackingBatcher`
+      held a SNAPSHOT of `config.output_specs` taken at `Model` construction, so a fold made it
+      stale and every response was refused for "missing required output tensor output1" -- the
+      batcher follows the backend now, mutated in place because every instance holds that same
+      object; (2) `attach_fold(None)` was refused by this item's own two-slots-disagree check,
+      so a chain could not be reopened with a different fold. Both pinned by tests.
+      GPU EVIDENCE: 4 passed against the repository's own `ship_segmenter` plan, comparing the
+      device answer against the host answer on the SAME batch at two mask cuts -- two, because
+      this batch is noise and at a permissive cut every mask fills its crop, so one cut would
+      agree with a fold that never read the bank.
 
 - [ ] ENGINE-COPIES-EVERY-OUTPUT-HOME · `backends/tensorrt/engine.cpp` ends every `execute`
       with one `gpuMemcpyAsync(host_outputs_[i], output_buffers_[i], ..., DeviceToHost)` per

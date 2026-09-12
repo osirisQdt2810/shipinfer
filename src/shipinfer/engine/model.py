@@ -340,7 +340,9 @@ class Model:
         Raises:
             ConfigurationError: a different fold is already attached.
         """
-        if self._fold is not None and self._fold != fold:
+        # `None` is "no fold", which cannot conflict with anything -- detaching has to stay
+        # available or a chain cannot be reopened with a different one.
+        if fold is not None and self._fold is not None and self._fold != fold:
             raise ConfigurationError(
                 f"model {self.name!r} already folds as {self._fold.name!r} for another "
                 f"chain slot; one model has one set of instances, so two slots cannot fold "
@@ -351,6 +353,12 @@ class Model:
         # at the first True and would leave the rest of this model's instances folding on the
         # host -- half a model on each path, which nothing downstream could tell apart.
         took = [instance.attach_fold(fold) for instance in self._instances]
+        if any(took):
+            # THE BATCHER FOLLOWS THE BACKEND, which decides what exists once a fold is
+            # attached; `StackingBatcher` holds a snapshot of `config.output_specs` that a
+            # fold makes stale. ASKED, not recomputed: one rule in one place, or the scatter
+            # refuses a response for a tensor the engine no longer returns.
+            self._batcher.set_output_specs(self._instances[0].output_specs)
         return any(took)
 
     @property
