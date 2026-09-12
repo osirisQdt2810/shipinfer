@@ -124,12 +124,14 @@ namespace shipinfer::mtmc {
     //: a number. MEASURED 11 Sep at the design load (50 cameras x 20 fps,
     //: `benchmarks/RESULTS.md`): at 8 the run evicted 20-28% of its instants and admitted
     //: 97-545 observations; from 16 up it evicts NOTHING and admits ~2 200. The fleet is 50
-    //: How many arrival-lag samples one barrier keeps. 200k is ~800 KB and about an
-    //: hour of one camera at 50 fps; past it the count is kept and the samples are not.
-    inline constexpr size_t kMaxLagSamples = 200000;
-
     //: there, three times the knee.
     inline constexpr int kDefaultMaxInstants = 8;
+
+    //: How many arrival-lag samples one barrier keeps -- a RING, so a long run reports its
+    //: recent tail rather than freezing on the first few minutes. 200k is ~800 KB and about
+    //: three minutes of a 50-camera fleet; past it the oldest sample is overwritten and the
+    //: count of overwrites is kept, so a saturated barrier does not read like a quiet one.
+    inline constexpr size_t kMaxLagSamples = 200000;
 
     // One camera's contribution to an instant: who, and whatever the caller put in.
     //
@@ -271,12 +273,17 @@ namespace shipinfer::mtmc {
         //: arithmetic across two clocks. The mtmc stage holds both and is the only place that
         //: legitimately can.
         //:
-        //: BOUNDED, because a 24/7 server is not a benchmark: past `kMaxLagSamples` the
-        //: samples stop growing and `lag_samples_dropped()` says how many were not kept, so a
-        //: reader can tell a full reservoir from a quiet one.
+        //: A RING, because a 24/7 server is not a benchmark and the OLDEST samples are the
+        //: least useful: past `kMaxLagSamples` the next sample overwrites the oldest, so a
+        //: ten-minute run reports its recent tail instead of its warm-up. Head truncation was
+        //: the first version and it froze the distribution at whatever the first three minutes
+        //: held -- while the frame percentiles printed beside it covered the whole run, so the
+        //: two numbers a reader compares would have spanned different windows.
         void note_arrival_lag_us(uint32_t lag_us);
         std::vector<uint32_t> arrival_lag_us() const;
-        uint64_t lag_samples_dropped() const;
+        //: How many samples have been overwritten. Non-zero says the ring wrapped, so the
+        //: percentiles above describe the last `kMaxLagSamples` frames and not the run.
+        uint64_t lag_samples_overwritten() const;
 
         //: Declared cameras that have never sent a frame. EMPTY is the healthy answer, and a
         //: non-empty one is a configuration fault that is otherwise silent: announced cameras
@@ -360,7 +367,9 @@ namespace shipinfer::mtmc {
         //: The arrival lag samples, and how many did not fit. Guarded by `lock_` like every
         //: other counter here.
         std::vector<uint32_t> arrival_lag_us_;
-        uint64_t lag_dropped_ = 0;
+        //: Where the next sample goes once the ring is full, and how often it has wrapped.
+        size_t lag_next_ = 0;
+        uint64_t lag_overwritten_ = 0;
         OnEvent on_event_;
 
         mutable std::mutex lock_;

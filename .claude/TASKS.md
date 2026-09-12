@@ -3192,7 +3192,7 @@ hook down, for when the operator asked to see something before it is executed.
       identity golden the change moves; (5) re-run the design load and compare admission and
       identities against 2.2% / 18-over-18. Only (5) answers whether the fix is the whole of it.
 
-- [~] MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD · (a) and (b) DONE, (c) OPEN. MEASURED 12 Sep with a new instrument and
+- [x] MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD · DONE 12 Sep, (a) (b) and (c). MEASURED with a new instrument and
       ONE HYPOTHESIS REFUTED BY THE SECOND MEASUREMENT, which is why both are here.
       `mtmc_instant_cameras` says how much of the fleet an instant held when it ended -- the
       number `window` and `advanced` cannot give. The fleet-size contrast:
@@ -3241,8 +3241,18 @@ hook down, for when the operator asked to see something before it is executed.
       and 267 ms against 259, frames 61 981/61 979, where the window lever bought 50 identities
       for 17% of the frames and 29% of p50. The 12-camera control reproduces its old row
       exactly (13 identities over 72 tracks), so the instrument has not moved under us.
-      (c) is still worth doing: 12 cameras admitted 74.7% before and 89.3% in the smoke run
-      above, so the fleet-size term did not vanish, it stopped dominating.
+      (c) DONE 12 Sep and it names the variable. The same 60/120/250 ms sweep at TWELVE
+      cameras: identities 17/96, 18/95, 17/96 and admission 89.9% at all three -- FLAT, where
+      the fifty-camera fleet moved 18 -> 42 -> 50 and paid 17% of its frames for it. What still
+      moves is the close reason (`window` 1169 -> 4 -> 2, `advanced` 365 -> 1465 -> 1466), so a
+      wider window changes how an instant ends and not what it holds.
+      AND THE ARRIVAL LAG SAYS WHY, which is what made this answerable at all: 19.4 ms p50 at
+      twelve cameras, INSIDE a 60 ms window, against 237-248 ms at fifty -- four windows. Same
+      rate both times, so it is not the rate: it is how long a frame takes to reach the
+      barrier, and the window was a lever at fifty only because the lag had outgrown it.
+      WHAT IS LEFT is upstream of the barrier -- the chain's latency to `mtmc` and its variance
+      -- which is `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` and `EXECUTE-BLOCKS-THE-INSTANCE-
+      THREAD`, not this item.
 
 - [x] MTMC-A-THIRD-OF-FRAMES-ARRIVE-LATE · ANSWERED 12 Sep, and the window is not the lever. MEASURED on the gate's design-load arm and
       not yet explained. `mtmc_frames late` is 24 950 of 68 538 frames read at 50 x 20 fps --

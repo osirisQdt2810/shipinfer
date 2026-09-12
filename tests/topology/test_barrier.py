@@ -465,7 +465,7 @@ class TestHowLateAFrameArrived:
         held.note_arrival_lag_us(9_000)
 
         assert held.arrival_lag_us == [1500, 9000]
-        assert held.lag_samples_dropped == 0
+        assert held.lag_samples_overwritten == 0
 
     def test_the_samples_are_a_copy(self) -> None:
         """A percentile reorders what it is given, and a caller must not be able to reorder
@@ -477,17 +477,18 @@ class TestHowLateAFrameArrived:
 
         assert held.arrival_lag_us == [3]
 
-    def test_the_reservoir_is_bounded_and_says_what_did_not_fit(self, monkeypatch) -> None:
-        """A 24/7 server is not a benchmark. Dropping silently would make a full barrier read
-        exactly like a quiet one, so the count is kept when the sample is not."""
+    def test_the_ring_wraps_rather_than_growing_or_stopping(self, monkeypatch) -> None:
+        """Both halves of the bound are wrong in ways nothing else here would see: an
+        unbounded list on a 24/7 shard, or a distribution frozen on a long run's warm-up while
+        the frame percentiles printed beside it cover the whole run."""
         monkeypatch.setattr("shipinfer.topology.barrier.MAX_LAG_SAMPLES", 3)
         held = barrier()
 
         for lag in range(5):
             held.note_arrival_lag_us(lag)
 
-        assert held.arrival_lag_us == [0, 1, 2], "the first three, and no more"
-        assert held.lag_samples_dropped == 2
+        assert held.arrival_lag_us == [3, 4, 2], "the newest two replaced the oldest two"
+        assert held.lag_samples_overwritten == 2, "and it says how often it wrapped"
 
 
 class TestTheBucketsAreBounded:

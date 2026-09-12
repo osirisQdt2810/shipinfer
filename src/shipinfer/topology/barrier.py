@@ -421,7 +421,8 @@ class InstantBarrier:
         "_hooked",
         "_instant_counts",
         "_instants_ended",
-        "_lag_dropped",
+        "_lag_next",
+        "_lag_overwritten",
         "_live_set",
         "_max_instants",
         "_newest_capture",
@@ -482,10 +483,12 @@ class InstantBarrier:
         #: late frame *late* rather than the first member of a brand-new instant.
         self._recent: OrderedDict[int, tuple[float, float]] = OrderedDict()
         self._recent_limit = max(8, self._max_instants * 4)
-        #: How late frames reached this barrier — :meth:`note_arrival_lag_us`. Bounded,
-        #: because a 24/7 server is not a benchmark; the count of what did not fit is kept.
+        #: How late frames reached this barrier — :meth:`note_arrival_lag_us`. A RING,
+        #: because a long run's warm-up is the least useful part of it; the overwrite count
+        #: is kept so a wrapped barrier does not read like a quiet one.
         self._arrival_lag_us: list[int] = []
-        self._lag_dropped = 0
+        self._lag_next = 0
+        self._lag_overwritten = 0
         #: How much of the fleet each ended instant held — :attr:`instant_sizes`.
         self._cameras_held = 0
         self._instants_ended = 0
@@ -553,10 +556,15 @@ class InstantBarrier:
         separates a window too narrow from a chain too slow to reach one.
         """
         with self._cond:
-            if len(self._arrival_lag_us) >= MAX_LAG_SAMPLES:
-                self._lag_dropped += 1
+            if len(self._arrival_lag_us) < MAX_LAG_SAMPLES:
+                self._arrival_lag_us.append(int(lag_us))
                 return
-            self._arrival_lag_us.append(int(lag_us))
+            # WRAPS rather than stops. Keeping the first N froze the distribution on the
+            # warm-up of any run longer than the ring, while the frame percentiles printed
+            # beside it covered the whole run — two numbers over different windows.
+            self._arrival_lag_us[self._lag_next] = int(lag_us)
+            self._lag_next = (self._lag_next + 1) % MAX_LAG_SAMPLES
+            self._lag_overwritten += 1
 
     @property
     def arrival_lag_us(self) -> list[int]:
@@ -565,11 +573,11 @@ class InstantBarrier:
             return list(self._arrival_lag_us)
 
     @property
-    def lag_samples_dropped(self) -> int:
-        """How many samples did not fit, so a full reservoir reads differently from a quiet
-        barrier."""
+    def lag_samples_overwritten(self) -> int:
+        """How many samples the ring has overwritten. Non-zero says the percentiles describe
+        the last :data:`MAX_LAG_SAMPLES` frames rather than the whole run."""
         with self._cond:
-            return self._lag_dropped
+            return self._lag_overwritten
 
     @property
     def instant_sizes(self) -> InstantSizes:
