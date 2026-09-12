@@ -1041,6 +1041,21 @@ int main(int argc, char** argv) {
                     }
                     std::cout << "\n";
                 }
+                // AND THE CAMERAS ROUTED AWAY, which is the opposite question and the one a
+                // routing mistake needs answered. `silent` names the cameras this group was
+                // PROMISED and never saw; on a bad roster it names the declared ones and points
+                // away from the cause, while `not_mine` names the cameras whose frames another
+                // group took. Same shape and the same reason for printing only when non-empty.
+                const std::set<std::string> not_mine = barrier->cameras_not_mine();
+                if (!not_mine.empty()) {
+                    std::cout << "mtmc_cameras_not_mine " << slot << " ";
+                    bool first = true;
+                    for (const std::string& camera : not_mine) {
+                        std::cout << (first ? "" : ",") << camera;
+                        first = false;
+                    }
+                    std::cout << "\n";
+                }
             }
             for (const mtmc::MadeClusterTracker& made : mtmc::made_cluster_trackers()) {
                 std::cout << "mtmc_instants_refused " << made.slot << " "

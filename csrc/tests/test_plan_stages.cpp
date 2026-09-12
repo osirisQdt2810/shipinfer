@@ -377,6 +377,85 @@ namespace {
               "and it is a ConfigError, not an uncaught std::invalid_argument");
     }
 
+    void two_groups_with_disjoint_rosters_both_run() {
+        // This used to be refused outright, because nothing routed a camera to its group and
+        // two slots would both take every camera the shard saw. `MtmcStage` takes its roster
+        // now, which is what the other plane has always done.
+        const PlanStages built = plan_stages(
+            plan_of(kDetect + kTrack +
+                    "node quay mtmc plan-test\nscope global\ngroup north\ncamera cam0\n"
+                    "camera cam1\n"
+                    "node berth mtmc plan-test\nscope global\ngroup south\ncamera cam2\n"),
+            kLoaded);
+
+        check(built.mtmcs.size() == 2, "both slots are built");
+        if (built.mtmcs.size() != 2) return;
+        check(built.mtmcs[0].cameras.size() == 2 && built.mtmcs[0].cameras[0] == "cam0",
+              "and each carries its OWN roster down to the stage");
+        check(built.mtmcs[1].cameras.size() == 1 && built.mtmcs[1].cameras[0] == "cam2",
+              "the second one too, which is what makes the routing possible");
+    }
+
+    void one_camera_in_two_groups_is_refused() {
+        // The contradiction the blanket refusal was really about, kept as the narrow rule:
+        // two identity spaces would each give that camera's objects an id and the last stage
+        // to run would win, silently.
+        check(refused(kDetect + kTrack +
+                      "node quay mtmc plan-test\nscope global\ncamera cam0\ncamera cam1\n"
+                      "node berth mtmc plan-test\nscope global\ncamera cam1\n"),
+              "one camera cannot belong to two groups");
+    }
+
+    void a_second_group_that_names_no_cameras_is_refused() {
+        // An empty roster means EVERY camera -- which is right for the single-group chains
+        // written before rosters existed, and is exactly the old failure when there are two.
+        check(refused(kDetect + kTrack +
+                      "node quay mtmc plan-test\nscope global\ncamera cam0\n"
+                      "node berth mtmc plan-test\nscope global\n"),
+              "an unrostered second group would take the first group's cameras too");
+        // NEITHER naming cameras, which is what the old blanket refusal covered. Folded in
+        // here rather than kept as its own case asserting the same rule under a comment that
+        // said a group is a MEMBERSHIP no chain states -- which is no longer true (#258 r1).
+        check(refused(kDetect + kTrack + "node mtmc mtmc plan-test\nscope global\n" +
+                      "node mtmc2 mtmc plan-test\nscope global\n"),
+              "and neither does two unrostered groups");
+    }
+
+    void a_roster_that_lists_one_camera_twice_says_so() {
+        // It hit the two-SLOTS branch and reported the camera given "to two mtmc slots ('quay'
+        // and 'quay')", which reads as a bug in the checker rather than the chain (#258 r1).
+        //
+        // BUILT IN CODE, because the reader refuses a duplicate `camera` line first
+        // (`plan.cpp`: "is listed twice in this group") -- so this branch is reachable only
+        // the way `a_plan_built_in_code_is_still_checked` reaches its own, and the message
+        // still has to be right for whoever gets there.
+        ResolvedPlan plan =
+            plan_of(kDetect + kTrack + "node quay mtmc plan-test\nscope global\ncamera cam0\n");
+        for (PlanNode& node : plan.nodes) {
+            if (node.kind == "mtmc") node.cameras.push_back("cam0");
+        }
+
+        bool named = false;
+        try {
+            plan_stages(plan, kLoaded);
+        } catch (const ConfigError& error) {
+            named = std::string(error.what()).find("twice in mtmc slot 'quay'") !=
+                    std::string::npos;
+        }
+        check(named, "a roster listing one camera twice is named for what it is");
+    }
+
+    void one_group_may_still_name_no_cameras() {
+        // The compatibility half, and it has to be asserted beside the refusal above or the
+        // rule reads as "every mtmc slot must list its cameras" -- which would refuse
+        // `ship_person_cpu.yaml` as it stood before rosters, and every chain like it.
+        const PlanStages built = plan_stages(
+            plan_of(kDetect + kTrack + "node mtmc mtmc plan-test\nscope global\n"), kLoaded);
+
+        check(built.mtmcs.size() == 1 && built.mtmcs[0].cameras.empty(),
+              "one group with no roster is every camera, as it always was");
+    }
+
     void an_mtmc_slot_reads_the_chains_barrier_knobs() {
         // The reason they are on the plan at all: `ship_person_cpu.yaml` has stated
         // `sync_window_ms: 60` all along and this plane ran its own default, so the two
@@ -417,16 +496,6 @@ namespace {
               "and no gate of its own: the implementation's defaults stand");
     }
 
-    void two_mtmc_slots_are_refused_because_no_chain_states_their_groups() {
-        // Two slots are two camera GROUPS -- the other plane supports that and the barrier's
-        // budget is process-wide precisely so two can coexist -- but a group is a MEMBERSHIP
-        // and no chain states one, so both would be the whole fleet and would issue two
-        // contradictory sets of global ids for the same objects.
-        check(refused(kDetect + kTrack + "node mtmc mtmc plan-test\nscope global\n" +
-                      "node mtmc2 mtmc plan-test\nscope global\n"),
-              "a second runnable mtmc slot is refused rather than silently dropped");
-    }
-
     void an_mtmc_slot_with_no_tracker_is_refused() {
         // Cross-camera identity is keyed by (camera, track), so without a tracker there is
         // nothing for an identity to hold on to and every row would be unidentified.
@@ -446,8 +515,12 @@ int main() {
         a_negative_frame_count_is_refused();
         a_word_where_a_frame_count_belongs_names_the_line();
         an_mtmc_slot_reads_the_chains_barrier_knobs();
+        two_groups_with_disjoint_rosters_both_run();
+        one_camera_in_two_groups_is_refused();
+        a_second_group_that_names_no_cameras_is_refused();
+        a_roster_that_lists_one_camera_twice_says_so();
+        one_group_may_still_name_no_cameras();
         an_unstated_window_stays_absent_rather_than_becoming_a_number_here();
-        two_mtmc_slots_are_refused_because_no_chain_states_their_groups();
         an_mtmc_slot_with_no_tracker_is_refused();
         the_detect_slot_carries_the_plans_numbers();
         a_declared_empty_selection_matches_no_row();

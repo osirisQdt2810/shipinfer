@@ -164,6 +164,17 @@ namespace shipinfer::mtmc {
         return frame_counts_;
     }
 
+    void InstantBarrier::note_not_mine(const std::string& camera_id) {
+        std::lock_guard<std::mutex> guard(lock_);
+        ++frame_counts_[kMissedNotMine];
+        not_mine_.insert(camera_id);
+    }
+
+    std::set<std::string> InstantBarrier::cameras_not_mine() const {
+        std::lock_guard<std::mutex> guard(lock_);
+        return not_mine_;
+    }
+
     std::set<std::string> InstantBarrier::silent_cameras() const {
         std::lock_guard<std::mutex> guard(lock_);
         // ANNOUNCED MINUS SEEN. No `hooked_` check: with no lifecycle wiring `announced_` is

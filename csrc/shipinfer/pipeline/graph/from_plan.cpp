@@ -110,10 +110,13 @@ namespace shipinfer {
                     "the process and pass the result in, or a per-worker barrier would turn "
                     "cross-camera association into within-camera deduplication");
             }
+            // ROUTES ONLY WHEN THERE IS SOMEWHERE TO ROUTE TO. With one group the roster is
+            // the FLEET's placement hint and not a filter, which is what the other plane means
+            // by it and what every chain here relies on (#258 r1).
             dag.add(std::make_unique<MtmcStage>(
                 spec.slot, spec.output, spec.track_source, spec.embedding_sources,
-                barrier->second,
-                mtmc::create_cluster_tracker(spec.impl, spec.slot, spec.gate)));
+                barrier->second, mtmc::create_cluster_tracker(spec.impl, spec.slot, spec.gate),
+                spec.cameras, planned.mtmcs.size() > 1));
         }
         return dag;
     }

@@ -107,6 +107,12 @@ namespace shipinfer::mtmc {
     //: instant for every camera that did wait.
     inline constexpr const char* kMissedWouldStarve = "would_starve";
 
+    //: This camera belongs to ANOTHER group on this shard, so this group never saw the frame.
+    //: Only ever counted when the plan built more than one group -- a lone group associates
+    //: every camera it is handed, roster or not, which is what the other plane does and what
+    //: a chain declaring `cameras:` for the fleet's placement has always meant.
+    inline constexpr const char* kMissedNotMine = "not_mine";
+
     //: How wide an instant is, in milliseconds. A PROPOSAL, not a measurement: with the
     //: anchored instant it is no longer constrained from below by the frame period, it has to
     //: be at least the group's arrival spread, and 60 ms is a comfortable margin over the
@@ -305,6 +311,14 @@ namespace shipinfer::mtmc {
         //: runs -- 421 of 905 did once the roster named the run's own cameras.
         std::set<std::string> silent_cameras() const;
 
+        //: A frame routed to another group. Counted as `not_mine` AND the camera remembered,
+        //: because `silent_cameras()` answers the opposite question -- it names the cameras
+        //: this group was promised and never saw, which points away from a routing mistake.
+        void note_not_mine(const std::string& camera_id);
+
+        //: Cameras whose frames this group passed over. Empty for a one-group plan.
+        std::set<std::string> cameras_not_mine() const;
+
         // The lifecycle half: which cameras the group is waiting for. Announced cameras win
         // over merely-seen ones the moment anything announces, the way the Python element's
         // `camera_added` hook does.
@@ -411,6 +425,7 @@ namespace shipinfer::mtmc {
         std::map<std::string, int> backward_run_;
         std::set<std::string> announced_;
         std::set<std::string> seen_;
+        std::set<std::string> not_mine_;
         bool hooked_ = false;
         std::set<std::string> live_;
         int waiters_ = 0;

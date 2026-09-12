@@ -1,5 +1,7 @@
 #include "shipinfer/pipeline/graph/plan_stages.h"
 
+#include <map>
+
 #include "shipinfer/pipeline/mtmc/cluster.h"
 #include "shipinfer/pipeline/tracking/associator.h"
 
@@ -203,22 +205,19 @@ namespace shipinfer {
             if (!runnable(node, loaded)) {
                 built.unsupported.push_back(node.slot);
             } else if (node.kind == "mtmc") {
-                // REFUSED, not last-wins and not several -- and the REASON is narrower than
-                // it was. The chain DOES state membership (`group:` and `cameras:`, which the
-                // plan now carries), so what is missing is the ROUTING: this plane's stage
-                // hands its camera's rows to the one barrier it was built with, and nothing
-                // decides which of two barriers a frame belongs to. Until a stage picks its
-                // group by roster, two slots would both be handed every camera this shard
-                // sees and would issue two contradictory sets of global ids for the same
-                // objects -- worse than refusing to start (`CSRC-MTMC-TWO-GROUPS-PER-SHARD`).
-                if (!groups.empty()) {
-                    throw ConfigError(
-                        "plan '" + plan.name + "' has two runnable mtmc slots ('" +
-                        groups.front()->slot + "' and '" + node.slot +
-                        "'); the chain states each group's roster but this plane does not yet "
-                        "route a camera to its group, so both slots would take every camera "
-                        "this shard sees and issue contradictory global ids");
-                }
+                // SEVERAL, NOW. This used to refuse a second slot because nothing routed a
+                // camera to its group, so two would both take every camera the shard saw and
+                // issue contradictory ids. With more than one group `MtmcStage` routes by the
+                // `cameras:` roster; with one it does not, because a roster is the FLEET's
+                // placement hint and never was a filter. REFUSED STILL, below, when two
+                // rosters claim one camera: the contradiction the old refusal was about.
+                //
+                // AHEAD OF THE OTHER PLANE, and that is stated rather than glossed: Python has
+                // no roster test anywhere (`elements/mtmc.py::camera_added` warns and
+                // associates), because its fleet puts each group on its own SHARD. Two groups
+                // in one Python process would have both elements take every camera -- the bug
+                // this refusal used to prevent. Registered as `mtmc_group_routing` in
+                // `benchmarks/parity/known.py`, owned by `MTMC-PYTHON-ROUTES-BY-SHARD-ONLY`.
                 groups.push_back(&node);
             } else if (node.kind == "track") {
                 // NOT refused for being a second one. Two trackers over one camera's rows is
@@ -295,6 +294,48 @@ namespace shipinfer {
         // AFTER the trackers, because cross-camera identity consumes their ids -- the chain
         // says so too (`after: [track]`) -- and after the embedders because it is decided on
         // appearance. `stage_names` is the order the Dag runs them in.
+        // ONE CAMERA, ONE GROUP. Two rosters naming it would hand the same object to two
+        // identity spaces and publish whichever stage ran last -- the contradiction the
+        // blanket refusal above was protecting against, kept as the narrow rule it should
+        // always have been. An UNLISTED camera is not refused: that is a configuration fact
+        // and it is published with a null id.
+        std::map<std::string, std::string> claimed;
+        for (const PlanNode* node : groups) {
+            for (const std::string& camera : node->cameras) {
+                const auto seen = claimed.find(camera);
+                if (seen != claimed.end()) {
+                    // NAMED FOR WHAT IT IS. `cameras: [cam0, cam0]` hit the same branch and
+                    // said it was given "to two mtmc slots ('quay' and 'quay')", which reads
+                    // as a bug in the checker rather than in the chain (#258 r1).
+                    if (seen->second == node->slot) {
+                        throw ConfigError("plan '" + plan.name + "' lists camera '" + camera +
+                                          "' twice in mtmc slot '" + node->slot +
+                                          "'; a roster is a set of cameras, and a duplicate "
+                                          "would have the barrier wait for one camera twice");
+                    }
+                    throw ConfigError("plan '" + plan.name + "' gives camera '" + camera +
+                                      "' to two mtmc slots ('" + seen->second + "' and '" +
+                                      node->slot +
+                                      "'); one camera belongs to one group, or its objects "
+                                      "get two global ids and the last stage to run wins");
+                }
+                claimed.emplace(camera, node->slot);
+            }
+        }
+        // AND A SECOND SLOT MUST NAME ITS CAMERAS, because an empty roster means "every
+        // camera" -- two of those would take the whole shard each, which is exactly what this
+        // used to refuse outright.
+        if (groups.size() > 1) {
+            for (const PlanNode* node : groups) {
+                if (node->cameras.empty()) {
+                    throw ConfigError(
+                        "plan '" + plan.name + "' runs " + std::to_string(groups.size()) +
+                        " mtmc slots and '" + node->slot +
+                        "' names no cameras; an empty roster means every camera, so it would "
+                        "take the other group's too. Give each slot its `cameras:`");
+                }
+            }
+        }
         for (const PlanNode* node : groups) {
             MtmcStageSpec spec;
             spec.slot = node->slot;
