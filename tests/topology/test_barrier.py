@@ -49,6 +49,7 @@ from shipinfer.topology.barrier import (
     DROPPED_EXPIRED,
     DROPPED_FAILED,
     DROPPED_SHUTDOWN,
+    MISSED_BACKWARD,
     MISSED_DUPLICATE,
     MISSED_LATE,
     MISSED_WOULD_STARVE,
@@ -465,14 +466,21 @@ class TestTheBucketsAreBounded:
     def test_eviction_takes_the_instant_that_has_been_open_longest(self) -> None:
         """By open order, which is deadline order — every deadline is one window after its
         bucket opened. Evicting by *capture* time instead would let one camera with a stale
-        clock push out the instant the rest of the group is actively filling."""
+        clock push out the instant the rest of the group is actively filling.
+
+        The stale clock is a DIFFERENT camera, which is what "a camera with a stale clock"
+        means and what the barrier now distinguishes: a single camera's stamps jumping backwards
+        by two hundred windows is a clock STEP and is refused as `MISSED_BACKWARD`, while a
+        camera whose clock merely sits behind the group is ordinary and joins as it always did.
+        The property under test is unchanged — open order, not capture order.
+        """
         held = barrier(workers=1, max_instants=2)
         held.camera_added("cam-a")
         held.camera_added("cam-b")
-        for capture in (300.0, 100.0):
-            held.submit("cam-a", capture * WIDE_S, "p", associate=flat)
+        held.submit("cam-a", 300.0 * WIDE_S, "p", associate=flat)
+        held.submit("cam-b", 100.0 * WIDE_S, "p", associate=flat)
 
-        held.submit("cam-a", 200.0 * WIDE_S, "p", associate=flat)
+        held.submit("cam-b", 200.0 * WIDE_S, "p", associate=flat)
 
         # 300 arrived first, so it is the one that has been open longest.
         assert [span[1] for span in held.open_spans] == [100.0 * WIDE_S, 200.0 * WIDE_S]
@@ -775,6 +783,108 @@ class TestAFailedAssociationDoesNotStrandAWaiter:
 
 
 # -- the observer -------------------------------------------------------------------------------
+
+
+class TestACaptureClockThatStepsBack:
+    """`MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK`: #222 converged both planes onto the
+    capture (wall) stamp deliberately — two clocks would be two sets of global ids for one clip
+    — and NTP can step `CLOCK_REALTIME` backwards at any moment. A stepped frame matches no open
+    bucket and no resolved span, so it would open an instant in the PAST that nothing joins.
+
+    ONE FRAME PER STEP, and the two tests below the first three are the reason: every camera on
+    a shard shares one `CLOCK_REALTIME`, so a step moves the whole fleet, and a reference that
+    could not be adopted would refuse everything for the length of the step.
+    """
+
+    def test_a_step_past_the_window_is_refused_and_counted(self) -> None:
+        held = barrier(sync_window_s=0.06, workers=4)
+        held.submit("cam-a", 100.0, "p", associate=flat)
+
+        stepped = held.submit("cam-a", 99.5, "p", associate=flat)
+
+        assert stepped.reason == MISSED_BACKWARD
+        assert stepped.results is None, "the frame carries a gap, not a wrong instant"
+        assert held.frame_stats()[MISSED_BACKWARD] == 1
+
+    def test_jitter_inside_the_window_is_ordinary(self) -> None:
+        held = barrier(sync_window_s=0.06, workers=4)
+        held.submit("cam-a", 100.0, "p", associate=flat)
+
+        inside = held.submit("cam-a", 99.98, "p", associate=flat)
+
+        assert inside.reason != MISSED_BACKWARD
+
+    def test_a_camera_whose_clock_sits_behind_the_group_is_not_a_stepped_one(self) -> None:
+        """Its own stamps are monotonic, and the barrier's problem with an offset camera is
+        that instants never complete — which `silent_cameras` and the `window` reason already
+        report. Refusing its frames would be a second, wrong answer to that."""
+        held = barrier(sync_window_s=0.06, workers=4)
+        held.submit("cam-a", 100.0, "p", associate=flat)
+
+        behind = held.submit("cam-b", 99.0, "p", associate=flat)
+
+        assert behind.reason != MISSED_BACKWARD
+
+    def test_a_fleet_wide_step_costs_one_frame_a_camera_and_the_group_keeps_closing(
+        self,
+    ) -> None:
+        """The case that decides the design. `ingest/frame/tag.py` stamps `time.time_ns()` in
+        the shard process, so every camera shares one clock and an NTP step moves all of them.
+        Holding the old reference would refuse every frame of every camera until wall time
+        climbed back — a total MTMC outage in place of the one re-anchoring the anchored
+        instant already absorbs."""
+        # `workers=1` gives a budget of zero permits, so nothing parks: each submit returns at
+        # once and the LAST camera of the group is the one that closes the instant on evidence.
+        held = barrier(sync_window_s=0.06, workers=1)
+        cameras = ["cam-a", "cam-b", "cam-c"]
+        for camera in cameras:
+            held.camera_added(camera)
+        for camera in cameras:
+            held.submit(camera, 100.0, "p", associate=flat)
+
+        # The box steps back a second. Every camera offers a stamp a second in the past.
+        for camera in cameras:
+            refused = held.submit(camera, 99.0, "p", associate=flat)
+            assert refused.reason == MISSED_BACKWARD
+        closed = [held.submit(camera, 99.05, "p", associate=flat) for camera in cameras]
+
+        assert held.frame_stats()[MISSED_BACKWARD] == len(cameras), "one frame a camera"
+        assert (
+            closed[-1].reason == CLOSED_COMPLETE
+        ), "the group re-anchored on the new time base and closed on evidence"
+        assert closed[-1].results is not None
+
+    def test_a_single_future_stamp_does_not_wedge_a_camera(self) -> None:
+        """The DeepStream path takes the camera's own RTCP sender-report clock
+        (`deepstream/probe.py`), where one bogus stamp an hour ahead is a camera reboot. A
+        high-water reference with no way down would refuse that camera for the life of the
+        process — and worse than silently, because it stays in the live set, so every instant
+        of the whole group would wait its window and `silent_cameras` could not name it."""
+        held = barrier(sync_window_s=0.06, workers=4)
+        held.camera_added("cam-a")
+        held.camera_added("cam-b")
+        held.submit("cam-a", 100.0, "p", associate=flat)
+        held.submit("cam-a", 3700.0, "p", associate=flat)  # one hour ahead, then fine again
+
+        refused = held.submit("cam-a", 100.1, "p", associate=flat)
+        recovered = held.submit("cam-a", 100.15, "p", associate=flat)
+
+        assert refused.reason == MISSED_BACKWARD
+        assert recovered.reason != MISSED_BACKWARD, "the camera came back on its own"
+        assert held.frame_stats()[MISSED_BACKWARD] == 1
+
+    def test_the_reference_is_the_adopted_stamp_and_not_the_abandoned_one(self) -> None:
+        """After adopting, a `max` against the old reference would drag it straight back and
+        refuse the next frame too — one step would then cost every other frame, forever."""
+        held = barrier(sync_window_s=0.06, workers=4)
+        held.submit("cam-a", 100.0, "p", associate=flat)
+        held.submit("cam-a", 90.0, "p", associate=flat)  # refused
+        held.submit("cam-a", 90.05, "p", associate=flat)  # adopted
+
+        after = held.submit("cam-a", 90.1, "p", associate=flat)
+
+        assert after.reason != MISSED_BACKWARD
+        assert held.frame_stats()[MISSED_BACKWARD] == 1
 
 
 class TestARosterNobodyAnswers:
