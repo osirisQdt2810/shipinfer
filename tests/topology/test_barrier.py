@@ -451,6 +451,45 @@ class TestALateFrameIsCountedAndNeverRetroFitted:
 # -- bounded ---------------------------------------------------------------------------------
 
 
+class TestHowLateAFrameArrived:
+    """`late` says a frame missed its instant; this says by how much.
+
+    The distinction the barrier's reasons cannot draw: a window too narrow and a chain too
+    slow to reach one produce the same `late` count and want opposite fixes.
+    """
+
+    def test_a_sample_is_recorded_and_read_back(self) -> None:
+        held = barrier()
+
+        held.note_arrival_lag_us(1_500)
+        held.note_arrival_lag_us(9_000)
+
+        assert held.arrival_lag_us == [1500, 9000]
+        assert held.lag_samples_dropped == 0
+
+    def test_the_samples_are_a_copy(self) -> None:
+        """A percentile reorders what it is given, and a caller must not be able to reorder
+        the barrier's own state by taking one."""
+        held = barrier()
+        held.note_arrival_lag_us(3)
+
+        held.arrival_lag_us.append(99)
+
+        assert held.arrival_lag_us == [3]
+
+    def test_the_reservoir_is_bounded_and_says_what_did_not_fit(self, monkeypatch) -> None:
+        """A 24/7 server is not a benchmark. Dropping silently would make a full barrier read
+        exactly like a quiet one, so the count is kept when the sample is not."""
+        monkeypatch.setattr("shipinfer.topology.barrier.MAX_LAG_SAMPLES", 3)
+        held = barrier()
+
+        for lag in range(5):
+            held.note_arrival_lag_us(lag)
+
+        assert held.arrival_lag_us == [0, 1, 2], "the first three, and no more"
+        assert held.lag_samples_dropped == 2
+
+
 class TestTheBucketsAreBounded:
     def test_the_oldest_instant_is_evicted_and_counted(self) -> None:
         """A camera whose clock runs away must not be able to grow this map."""

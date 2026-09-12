@@ -63,6 +63,7 @@ __all__ = [
     "DROPPED_EXPIRED",
     "DROPPED_FAILED",
     "DROPPED_SHUTDOWN",
+    "MAX_LAG_SAMPLES",
     "MISSED_BACKWARD",
     "MISSED_DUPLICATE",
     "MISSED_LATE",
@@ -162,6 +163,10 @@ DEFAULT_SYNC_WINDOW_MS = 60.0
 #: instant open and seals more as it advances, so a constant below the fleet's size
 #: evicts buckets the group is still filling. Measured: `benchmarks/RESULTS.md`.
 DEFAULT_MAX_INSTANTS = 8
+
+#: How many arrival-lag samples one barrier keeps. Mirrors `kMaxLagSamples` on the C++
+#: side: ~800 KB, about an hour of one camera at 50 fps.
+MAX_LAG_SAMPLES = 200000
 
 
 class InstantSizes(NamedTuple):
@@ -402,6 +407,7 @@ class InstantBarrier:
 
     __slots__ = (
         "_announced",
+        "_arrival_lag_us",
         "_backward_run",
         "_buckets",
         "_budget",
@@ -415,6 +421,7 @@ class InstantBarrier:
         "_hooked",
         "_instant_counts",
         "_instants_ended",
+        "_lag_dropped",
         "_live_set",
         "_max_instants",
         "_newest_capture",
@@ -475,6 +482,10 @@ class InstantBarrier:
         #: late frame *late* rather than the first member of a brand-new instant.
         self._recent: OrderedDict[int, tuple[float, float]] = OrderedDict()
         self._recent_limit = max(8, self._max_instants * 4)
+        #: How late frames reached this barrier — :meth:`note_arrival_lag_us`. Bounded,
+        #: because a 24/7 server is not a benchmark; the count of what did not fit is kept.
+        self._arrival_lag_us: list[int] = []
+        self._lag_dropped = 0
         #: How much of the fleet each ended instant held — :attr:`instant_sizes`.
         self._cameras_held = 0
         self._instants_ended = 0
@@ -531,6 +542,34 @@ class InstantBarrier:
         """
         with self._cond:
             return self._live_set
+
+    def note_arrival_lag_us(self, lag_us: int) -> None:
+        """Record how late one frame was: microseconds from its capture stamp to its submit.
+
+        HANDED IN rather than measured here, and the C++ twin says the same. The capture
+        stamp is a wall time and this barrier's clock is deliberately steady, so subtracting
+        one from the other here would be arithmetic across two clocks; the mtmc element holds
+        both. ``late`` says a frame missed its instant, this says by how much — which is what
+        separates a window too narrow from a chain too slow to reach one.
+        """
+        with self._cond:
+            if len(self._arrival_lag_us) >= MAX_LAG_SAMPLES:
+                self._lag_dropped += 1
+                return
+            self._arrival_lag_us.append(int(lag_us))
+
+    @property
+    def arrival_lag_us(self) -> list[int]:
+        """A copy of the samples, because a percentile reorders what it is given."""
+        with self._cond:
+            return list(self._arrival_lag_us)
+
+    @property
+    def lag_samples_dropped(self) -> int:
+        """How many samples did not fit, so a full reservoir reads differently from a quiet
+        barrier."""
+        with self._cond:
+            return self._lag_dropped
 
     @property
     def instant_sizes(self) -> InstantSizes:

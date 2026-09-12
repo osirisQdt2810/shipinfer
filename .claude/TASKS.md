@@ -3244,7 +3244,7 @@ hook down, for when the operator asked to see something before it is executed.
       (c) is still worth doing: 12 cameras admitted 74.7% before and 89.3% in the smoke run
       above, so the fleet-size term did not vanish, it stopped dominating.
 
-- [ ] MTMC-A-THIRD-OF-FRAMES-ARRIVE-LATE · MEASURED 12 Sep on the gate's design-load arm and
+- [x] MTMC-A-THIRD-OF-FRAMES-ARRIVE-LATE · ANSWERED 12 Sep, and the window is not the lever. MEASURED on the gate's design-load arm and
       not yet explained. `mtmc_frames late` is 24 950 of 68 538 frames read at 50 x 20 fps --
       better than a third of the fleet reaches the barrier after its instant has already closed,
       so those frames carry no global id at all. It is a different question from the gate's
@@ -3259,6 +3259,19 @@ hook down, for when the operator asked to see something before it is executed.
       arrival rather than capture -- and ADR on the capture stamp says why it cannot.
       MEASURE FIRST: the distribution of (arrival - capture) at the mtmc stage, which nothing
       reports today. Do not touch the window until that histogram exists.
+      IT EXISTS NOW and it settles the question. `mtmc_arrival_lag_us`, both planes, measured
+      at the STAGE because it is the only place holding both stamps on one clock (the capture
+      stamp is wall time and the barrier's own clock is deliberately steady). Two arms at the
+      design load: p50 248.5/246.8 ms, p95 582.9/580.7, p99 785.9/792.9, max ~1.21 s, against
+      a 60 ms window. So a frame reaches the barrier a median of FOUR WINDOWS after it was
+      captured, and that lag is most of the frame's whole 284 ms.
+      AND IT IS THE SPREAD, NOT THE DELAY, that strands a frame: a fleet delayed uniformly by
+      247 ms would bucket together perfectly. The dispersion is p50 247 ms to p99 790 ms, about
+      540 ms, which is nine times the window -- so no window this side of a second closes it,
+      and the sweep already priced 250 ms at 17% of the frames and 29% of p50.
+      WHAT IS LEFT is upstream of the barrier: the chain's latency to reach `mtmc` and its
+      variance. That is `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` and `EXECUTE-BLOCKS-THE-
+      INSTANCE-THREAD` territory, not the barrier's, and this item closes having said which.
 
 - [ ] MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK · (a) DONE 11 Sep, (b) STILL OPEN. #222 converged the two planes onto the
       CAPTURE (wall) stamp, because keying instants on different clocks is two sets of global

@@ -124,6 +124,25 @@ namespace shipinfer::mtmc {
         return instant_counts_;
     }
 
+    void InstantBarrier::note_arrival_lag_us(uint32_t lag_us) {
+        std::lock_guard<std::mutex> held(lock_);
+        if (arrival_lag_us_.size() >= kMaxLagSamples) {
+            ++lag_dropped_;
+            return;
+        }
+        arrival_lag_us_.push_back(lag_us);
+    }
+
+    std::vector<uint32_t> InstantBarrier::arrival_lag_us() const {
+        std::lock_guard<std::mutex> held(lock_);
+        return arrival_lag_us_;  // copied: `percentile` reorders what it is given
+    }
+
+    uint64_t InstantBarrier::lag_samples_dropped() const {
+        std::lock_guard<std::mutex> held(lock_);
+        return lag_dropped_;
+    }
+
     InstantBarrier::InstantSizes InstantBarrier::instant_sizes() const {
         std::lock_guard<std::mutex> guard(lock_);
         return {cameras_held_, instants_ended_, cameras_held_max_};

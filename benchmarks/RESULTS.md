@@ -717,6 +717,42 @@ So the item has the justification it said it lacked. Whether ~14% is worth ~1 GB
 buffer-ring restructuring is a judgement for whoever builds it; what is no longer true is that
 the number is unknown, or that it is 2%.
 
+## How late a frame reaches the barrier, and why the window is not the lever
+
+The gate arm left one number unexplained: `mtmc_frames late` was 24 950 of 68 538 frames read —
+better than a third of the fleet reaching the barrier after its instant had closed, carrying no
+global id. `late` says a frame missed its instant; nothing said *by how much*, and that is the
+difference between a window too narrow and a chain too slow to reach one. `mtmc_arrival_lag_us`
+reports it now, measured at the mtmc stage because that is the only place holding both the
+capture stamp (wall) and the arrival moment on one clock.
+
+| | arm 1 | arm 2 |
+|---|---|---|
+| samples | 60 847 | 61 837 |
+| p50 | **248.5 ms** | **246.8 ms** |
+| p95 | 582.9 ms | 580.7 ms |
+| p99 | 785.9 ms | 792.9 ms |
+| max | 1 205 ms | 1 216 ms |
+| `late` | 23 924 | 23 762 |
+| frame p50 (end to end) | 284.2 ms | 284.7 ms |
+
+**The window is 60 ms.** A frame arrives a median of 247 ms after it was captured — more than
+four windows — and the lag at this one stage is most of the frame's whole 284 ms.
+
+**And it is the SPREAD that makes a frame late, not the delay.** A fleet delayed uniformly by
+247 ms would bucket together perfectly: every camera's frame would land in the same
+late-opened instant. What strands a frame is arriving after its instant closed, so the variable
+is the *dispersion* of the lag against the window — and that dispersion is p50 247 ms to p99
+790 ms, a span of about 540 ms, nine times the window.
+
+**So widening the window is the wrong lever, and it was already priced.** The sweep above took
+it to 250 ms and paid 17% of the frames and 29% of p50 latency for it; the span here is twice
+that width again. What has to come down is the chain's latency to reach `mtmc`, and its
+variance — which is upstream of the barrier and nothing the barrier can do.
+
+Measured with `SHIPINFER_BENCH_SOURCE=nvdec scripts/run_cpp_bench.sh <label>`: 50 cameras ×
+20 fps over GStreamer RTSP from the pan fixture, 4 GPUs, 70 s with the analysis's 10 s warm-up.
+
 ## The verdict, and the one open question
 
 The ≥5× target needs a ratio to be against, and the four above give opposite answers. Absent

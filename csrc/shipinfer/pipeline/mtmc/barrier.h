@@ -124,6 +124,10 @@ namespace shipinfer::mtmc {
     //: a number. MEASURED 11 Sep at the design load (50 cameras x 20 fps,
     //: `benchmarks/RESULTS.md`): at 8 the run evicted 20-28% of its instants and admitted
     //: 97-545 observations; from 16 up it evicts NOTHING and admits ~2 200. The fleet is 50
+    //: How many arrival-lag samples one barrier keeps. 200k is ~800 KB and about an
+    //: hour of one camera at 50 fps; past it the count is kept and the samples are not.
+    inline constexpr size_t kMaxLagSamples = 200000;
+
     //: there, three times the knee.
     inline constexpr int kDefaultMaxInstants = 8;
 
@@ -254,6 +258,26 @@ namespace shipinfer::mtmc {
         InstantSizes instant_sizes() const;
         std::map<std::string, uint64_t> frame_stats() const;
 
+        // doc: long why the lag is handed in rather than taken, and what it answers
+        //: HOW LATE A FRAME REACHES THIS BARRIER: microseconds between the stamp a frame was
+        //: CAPTURED at and the moment it was submitted. `late` says a frame missed its instant
+        //: and `window` says an instant ran out of time; neither says by how much, so neither
+        //: can tell a window that is too narrow from a chain that is too slow to reach it.
+        //:
+        //: HANDED IN, not measured here, and that is the whole reason this is two methods. The
+        //: capture stamp is a WALL time and this barrier's own clock is deliberately steady
+        //: (`clock_` defaults to `steady_seconds`, and ADR says why instants key on the wall
+        //: stamp while deadlines do not), so subtracting one from the other here would be
+        //: arithmetic across two clocks. The mtmc stage holds both and is the only place that
+        //: legitimately can.
+        //:
+        //: BOUNDED, because a 24/7 server is not a benchmark: past `kMaxLagSamples` the
+        //: samples stop growing and `lag_samples_dropped()` says how many were not kept, so a
+        //: reader can tell a full reservoir from a quiet one.
+        void note_arrival_lag_us(uint32_t lag_us);
+        std::vector<uint32_t> arrival_lag_us() const;
+        uint64_t lag_samples_dropped() const;
+
         //: Declared cameras that have never sent a frame. EMPTY is the healthy answer, and a
         //: non-empty one is a configuration fault that is otherwise silent: announced cameras
         //: win over seen ones, so a roster naming cameras this fleet does not have makes
@@ -333,6 +357,10 @@ namespace shipinfer::mtmc {
         int max_instants_;
         std::shared_ptr<WaiterBudget> budget_;
         Clock clock_;
+        //: The arrival lag samples, and how many did not fit. Guarded by `lock_` like every
+        //: other counter here.
+        std::vector<uint32_t> arrival_lag_us_;
+        uint64_t lag_dropped_ = 0;
         OnEvent on_event_;
 
         mutable std::mutex lock_;

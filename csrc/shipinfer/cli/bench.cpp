@@ -996,6 +996,18 @@ int main(int argc, char** argv) {
                 // cannot give: `window` says an instant ran out of time, not how many cameras
                 // were in it when it did, and a cross-camera association over one camera is
                 // not one. Mean and largest, over every instant that ended.
+                // HOW LATE A FRAME REACHED THIS BARRIER, which is the number `late` cannot
+                // give: it says a frame missed its instant, not by how much, so it cannot
+                // tell a window that is too narrow from a chain too slow to reach one. Read
+                // against `sync_window_ms`: a p50 of several windows is the chain's latency.
+                std::vector<uint32_t> lag = barrier->arrival_lag_us();
+                std::cout << "mtmc_arrival_lag_us " << slot << " samples " << lag.size()
+                          << " dropped " << barrier->lag_samples_dropped() << "\n";
+                std::cout << "mtmc_arrival_lag_us " << slot << " p50 " << percentile(lag, 0.50)
+                          << " p95 " << percentile(lag, 0.95) << " p99 "
+                          << percentile(lag, 0.99) << " max "
+                          << (lag.empty() ? 0 : *std::max_element(lag.begin(), lag.end()))
+                          << "\n";
                 const mtmc::InstantBarrier::InstantSizes sizes = barrier->instant_sizes();
                 std::cout << "mtmc_instant_cameras " << slot << " "
                           << (sizes.instants == 0

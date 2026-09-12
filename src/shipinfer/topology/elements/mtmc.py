@@ -697,6 +697,11 @@ class ShipvisionMtmc(Element):
         camera_id = item.context.camera_id
         capture_s = self._capture_s(item)
         view = self._view(item, camera_id, capture_s, tracks)
+        # HOW LATE THIS FRAME IS, here because this is the only place holding both stamps on
+        # one clock: the capture stamp is wall time and the barrier's deadlines are steady.
+        # Clamped at zero — a negative lag is a stepped clock, which `backward` already counts.
+        lag_us = max(0.0, (time.time() - capture_s) * 1e6)
+        self._barrier.note_arrival_lag_us(int(lag_us))
         try:
             outcome = self._barrier.submit(
                 camera_id,

@@ -495,6 +495,27 @@ namespace {
               "and the drain evicted nothing");
     }
 
+    void how_late_a_frame_arrived_is_recorded_and_bounded() {
+        // `late` says a frame missed its instant; this says by how much. A window too narrow
+        // and a chain too slow to reach one give the same `late` count and want opposite
+        // fixes, which is the distinction the barrier's reasons cannot draw on their own.
+        InstantBarrier barrier(unbounded(0.06, 1));
+        barrier.note_arrival_lag_us(1500);
+        barrier.note_arrival_lag_us(9000);
+
+        const std::vector<uint32_t> samples = barrier.arrival_lag_us();
+
+        check(samples.size() == 2 && samples[0] == 1500 && samples[1] == 9000,
+              "both samples are read back in order");
+        check(barrier.lag_samples_dropped() == 0, "and nothing was dropped");
+
+        std::vector<uint32_t> taken = barrier.arrival_lag_us();
+        taken.clear();
+        check(barrier.arrival_lag_us().size() == 2,
+              "the samples are a COPY: `percentile` reorders what it is given, and a reader "
+              "must not be able to reorder the barrier's own state by asking for them");
+    }
+
     void a_bound_the_chain_names_is_exact() {
         // Both directions, because a floor that silently raised an operator's number would
         // make the knob untestable -- including for the sweep that chose the default.
@@ -1132,6 +1153,7 @@ int main() {
     an_unnamed_bound_follows_the_fleet();
     a_fleet_larger_than_the_floor_evicts_nothing_it_is_still_filling();
     a_roster_smaller_than_the_traffic_does_not_shrink_the_bound();
+    how_late_a_frame_arrived_is_recorded_and_bounded();
     a_bound_the_chain_names_is_exact();
     a_drain_does_not_evict_what_the_survivors_are_still_filling();
     at_most_workers_minus_one_ever_wait();
