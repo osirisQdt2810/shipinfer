@@ -2808,8 +2808,11 @@ hook down, for when the operator asked to see something before it is executed.
       59 checks / 0 failures with it, 4 parity checks / 0 failures against the re-emitted
       golden.
 
-- [x] PIPELINE-WORKERS-NEED-CAMERA-AFFINITY · NOT WORTH BUILDING at the design rate, measured 12 Sep. MEASURED 11 Sep and it is the chain's real
-      ceiling: one shared worker pool reorders a camera's frames, the per-camera tracker
+- [x] PIPELINE-WORKERS-NEED-CAMERA-AFFINITY · NOT WORTH BUILDING at the design rate, measured
+      12 Sep. It was OPENED 11 Sep as the chain's real ceiling, and that is the half this item
+      closes against -- the new clause was spliced ahead of the old headline and the line
+      asserted both at once (#256 r1).
+      WHAT 11 SEP SAW: one shared worker pool reorders a camera's frames, the per-camera tracker
       refuses a frame that does not advance its stream, and the refusal rate rises with the
       worker count -- 1.8% at 24 workers, 20.2% at 48, 41.9% at 92, while the TRACKED rate
       stays flat at ~260 img/s. So every worker past ~24 buys frames that carry no ids, which
@@ -2849,9 +2852,15 @@ hook down, for when the operator asked to see something before it is executed.
       balance is what this project exists to get right; paying that for 0.2% is the wrong
       trade. The per-camera sequencer stays unbuilt until a deployment runs saturated, and
       `benchmarks/RESULTS.md` holds the table to re-read when one does.
-      AND THE CEILING IT WAS NOMINATED FOR IS ELSEWHERE: these arms carry a ~20 ms arrival lag
-      against a 60 ms window, where fifty cameras carry ~240 ms. That is
-      `MTMC-A-THIRD-OF-FRAMES-ARRIVE-LATE`, and it is chain latency rather than ordering.
+      WHERE THE FRAMES THAT CARRY NO IDS GO IS NOT SETTLED HERE, and a draft of this line said
+      it was: it quoted a ~20 ms arrival lag against the 60 ms window and ~240 ms at fifty
+      cameras, and concluded chain latency rather than ordering. The bench emits no arrival-lag
+      metric -- `reassembly_us_*` is time in reassembly and `frame_us_*` is captured-to-emitted
+      -- no raw output backed the column, and every arm here is twelve cameras, so no
+      fifty-camera number was measured at all. Struck rather than relabelled, because
+      `MTMC-A-THIRD-OF-FRAMES-ARRIVE-LATE` says "do not touch the window until that histogram
+      exists" and this answered it with the proxy that item forbids. The instrument is
+      `MTMC-LAG-IS-NOT-INSTRUMENTED` (#255); its numbers are the ones to read.
       AND THE PRIORITY IS LOWER THAN THIS ITEM READS, which is the useful thing today's
       measurements say about it. At the DESIGN load -- 50 cameras x 20 fps, the sizing this box
       is arranged around -- the tracker refuses **3.7%** of accepted frames, not 37%: 1 105 of

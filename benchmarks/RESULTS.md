@@ -781,12 +781,12 @@ in its own words, what those rows could not settle: they were measured at **satu
 
 Here is that sweep. `queue_rejected` is **0** on every arm, so nothing is being decimated:
 
-| workers | untracked | untracked % | admitted | ids / tracks | frames accepted | lag p50 |
-|---|---|---|---|---|---|---|
-| **24** | 12 | **0.07%** | 66 384 (89.9%) | 17 / 96 | 16 725 | 21.2 ms |
-| 48 | 13 | **0.08%** | 66 416 (89.9%) | 17 / 96 | 16 733 | 20.8 ms |
-| 92 | 36 | **0.22%** | 66 274 (89.9%) | 17 / 96 | 16 733 | 19.5 ms |
-| 92 (repeat) | 45 | **0.27%** | 66 187 (89.9%) | 17 / 96 | 16 723 | 20.4 ms |
+| workers | untracked | untracked % | admitted | ids / tracks | frames accepted |
+|---|---|---|---|---|---|
+| **24** | 12 | **0.07%** | 66 384 (89.9%) | 17 / 96 | 16 725 |
+| 48 | 13 | **0.08%** | 66 416 (89.9%) | 17 / 96 | 16 733 |
+| 92 | 36 | **0.22%** | 66 274 (89.9%) | 17 / 96 | 16 733 |
+| 92 (repeat) | 45 | **0.27%** | 66 187 (89.9%) | 17 / 96 | 16 723 |
 
 **The reordering is real and it is negligible.** Untracked rises about 3–4× from 24 workers to
 92 — the effect the item describes — on a base of one frame in fifteen hundred. Admission,
@@ -798,9 +798,16 @@ balance is what this project exists to get right; paying that for 0.2% is the wr
 design rate. The per-camera sequencer stays unbuilt until a deployment runs saturated, and this
 table is what to re-read when one does.
 
-**And the ceiling it was nominated for is elsewhere.** These arms carry an arrival lag of ~20 ms
-against a 60 ms window — a fleet whose frames arrive in time. At fifty cameras the same number is
-~240 ms, four windows, and that is where the frames that carry no ids actually go.
+**Where the frames that carry no ids go is NOT settled here, and this row used to claim it
+was.** An earlier draft carried a `lag p50` column and concluded from it that the cause is chain
+latency rather than ordering. The bench emits no such metric: it reports `reassembly_us_*` (time
+in reassembly) and `frame_us_*` (captured→emitted), and neither is arrival-versus-capture at the
+barrier. The column was one of those two under a new name, no raw output here backed it, and the
+fifty-camera figure beside it was extrapolated from nothing this run measured — all twelve-camera
+arms. Removed rather than relabelled, because `MTMC-A-THIRD-OF-FRAMES-ARRIVE-LATE` says in its
+own words *"do not touch the window until that histogram exists"*, and answering it with the
+proxy it was written to forbid is how the histogram never gets built. The instrument that does
+measure it is `MTMC-LAG-IS-NOT-INSTRUMENTED` (#255); read that item's numbers, not these.
 
 Measured with `SHIPINFER_BENCH_WORKERS=<n> SHIPINFER_BENCH_SOURCE=nvdec
 SHIPINFER_BENCH_CAMERAS=12 scripts/run_cpp_bench.sh <label>`: GStreamer RTSP from the pan
