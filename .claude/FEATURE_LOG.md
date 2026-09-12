@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-12 — an instant says how much of the fleet it held, and the gate is the variable
+
+Every reason the barrier reports is about time; none says how many cameras were in an instant
+when it ended, and an association over one camera is not one. Both barriers tally that in
+`remember` -- the one place every ended bucket passes -- and the bench prints
+`mtmc_instant_cameras`. An instant holds about ELEVEN cameras whatever the fleet is (11.8 of
+fifty against 10.5 of twelve), so the fleet grew and the 60 ms window did not. A window sweep
+refuted cameras-per-instant as the variable identity tracks -- 60/120/250 ms gives 11.8/9.4/12.3
+cameras while identities go 18/42/50 -- and showed what `barrier.h` predicted: past the frame
+period a camera's next frame lands in its own bucket, so `advanced` goes from 21% of instants to
+85%. And `min_hits` 3 -> 1 took admission from 2.2% to 99.9% and identities from 18 over 18
+TRACKS to 23 over 190: at the shipped defaults every identity holds one track.
+
+---
+
 ## 2026-09-12 — the mask fold runs where the batch is, not where its answer is read
 
 A segmentation engine answers 300x38 rows and a `(32, 160, 160)` prototype bank per crop, and

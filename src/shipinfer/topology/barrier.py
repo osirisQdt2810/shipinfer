@@ -48,7 +48,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 from shipinfer.core.errors import ConfigurationError, ServerStateError
 
@@ -70,6 +70,7 @@ __all__ = [
     "InstantBarrier",
     "InstantEntry",
     "InstantOutcome",
+    "InstantSizes",
     "WaiterBudget",
 ]
 
@@ -161,6 +162,22 @@ DEFAULT_SYNC_WINDOW_MS = 60.0
 #: instant open and seals more as it advances, so a constant below the fleet's size
 #: evicts buckets the group is still filling. Measured: `benchmarks/RESULTS.md`.
 DEFAULT_MAX_INSTANTS = 8
+
+
+class InstantSizes(NamedTuple):
+    """How much of the fleet the barrier's ended instants held.
+
+    Named rather than a bare tuple so the two planes read alike — the C++ twin is a struct —
+    and so a caller cannot transpose ``cameras`` and ``instants``, which a plain tuple would
+    not catch.
+    """
+
+    #: Total cameras summed over every instant that ended, however it ended.
+    cameras: int
+    #: How many instants that was.
+    instants: int
+    #: The largest single instant's camera count.
+    largest: int
 
 
 class WaiterBudget:
@@ -516,15 +533,17 @@ class InstantBarrier:
             return self._live_set
 
     @property
-    def instant_sizes(self) -> tuple[int, int, int]:
-        """``(cameras, instants, largest)`` over every instant that ended.
+    def instant_sizes(self) -> InstantSizes:
+        """How much of the fleet the ended instants held, over every one of them.
 
         The number to read before touching ``sync_window_ms``: a group whose instants hold two
         cameras of fifty is not synchronised, whatever its reasons say, and no cross-camera
         association can form in an instant that holds one.
         """
         with self._cond:
-            return (self._cameras_held, self._instants_ended, self._cameras_held_max)
+            return InstantSizes(
+                self._cameras_held, self._instants_ended, self._cameras_held_max
+            )
 
     @property
     def max_instants(self) -> int:
