@@ -9,10 +9,11 @@ from shipinfer.backends.base import BackendContext, ModelBackend
 from shipinfer.backends.tensorrt.autobuild import resolve_engine
 from shipinfer.backends.tensorrt.bindings import BindingSet
 from shipinfer.backends.tensorrt.engine import DYNAMIC, LoadedEngine, load_engine
+from shipinfer.backends.tensorrt.fold import MaskAreaFold
 from shipinfer.backends.tensorrt.logger import build_trt_logger
 from shipinfer.core.errors import BackendUnavailableError, ConfigurationError, InferenceError
 from shipinfer.core.logging import get_logger
-from shipinfer.core.types import Tensor, TensorSpec
+from shipinfer.core.types import DataType, Tensor, TensorSpec
 from shipinfer.runtime.platform import require_torch
 from shipinfer.runtime.stream import Stream
 
@@ -43,6 +44,10 @@ class TensorRTBackend(ModelBackend):
 
     platform = "tensorrt"
     requires_gpu = True
+    #: No fold until one is attached. A CLASS attribute because the contract test builds
+    #: this object with `object.__new__`, where an `__init__`-only field would surface as an
+    #: `AttributeError` from inside `execute`.
+    _fold: MaskAreaFold | None = None
 
     def __init__(self, context: BackendContext) -> None:
         super().__init__(context)
@@ -64,6 +69,7 @@ class TensorRTBackend(ModelBackend):
         self._uses_named_tensors = False
         self._graph_replays = 0
         self._enqueues = 0
+        self._fold: MaskAreaFold | None = None
 
     # -- lifecycle -----------------------------------------------------------------------
 
@@ -212,7 +218,56 @@ class TensorRTBackend(ModelBackend):
         if self._loaded is None:
             return super().output_specs
         strip = self.context.config.max_batch_size > 0
-        return tuple(t.to_spec(strip) for t in self._loaded.outputs)
+        specs = [t.to_spec(strip) for t in self._loaded.outputs]
+        if self._fold is None:
+            return tuple(specs)
+        # THE BANK STOPS BEING ADVERTISED and a width-1 output takes its place at the END,
+        # which is `TrtEngineAdapter`'s arrangement in the other plane. Every output stays
+        # `rows` long, so the scatter above is unchanged and the stage that used to fold on
+        # the host reads a named output instead.
+        kept = [spec for spec in specs if spec.name != self._fold.prototypes]
+        batch = self._loaded.outputs[0].shape[0] if self._loaded.outputs else DYNAMIC
+        area = TensorSpec(
+            name=self._fold.name,
+            dtype=DataType.FP32,
+            shape=(1,) if strip else (batch, 1),
+        )
+        return (*kept, area)
+
+    def set_fold(self, fold: Any) -> None:
+        """Compute ``fold.name`` on the device and stop copying the bank it reduces home.
+
+        Takes the chain's own fold object and builds the device form here, because `topology`
+        is a pure layer and may not name this one. Attached where the instance is composed
+        rather than per request: one batch holds many requests and two could carry different
+        folds, which is why the C++ plane refused that form too.
+
+        Raises:
+            ConfigurationError: the fold names an output this engine does not have.
+        """
+        if fold is not None:
+            fold = MaskAreaFold(
+                crop_hw=tuple(fold.crop_hw),
+                detections=fold.detections,
+                prototypes=fold.prototypes,
+                name=fold.name,
+                score_threshold=float(fold.score_threshold),
+                mask_threshold=float(fold.mask_threshold),
+            )
+            if self._loaded is None:
+                raise ConfigurationError(
+                    f"{self.context.instance_name}: a fold can only be attached to a loaded "
+                    f"engine, because its output names are checked against that engine's"
+                )
+            names = {tensor.name for tensor in self._loaded.outputs}
+            missing = [n for n in (fold.detections, fold.prototypes) if n not in names]
+            if missing:
+                raise ConfigurationError(
+                    f"{self.context.instance_name}: the mask fold names output(s) "
+                    f"{missing} that {self.context.config.name!r} does not have "
+                    f"(it has: {sorted(names)})"
+                )
+        self._fold = fold
 
     # -- execution -----------------------------------------------------------------------
 
@@ -241,11 +296,24 @@ class TensorRTBackend(ModelBackend):
             self._enqueues += 1
 
             outputs: dict[str, Tensor] = {}
+            # ON THE STREAM, between the network and the copies: the fold reads what the
+            # network just wrote, and one float a row comes home in place of the bank it
+            # reduced. `stream.activate()` is what orders it against both.
+            fold = self._fold
             for spec in self.output_specs:
+                if fold is not None and spec.name == fold.name:
+                    continue  # computed below; the engine has no such output to fetch
                 array = bindings.fetch_output(
                     spec.name, batch_size, stream, async_copy=async_copy
                 )
                 outputs[spec.name] = Tensor.from_numpy(array)
+            if fold is not None:
+                areas = fold(
+                    bindings.device_tensor(fold.detections),
+                    bindings.device_tensor(fold.prototypes),
+                    batch_size,
+                )
+                outputs[fold.name] = Tensor.from_numpy(areas.cpu().numpy())
         return outputs
 
     def _set_input_shapes(self, batch_size: int) -> None:

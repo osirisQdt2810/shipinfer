@@ -2875,7 +2875,7 @@ hook down, for when the operator asked to see something before it is executed.
       WHAT IT DOES NOT REMOVE: the detection rows still come home -- 300x38 floats a crop,
       45 KB against the bank's 3.1 MB -- because the host fold is the fallback and needs them.
 
-- [ ] PYTHON-SEGMENT-FOLDS-ON-THE-HOST · THE OTHER PLANE'S HALF of
+- [x] PYTHON-SEGMENT-FOLDS-ON-THE-HOST · DONE 12 Sep. THE OTHER PLANE'S HALF of
       `MASK-FOLD-BELONGS-ON-THE-DEVICE`, opened by the PR that moved the C++ one (V88's rule:
       a PR that changes one plane says so and opens the item for the other). `PoolSegment.
       _reduced` (`topology/elements/pool.py`) calls `InstanceMaskArea` on numpy arrays that
@@ -2904,6 +2904,27 @@ hook down, for when the operator asked to see something before it is executed.
       slots attach different folds to one model.
       LEANING (c), for the single source of truth; (b) is the fallback if widening the handle
       protocol turns out to reach further than `PoolSegment`.
+      (c) IT IS, and the C++ plane settled it rather than a preference: `plan_stages.cpp`'s
+      `fold_of` takes the spec from the RESOLVED PLAN's node, so the chain is the source of
+      truth there too and the composition root applies it. The widening is one method --
+      `Model.attach_fold` over `ModelInstance.attach_fold` over the backend's `set_fold` --
+      and it did not reach past `PoolSegment`.
+      WHAT TRAVELS IS THE PURE OBJECT. `topology` may not name a backend type (it is a PURE
+      layer and `backends/tensorrt/__init__` imports TensorRT), so the element hands down its
+      own `InstanceMaskArea` and `TensorRTBackend.set_fold` builds the device form. That
+      inversion is better than the import would have been: the chain states the fold, the
+      backend decides how to run it.
+      DONE: `backends/tensorrt/fold.py` is the torch twin, the backend stops advertising and
+      stops fetching the bank and appends a width-1 output LAST (`TrtEngineAdapter`'s
+      arrangement), and `_reduced` is identity once the backend took the fold. A backend
+      without `set_fold` keeps the host path and says so once per model rather than per
+      instance. Two slots folding one model differently are REFUSED, which is the C++ side's
+      refusal ported.
+      EVIDENCE: the device fold agrees with the readable one EXACTLY (atol=0) at three mask
+      cuts and every batch size, and six probes go red -- a hard-coded cut, reading past the
+      batch's rows, a moved score floor, the bank fetched anyway, the bank still advertised,
+      and last-writer-wins on a second slot. The parity test runs on CPU torch on purpose: the
+      arithmetic is the claim, and a parity test that needed a driver is one nobody runs.
 
 - [ ] ENGINE-COPIES-EVERY-OUTPUT-HOME · `backends/tensorrt/engine.cpp` ends every `execute`
       with one `gpuMemcpyAsync(host_outputs_[i], output_buffers_[i], ..., DeviceToHost)` per

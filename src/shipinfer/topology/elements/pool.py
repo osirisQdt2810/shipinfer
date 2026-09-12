@@ -58,6 +58,7 @@ from shipinfer.core.errors import (
     RequestTimeoutError,
     ValidationError,
 )
+from shipinfer.core.logging import get_logger
 from shipinfer.core.request import InferenceRequest, InferenceResponse
 from shipinfer.core.types import Tensor
 from shipinfer.topology.base import (
@@ -86,6 +87,8 @@ __all__ = [
     "PoolRecognize",
     "PoolSegment",
 ]
+
+_LOG = get_logger("topology.pool")
 
 #: Where the model's outputs are read from in the request. The **last** resort: mirrors the
 #: default of ``ingest.input_name`` for an element opened with a context that carries no
@@ -184,6 +187,9 @@ class _PoolElement(Element):
         self._input = str(self.params.get("input", _DEFAULT_INPUT))
         self._timeout_s = float(self.params.get("timeout_s", _DEFAULT_TIMEOUT_S))
         self._handle: Any = None
+        #: Whether the backend took the fold. False keeps the host path, which is what a
+        #: non-TensorRT backend and the offline tier both use.
+        self._on_device = False
 
     def _resolve_settings(self, context: ElementContext) -> None:
         """Fix the wait and the input name for this run: params, then context, then default.
@@ -1626,6 +1632,26 @@ class PoolSegment(_PoolCropElement):
                 f"{self.kind.value} element {self.name!r}: `params: segment:` is not a valid "
                 f"fold -- {error}"
             ) from error
+        self._on_device = self._attach_device_fold()
+
+    def _attach_device_fold(self) -> bool:
+        """Offer the fold to the model's backends, and say whether they took it.
+
+        THE CHAIN IS THE SOURCE OF TRUTH for the cut and the two output names, and what
+        travels is this element's own `InstanceMaskArea` -- a pure object. `topology` may not
+        name a backend's type, and inverting it this way is the right shape anyway: the chain
+        states the fold and the backend decides how to run it.
+        """
+        attach = getattr(self._handle, "attach_fold", None)
+        if attach is None:
+            return False
+        took = bool(attach(self._fold))
+        _LOG.info(
+            "segment element %r folds %s",
+            self.name,
+            "on the device" if took else "on the host (this backend has no device fold)",
+        )
+        return took
 
     def _segment_settings(self) -> Mapping[str, Any]:
         """``params: {segment: {...}}``, refused once for both readings of it.
@@ -1707,11 +1733,15 @@ class PoolSegment(_PoolCropElement):
     def _reduced(self, response: InferenceResponse) -> InferenceResponse:
         """The engine's two outputs, folded to one area per crop.
 
+        Identity when the backend folded already: it advertises the area under this same name
+        and stopped copying the bank home, so there is nothing left here to reduce.
+
         Raises:
             InferenceError: an output is missing, has the wrong rank, or disagrees about the
-                coefficient count -- :class:`InstanceMaskArea`'s refusals, which all say the
-                engine is not the one this slot was configured for.
+                coefficient count -- :class:`InstanceMaskArea`'s refusals.
         """
+        if self._on_device:
+            return response
         areas = self._fold({name: value.numpy() for name, value in response.outputs.items()})
         return replace(
             response,

@@ -97,6 +97,9 @@ class Model:
         # bounds anything if the instances contend for the same one.
         self._statistics = ModelStatistics()
         self._limiter = self._build_rate_limiter()
+        #: The device fold this model's instances carry, or None. Held so a second slot
+        #: asking for a different one is refused rather than silently overwriting the first.
+        self._fold: Any = None
         self._instances: list[ModelInstance] = self._build_instances()
         self._dispatcher = Dispatcher(
             model_name=artifact.name,
@@ -326,6 +329,29 @@ class Model:
     @property
     def instances(self) -> tuple[ModelInstance, ...]:
         return tuple(self._instances)
+
+    def attach_fold(self, fold: Any) -> bool:
+        """Attach one device fold to every instance of this model. True when any took it.
+
+        REFUSED WHEN TWO SLOTS DISAGREE, which is the same refusal the C++ composition root
+        makes: one model has one set of instances, so two chain slots asking it to fold
+        differently is a chain that cannot be served, not a last-writer-wins.
+
+        Raises:
+            ConfigurationError: a different fold is already attached.
+        """
+        if self._fold is not None and self._fold != fold:
+            raise ConfigurationError(
+                f"model {self.name!r} already folds as {self._fold.name!r} for another "
+                f"chain slot; one model has one set of instances, so two slots cannot fold "
+                f"it differently. Give them separate model entries"
+            )
+        self._fold = fold
+        # EVERY instance is offered it, then the answers are reduced. `any(generator)` stops
+        # at the first True and would leave the rest of this model's instances folding on the
+        # host -- half a model on each path, which nothing downstream could tell apart.
+        took = [instance.attach_fold(fold) for instance in self._instances]
+        return any(took)
 
     @property
     def statistics(self) -> ModelStatistics:
