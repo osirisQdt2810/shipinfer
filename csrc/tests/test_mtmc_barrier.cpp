@@ -495,6 +495,49 @@ namespace {
               "and the drain evicted nothing");
     }
 
+    void how_late_a_frame_arrived_is_recorded_and_bounded() {
+        // `late` says a frame missed its instant; this says by how much. A window too narrow
+        // and a chain too slow to reach one give the same `late` count and want opposite
+        // fixes, which is the distinction the barrier's reasons cannot draw on their own.
+        InstantBarrier barrier(unbounded(0.06, 1));
+        barrier.note_arrival_lag_us(1500);
+        barrier.note_arrival_lag_us(9000);
+
+        const std::vector<uint32_t> samples = barrier.arrival_lag_us();
+
+        check(samples.size() == 2 && samples[0] == 1500 && samples[1] == 9000,
+              "both samples are read back in order");
+        check(barrier.lag_samples_overwritten() == 0, "and nothing was overwritten");
+
+        std::vector<uint32_t> taken = barrier.arrival_lag_us();
+        taken.clear();
+        check(barrier.arrival_lag_us().size() == 2,
+              "the samples are a COPY: `percentile` reorders what it is given, and a reader "
+              "must not be able to reorder the barrier's own state by asking for them");
+    }
+
+    void the_lag_ring_wraps_rather_than_growing_or_stopping() {
+        // THE WHOLE RING, not a sample of it, because both halves of the bound are wrong in
+        // ways a two-sample test cannot see: an unbounded vector on a 24/7 shard, or a frozen
+        // distribution that reports the warm-up of a ten-minute run while the frame
+        // percentiles beside it cover all ten. `mtmc::kMaxLagSamples + 2` is a few ms of
+        // push_back.
+        InstantBarrier barrier(unbounded(0.06, 1));
+        for (size_t i = 0; i < mtmc::kMaxLagSamples + 2; ++i) {
+            barrier.note_arrival_lag_us(static_cast<uint32_t>(i));
+        }
+
+        const std::vector<uint32_t> samples = barrier.arrival_lag_us();
+
+        check(samples.size() == mtmc::kMaxLagSamples, "the ring does not grow past its bound");
+        check(barrier.lag_samples_overwritten() == 2, "and it says how often it wrapped");
+        // THE NEWEST TWO REPLACED THE OLDEST TWO, which is the half head truncation got
+        // backwards: 0 and 1 are gone and the last two samples are in their slots.
+        check(samples[0] == mtmc::kMaxLagSamples && samples[1] == mtmc::kMaxLagSamples + 1,
+              "the newest samples overwrote the oldest, so a long run reports its recent tail");
+        check(samples[2] == 2, "and everything between is untouched");
+    }
+
     void a_bound_the_chain_names_is_exact() {
         // Both directions, because a floor that silently raised an operator's number would
         // make the knob untestable -- including for the sweep that chose the default.
@@ -1132,6 +1175,8 @@ int main() {
     an_unnamed_bound_follows_the_fleet();
     a_fleet_larger_than_the_floor_evicts_nothing_it_is_still_filling();
     a_roster_smaller_than_the_traffic_does_not_shrink_the_bound();
+    how_late_a_frame_arrived_is_recorded_and_bounded();
+    the_lag_ring_wraps_rather_than_growing_or_stopping();
     a_bound_the_chain_names_is_exact();
     a_drain_does_not_evict_what_the_survivors_are_still_filling();
     at_most_workers_minus_one_ever_wait();

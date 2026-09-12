@@ -127,6 +127,12 @@ namespace shipinfer::mtmc {
     //: there, three times the knee.
     inline constexpr int kDefaultMaxInstants = 8;
 
+    //: How many arrival-lag samples one barrier keeps -- a RING, so a long run reports its
+    //: recent tail rather than freezing on the first few minutes. 200k is ~800 KB and about
+    //: three minutes of a 50-camera fleet; past it the oldest sample is overwritten and the
+    //: count of overwrites is kept, so a saturated barrier does not read like a quiet one.
+    inline constexpr size_t kMaxLagSamples = 200000;
+
     // One camera's contribution to an instant: who, and whatever the caller put in.
     //
     // `payload` is `shared_ptr<void>` on purpose. The barrier is pure and must not learn what
@@ -254,6 +260,42 @@ namespace shipinfer::mtmc {
         InstantSizes instant_sizes() const;
         std::map<std::string, uint64_t> frame_stats() const;
 
+        // doc: long why the lag is handed in rather than taken, and what it answers
+        //: HOW LATE A FRAME REACHES THIS BARRIER: microseconds between the stamp a frame was
+        //: CAPTURED at and the moment it was submitted. `late` says a frame missed its instant
+        //: and `window` says an instant ran out of time; neither says by how much, so neither
+        //: can tell a window that is too narrow from a chain that is too slow to reach it.
+        //:
+        //: HANDED IN, not measured here, and that is the whole reason this is two methods. The
+        //: capture stamp is a WALL time and this barrier's own clock is deliberately steady
+        //: (`clock_` defaults to `steady_seconds`, and ADR says why instants key on the wall
+        //: stamp while deadlines do not), so subtracting one from the other here would be
+        //: arithmetic across two clocks. The mtmc stage holds both and is the only place that
+        //: legitimately can.
+        //:
+        //: A RING, because a 24/7 server is not a benchmark and the OLDEST samples are the
+        //: least useful: past `kMaxLagSamples` the next sample overwrites the oldest, so a
+        //: ten-minute run reports its recent tail instead of its warm-up. Head truncation was
+        //: the first version and it froze the distribution at whatever the first three minutes
+        //: held -- while the frame percentiles printed beside it covered the whole run, so the
+        //: two numbers a reader compares would have spanned different windows.
+        //: `negative` says this sample was clamped: the frame arrived before its capture
+        //: stamp, so what it measures is the two clocks disagreeing and not a fast chain.
+        void note_arrival_lag_us(uint32_t lag_us, bool negative = false);
+        std::vector<uint32_t> arrival_lag_us() const;
+        //: How many samples have been overwritten. Non-zero says the ring wrapped, so the
+        //: percentiles above describe the last `kMaxLagSamples` frames and not the run.
+        uint64_t lag_samples_overwritten() const;
+        //: And how many arrived BEFORE they were captured, clamped to zero by the caller.
+        //: Non-zero says the server's wall clock and the source's disagree -- an NTP step or
+        //: a source stamping ahead -- and that the percentiles are pulled toward zero by it.
+        //: Counted rather than inferred: `backward` cannot see this. It compares a camera's
+        //: capture stamp against that camera's OWN history, both in the capture domain, so a
+        //: server clock that steps leaves every camera monotonic among itself and `backward`
+        //: at zero while every lag clamps to 0 -- a barrier every frame appears to reach
+        //: instantly, which is the inversion this whole measurement exists to prevent.
+        uint64_t lag_samples_negative() const;
+
         //: Declared cameras that have never sent a frame. EMPTY is the healthy answer, and a
         //: non-empty one is a configuration fault that is otherwise silent: announced cameras
         //: win over seen ones, so a roster naming cameras this fleet does not have makes
@@ -333,6 +375,13 @@ namespace shipinfer::mtmc {
         int max_instants_;
         std::shared_ptr<WaiterBudget> budget_;
         Clock clock_;
+        //: The arrival lag samples, and how many did not fit. Guarded by `lock_` like every
+        //: other counter here.
+        std::vector<uint32_t> arrival_lag_us_;
+        //: Where the next sample goes once the ring is full, and how often it has wrapped.
+        size_t lag_next_ = 0;
+        uint64_t lag_overwritten_ = 0;
+        uint64_t lag_negative_ = 0;
         OnEvent on_event_;
 
         mutable std::mutex lock_;

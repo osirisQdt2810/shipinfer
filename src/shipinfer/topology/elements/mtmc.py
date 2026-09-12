@@ -697,6 +697,12 @@ class ShipvisionMtmc(Element):
         camera_id = item.context.camera_id
         capture_s = self._capture_s(item)
         view = self._view(item, camera_id, capture_s, tracks)
+        # HOW LATE THIS FRAME IS: here, because only this place holds both stamps on one
+        # clock. CLAMPED AT ZERO AND COUNTED — a frame arriving before its own capture stamp
+        # is the two clocks disagreeing, and `backward` cannot see that: it compares a
+        # camera's stamps against its OWN history. See `note_arrival_lag_us`.
+        lag_us = (time.time() - capture_s) * 1e6
+        self._barrier.note_arrival_lag_us(int(max(0.0, lag_us)), negative=lag_us < 0.0)
         try:
             outcome = self._barrier.submit(
                 camera_id,

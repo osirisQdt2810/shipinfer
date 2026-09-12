@@ -5,6 +5,7 @@
 // this stage owns is reading each detection's track id and embedding out of the frame's
 // batches, handing its camera's rows to the barrier, and scattering the group's answer back
 // onto the detector's own indices.
+#include <chrono>
 #include <cstdio>
 #include <map>
 #include <memory>
@@ -98,7 +99,8 @@ namespace {
     }
 
     std::unique_ptr<FrameState> frame_with(const std::string& camera, int64_t frame_id,
-                                           std::vector<Detection> detections) {
+                                           std::vector<Detection> detections,
+                                           int64_t captured_unix_ns = 0) {
         FrameTag tag;
         tag.camera_id = camera;
         tag.frame_id = frame_id;
@@ -107,7 +109,12 @@ namespace {
         // CAPTURE (wall) clock, because the other plane keys the same barrier on
         // `captured_unix_ns` and two planes bucketing one clip differently is two different
         // sets of global ids.
-        tag.captured_unix_ns = 1'700'000'000'000'000'000LL + 1'000'000'000LL * frame_id;
+        // OVERRIDABLE, because the arrival-lag tests need a stamp near TODAY: this fixed
+        // 2023 epoch is ~2 years of microseconds from now, which saturates at `UINT32_MAX`
+        // and would make those tests pass for the wrong reason.
+        tag.captured_unix_ns = captured_unix_ns != 0
+                                   ? captured_unix_ns
+                                   : 1'700'000'000'000'000'000LL + 1'000'000'000LL * frame_id;
         auto state = std::make_unique<FrameState>(tag, 1080, 1920, 20.0f);
         state->set_detections(std::move(detections));
         state->set_detected(true);
@@ -220,6 +227,62 @@ namespace {
         check(tracker->seen.size() == 2, "both rows reached the tracker");
         check(out != nullptr && out->object_indices == std::vector<int>({0, 1}),
               "and both got ids, each from its own embedder");
+    }
+
+    void the_stage_hands_the_barrier_a_real_arrival_lag() {
+        // THE FIVE LINES THAT PRODUCE THE NUMBER, which `test_mtmc_barrier.cpp` cannot reach:
+        // it calls `note_arrival_lag_us` with a literal, so all of its assertions hold if this
+        // call site hands it nonsense. Swap `system_clock` for `steady_clock` here and the
+        // subtraction is hugely negative on any real host -- every sample clamps to 0 and the
+        // histogram reports a barrier every frame reaches instantly.
+        //
+        // A FRESH STAMP, not the fixture's fixed 2023 epoch: against today's wall clock that
+        // is ~2 years of microseconds and saturates at `UINT32_MAX`, which would make this
+        // test pass for the wrong reason.
+        auto barrier = std::make_shared<InstantBarrier>(options());
+        auto tracker = std::make_shared<ScriptedTracker>();
+        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker);
+        const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::system_clock::now().time_since_epoch())
+                                .count();
+        auto state = frame_with("cam0", 1, {box(0, 0, 0)}, now_ns - 50'000'000LL);
+        attach(*state, "track_out", 1, {7}, {});
+        attach(*state, "embed_out", 2, {}, {1.0f, 0.0f});
+
+        stage.run(*state);
+
+        const std::vector<uint32_t> samples = barrier->arrival_lag_us();
+        check(samples.size() == 1, "one frame, one sample");
+        // WIDE ON PURPOSE -- a wall clock and a real scheduler -- but a steady clock (clamped
+        // to 0) and a millisecond/microsecond mix-up (50 rather than 50 000) both miss it.
+        check(!samples.empty() && samples[0] >= 40'000 && samples[0] <= 10'000'000,
+              "~50 ms in microseconds, which neither a steady clock nor a unit slip gives");
+        check(barrier->lag_samples_negative() == 0, "and the clocks agree here");
+    }
+
+    void a_frame_stamped_in_the_future_is_clamped_and_counted() {
+        // `backward` cannot see this: it compares a camera's stamps against that camera's OWN
+        // history, so a stepped server clock leaves it at zero while every lag reads 0 -- a
+        // barrier every frame appears to reach at once, beside a large `late`, and the only
+        // reading available is "the window must be the lever", which is the inversion this
+        // measurement exists to prevent.
+        auto barrier = std::make_shared<InstantBarrier>(options());
+        auto tracker = std::make_shared<ScriptedTracker>();
+        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker);
+        const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::system_clock::now().time_since_epoch())
+                                .count();
+        auto state = frame_with("cam0", 1, {box(0, 0, 0)}, now_ns + 5'000'000'000LL);
+        attach(*state, "track_out", 1, {7}, {});
+        attach(*state, "embed_out", 2, {}, {1.0f, 0.0f});
+
+        stage.run(*state);
+
+        const std::vector<uint32_t> samples = barrier->arrival_lag_us();
+        check(samples.size() == 1 && samples[0] == 0, "clamped, not negative");
+        check(barrier->lag_samples_negative() == 1,
+              "and COUNTED, or a shard whose clock stepped reports p50 0 with nothing saying "
+              "why");
     }
 
     void a_camera_with_nothing_to_report_still_reports() {
@@ -385,6 +448,8 @@ int main() {
     an_untracked_row_is_passed_over_rather_than_given_somebody_elses_id();
     a_row_with_no_embedding_is_passed_over_too();
     a_row_is_found_in_whichever_embedder_holds_it();
+    the_stage_hands_the_barrier_a_real_arrival_lag();
+    a_frame_stamped_in_the_future_is_clamped_and_counted();
     a_camera_with_nothing_to_report_still_reports();
     the_answer_is_read_out_by_key_and_never_by_position();
     a_frame_with_no_capture_stamp_is_refused_rather_than_bucketed_at_zero();

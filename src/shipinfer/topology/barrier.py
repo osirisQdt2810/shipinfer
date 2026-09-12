@@ -63,6 +63,7 @@ __all__ = [
     "DROPPED_EXPIRED",
     "DROPPED_FAILED",
     "DROPPED_SHUTDOWN",
+    "MAX_LAG_SAMPLES",
     "MISSED_BACKWARD",
     "MISSED_DUPLICATE",
     "MISSED_LATE",
@@ -162,6 +163,10 @@ DEFAULT_SYNC_WINDOW_MS = 60.0
 #: instant open and seals more as it advances, so a constant below the fleet's size
 #: evicts buckets the group is still filling. Measured: `benchmarks/RESULTS.md`.
 DEFAULT_MAX_INSTANTS = 8
+
+#: How many arrival-lag samples one barrier keeps. Mirrors `kMaxLagSamples` on the C++
+#: side: ~800 KB, about an hour of one camera at 50 fps.
+MAX_LAG_SAMPLES = 200000
 
 
 class InstantSizes(NamedTuple):
@@ -402,6 +407,7 @@ class InstantBarrier:
 
     __slots__ = (
         "_announced",
+        "_arrival_lag_us",
         "_backward_run",
         "_buckets",
         "_budget",
@@ -415,6 +421,9 @@ class InstantBarrier:
         "_hooked",
         "_instant_counts",
         "_instants_ended",
+        "_lag_negative",
+        "_lag_next",
+        "_lag_overwritten",
         "_live_set",
         "_max_instants",
         "_newest_capture",
@@ -475,6 +484,13 @@ class InstantBarrier:
         #: late frame *late* rather than the first member of a brand-new instant.
         self._recent: OrderedDict[int, tuple[float, float]] = OrderedDict()
         self._recent_limit = max(8, self._max_instants * 4)
+        #: How late frames reached this barrier — :meth:`note_arrival_lag_us`. A RING,
+        #: because a long run's warm-up is the least useful part of it; the overwrite count
+        #: is kept so a wrapped barrier does not read like a quiet one.
+        self._arrival_lag_us: list[int] = []
+        self._lag_next = 0
+        self._lag_overwritten = 0
+        self._lag_negative = 0
         #: How much of the fleet each ended instant held — :attr:`instant_sizes`.
         self._cameras_held = 0
         self._instants_ended = 0
@@ -531,6 +547,53 @@ class InstantBarrier:
         """
         with self._cond:
             return self._live_set
+
+    def note_arrival_lag_us(self, lag_us: int, *, negative: bool = False) -> None:
+        """Record how late one frame was: microseconds from its capture stamp to its submit.
+
+        HANDED IN rather than measured here, and the C++ twin says the same. The capture
+        stamp is a wall time and this barrier's clock is deliberately steady, so subtracting
+        one from the other here would be arithmetic across two clocks; the mtmc element holds
+        both. ``late`` says a frame missed its instant, this says by how much — which is what
+        separates a window too narrow from a chain too slow to reach one.
+        """
+        with self._cond:
+            if negative:
+                self._lag_negative += 1
+            if len(self._arrival_lag_us) < MAX_LAG_SAMPLES:
+                self._arrival_lag_us.append(int(lag_us))
+                return
+            # WRAPS rather than stops. Keeping the first N froze the distribution on the
+            # warm-up of any run longer than the ring, while the frame percentiles printed
+            # beside it covered the whole run — two numbers over different windows.
+            self._arrival_lag_us[self._lag_next] = int(lag_us)
+            self._lag_next = (self._lag_next + 1) % MAX_LAG_SAMPLES
+            self._lag_overwritten += 1
+
+    @property
+    def arrival_lag_us(self) -> list[int]:
+        """A copy of the samples, because a percentile reorders what it is given."""
+        with self._cond:
+            return list(self._arrival_lag_us)
+
+    @property
+    def lag_samples_negative(self) -> int:
+        """How many samples arrived BEFORE they were captured and were clamped to zero.
+
+        Non-zero says this shard's wall clock and the sources' disagree — an NTP step, or a
+        source stamping ahead. Counted rather than inferred: ``backward`` compares a camera's
+        stamps against that camera's own history, so a stepped server clock leaves it at zero
+        while every lag reads 0, and the pair reads as a barrier every frame reaches at once.
+        """
+        with self._cond:
+            return self._lag_negative
+
+    @property
+    def lag_samples_overwritten(self) -> int:
+        """How many samples the ring has overwritten. Non-zero says the percentiles describe
+        the last :data:`MAX_LAG_SAMPLES` frames rather than the whole run."""
+        with self._cond:
+            return self._lag_overwritten
 
     @property
     def instant_sizes(self) -> InstantSizes:
