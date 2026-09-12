@@ -48,7 +48,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 from shipinfer.core.errors import ConfigurationError, ServerStateError
 
@@ -70,6 +70,7 @@ __all__ = [
     "InstantBarrier",
     "InstantEntry",
     "InstantOutcome",
+    "InstantSizes",
     "WaiterBudget",
 ]
 
@@ -161,6 +162,22 @@ DEFAULT_SYNC_WINDOW_MS = 60.0
 #: instant open and seals more as it advances, so a constant below the fleet's size
 #: evicts buckets the group is still filling. Measured: `benchmarks/RESULTS.md`.
 DEFAULT_MAX_INSTANTS = 8
+
+
+class InstantSizes(NamedTuple):
+    """How much of the fleet the barrier's ended instants held.
+
+    Named rather than a bare tuple so the two planes read alike — the C++ twin is a struct —
+    and so a caller cannot transpose ``cameras`` and ``instants``, which a plain tuple would
+    not catch.
+    """
+
+    #: Total cameras summed over every instant that ended, however it ended.
+    cameras: int
+    #: How many instants that was.
+    instants: int
+    #: The largest single instant's camera count.
+    largest: int
 
 
 class WaiterBudget:
@@ -388,6 +405,8 @@ class InstantBarrier:
         "_backward_run",
         "_buckets",
         "_budget",
+        "_cameras_held",
+        "_cameras_held_max",
         "_clock",
         "_closed",
         "_cond",
@@ -395,6 +414,7 @@ class InstantBarrier:
         "_frame_counts",
         "_hooked",
         "_instant_counts",
+        "_instants_ended",
         "_live_set",
         "_max_instants",
         "_newest_capture",
@@ -455,6 +475,10 @@ class InstantBarrier:
         #: late frame *late* rather than the first member of a brand-new instant.
         self._recent: OrderedDict[int, tuple[float, float]] = OrderedDict()
         self._recent_limit = max(8, self._max_instants * 4)
+        #: How much of the fleet each ended instant held — :attr:`instant_sizes`.
+        self._cameras_held = 0
+        self._instants_ended = 0
+        self._cameras_held_max = 0
         #: Cameras the runner announced through the lifecycle hooks.
         self._announced: set[str] = set()
         #: Cameras that have actually submitted a frame. Only consulted before the first
@@ -507,6 +531,19 @@ class InstantBarrier:
         """
         with self._cond:
             return self._live_set
+
+    @property
+    def instant_sizes(self) -> InstantSizes:
+        """How much of the fleet the ended instants held, over every one of them.
+
+        The number to read before touching ``sync_window_ms``: a group whose instants hold two
+        cameras of fifty is not synchronised, whatever its reasons say, and no cross-camera
+        association can form in an instant that holds one.
+        """
+        with self._cond:
+            return InstantSizes(
+                self._cameras_held, self._instants_ended, self._cameras_held_max
+            )
 
     @property
     def max_instants(self) -> int:
@@ -856,7 +893,15 @@ class InstantBarrier:
             self._on_event(reason)
 
     def _remember(self, bucket: _Bucket) -> None:
-        """Record a resolved instant's capture span so a frame inside it is late, not new."""
+        """Record a resolved instant's capture span, and how much of the fleet it held.
+
+        Every ended bucket passes here — closed, evicted, expired or shut down — which is why
+        the tally is in this method and not in :meth:`_close`.
+        """
+        held = len(bucket.reported)
+        self._cameras_held += held
+        self._instants_ended += 1
+        self._cameras_held_max = max(self._cameras_held_max, held)
         self._recent[bucket.instant] = (bucket.first, bucket.last)
         self._recent.move_to_end(bucket.instant)
         while len(self._recent) > self._recent_limit:
