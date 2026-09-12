@@ -359,3 +359,57 @@ class TestTheInTreeLaneAxis:
             build_csrc.pkg_config_flags(lane)
         assert "definitely-not-checked-out" in str(raised.value)
         assert "git submodule update --init" in str(raised.value), "the hint has to travel"
+
+    def test_a_machine_without_pkg_config_loses_the_lane_and_not_the_build(
+        self, build_csrc: ModuleType, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`subprocess.run` RAISES when the binary is absent rather than returning non-zero,
+        so this escaped the `SystemExit` every caller handles and killed the whole build.
+
+        Found in the bench image, which has no `pkg-config` -- so a full `build_csrc.py` had
+        never run inside the container the container rule sends every such build to. The
+        offline build is untouched: it enables no lane it was not asked for, so it never probes.
+        """
+        lane = next((n for n, s in build_csrc.EXTERNAL.items() if not s.include_root), None)
+        if lane is None:
+            pytest.skip("no pkg-config lane to check")
+
+        def absent(*args: object, **kwargs: object) -> None:
+            raise FileNotFoundError(2, "No such file or directory", "pkg-config")
+
+        monkeypatch.setattr(build_csrc.subprocess, "run", absent)
+        monkeypatch.setattr(build_csrc, "_PKG_CONFIG_CACHE", {})
+
+        with pytest.raises(SystemExit) as raised:
+            build_csrc.pkg_config_flags(lane)
+
+        assert "pkg-config is not installed" in str(raised.value), (
+            "the message has to name the missing TOOL: a reader told the package is "
+            "unresolvable goes and installs a -dev package they already have"
+        )
+        assert lane in str(raised.value), "and which lane it costs"
+
+    def test_the_full_build_leaves_that_lane_out_rather_than_dying(
+        self, build_csrc: ModuleType, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The half that matters, and the one a `SystemExit` alone does not prove: `main`'s
+        lane loop must actually take its warn-and-continue branch. A `FileNotFoundError`
+        reaching it is a traceback, not a build with fewer lanes in it."""
+
+        def absent(*args: object, **kwargs: object) -> None:
+            raise FileNotFoundError(2, "No such file or directory", "pkg-config")
+
+        monkeypatch.setattr(build_csrc.subprocess, "run", absent)
+        monkeypatch.setattr(build_csrc, "_PKG_CONFIG_CACHE", {})
+
+        available = set()
+        for lane in sorted(build_csrc.EXTERNAL):
+            try:
+                build_csrc.pkg_config_flags(lane)
+            except SystemExit:
+                continue
+            available.add(lane)
+
+        assert all(
+            build_csrc.EXTERNAL[lane].include_root for lane in available
+        ), "every pkg-config lane is unavailable here, and none of them raised something else"
