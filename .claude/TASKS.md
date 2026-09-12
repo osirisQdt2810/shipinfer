@@ -3079,10 +3079,16 @@ hook down, for when the operator asked to see something before it is executed.
       now survives an instant its camera did not report in and breaks when the camera WAS there
       without it, bounded by `max_absent_instants` (32, ~2 s at a 60 ms window) so a camera
       that goes away for good does not leave its streaks behind.
+      ROUND 1 CAME BACK BLOCKING and is FIXED at `0282ba3`: `present` was derived from the
+      observations, so a camera that reported an EMPTY VIEW left no trace and read as absent --
+      a single track flickering on/off reached `min_hits` without ever having two consecutive
+      sightings, and `max_absent_instants` cannot catch it because the counter resets on every
+      sighting. `filter` now takes `cameras` and the tracker passes `cluster.cameras`.
       THE SEQUENCE FROM HERE, and none of it is optional: (1) shipvision#16 merges; (2) bump
       `3rdparty/shipvision` in its own commit (ADR-010); (3) port the same rule to
       `csrc/shipinfer/pipeline/mtmc/gate.cpp`, which is this repository's twin and carries the
-      V88 sync rule; (4) re-emit the gate goldens (`benchmarks/parity/scenarios/gate`) and any
+      V88 sync rule -- and it must TAKE THE ROSTER from the start rather than re-derive it,
+      which is the round-1 defect above arriving pre-solved; (4) re-emit the gate goldens (`benchmarks/parity/scenarios/gate`) and any
       identity golden the change moves; (5) re-run the design load and compare admission and
       identities against 2.2% / 18-over-18. Only (5) answers whether the fix is the whole of it.
 
