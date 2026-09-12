@@ -608,6 +608,25 @@ of the frames (36 081 → 30 085) and 29% of p50 latency (259 → 334 ms). Wheth
 right one is a deployment's question, not a benchmark's — what this page can say is that it is a
 trade, with both sides measured.
 
+**And the gate is where the evidence actually goes.** One more arm, the default window and the
+reference's `min_hits` dropped from 3 to 1:
+
+| `min_hits` | offered | admitted | ids / tracks | frames accepted | frame p50 |
+|---|---|---|---|---|---|
+| **3** (production's default) | 90 265 | 1 987 (2.2%) | 18 / **18** | 36 081 | 259 ms |
+| 1 | 75 376 | **75 322 (99.9%)** | 23 / **190** | 34 419 | 282 ms |
+
+Read the last column of the ids pair, not the first. At the shipped defaults every identity
+holds **exactly one track** — 18 identities over 18 tracks is not cross-camera association, it
+is eighteen cameras each holding its own. With the gate open, 190 tracks resolve into 23
+identities: about eight tracks an identity, which is what the mtmc stage exists to produce.
+
+So `min_hits 3` is not merely conservative at this fleet size — it is **unreachable**. It counts
+three *consecutive* qualifying instants, a track can only qualify in an instant its camera is
+in, and a camera is in 24% of them. The gate's intent (three confirmations before a merge) needs
+a counter over the instants a camera *was* in; until it has one, the design load's identities are
+singletons whatever the window does.
+
 ## The verdict, and the one open question
 
 The ≥5× target needs a ratio to be against, and the four above give opposite answers. Absent

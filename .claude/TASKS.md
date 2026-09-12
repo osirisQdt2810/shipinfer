@@ -3052,11 +3052,21 @@ hook down, for when the operator asked to see something before it is executed.
       the first time it has been measured.
       SO THE WINDOW IS A REAL LEVER AND IT IS NOT FREE: 250 ms buys 18 -> 50 identities and
       costs 17% of the frames (36 081 -> 30 085) and 29% of p50 latency (259 -> 334 ms).
-      WHAT TO MEASURE NEXT, in this order: (a) `min_hits 1` at the default window, which
-      separates "the gate never accumulates" from "the appearance distance never matches" and
-      needs no upstream change; (b) the same window sweep at 12 cameras, to tell the fleet size
-      apart from the rate; (c) only then the reference change (`min_hits` over the instants a
-      camera WAS in), which is `shipvision`'s gate and the only free fix if (a) points at it.
+      (a) MEASURED, and it is decisive. `min_hits 1` at the default window: admission goes
+      2.2% -> **99.9%** (75 322 of 75 376) and the identities go 18 over 18 tracks to 23 over
+      **190**. Read the second number: at the shipped defaults every identity holds EXACTLY ONE
+      track, which is not cross-camera association at all -- it is eighteen cameras each holding
+      its own. With the gate open, 190 tracks resolve into 23 identities, about eight tracks
+      each, which is what the stage exists to produce. Cost: 34 419 frames against 36 081 and
+      282 ms p50 against 259.
+      SO THE GATE IS THE VARIABLE, and `min_hits 3` is not conservative at this fleet size, it
+      is UNREACHABLE: three consecutive qualifying instants, a track qualifying only in an
+      instant its camera is in, a camera in 24% of them.
+      WHAT REMAINS: (b) the reference change -- `min_hits` counting the instants a camera WAS
+      in rather than all instants -- which is `shipvision`'s gate and the only fix that costs
+      neither latency nor frames; and (c) the same sweep at 12 cameras, to tell the fleet size
+      apart from the rate. (b) is an upstream PR against `3rdparty/shipvision` and needs its own
+      golden re-emission here (`MTMC-ONE-CAMERA-TWICE-IN-A-CONTESTED-CLUSTER` is the template).
 
 - [ ] MTMC-A-DRAIN-CAN-EVICT-WHAT-THE-SURVIVORS-ARE-FILLING · FOUND by #238's review, and it
       is the other side of the derived bound. `drop_camera` recomputes the bound DOWNWARD, so
