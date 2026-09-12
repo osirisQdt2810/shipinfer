@@ -3445,6 +3445,22 @@ hook down, for when the operator asked to see something before it is executed.
       is left as the review left it -- defensible as written, because the build step refuses
       outright when the submodule is absent, so the count is not what proves the lane compiled.
 
+- [ ] CSRC-BUILD-CRASHES-WITHOUT-PKG-CONFIG · FOUND 12 Sep while trying to run the GPU-tier
+      C++ tests in the container for #249. `python scripts/build_csrc.py` (no `--offline`)
+      probes each external lane with `subprocess.run(["pkg-config", ...])` and catches only
+      `SystemExit`, so on a machine with no `pkg-config` BINARY the probe raises
+      `FileNotFoundError` and the whole build dies before compiling anything -- instead of
+      taking the "left out with a loud warning" path the comment five lines above it describes.
+      THE BENCH IMAGE IS SUCH A MACHINE: `deploy/rootless/run.sh bash -c 'command -v
+      pkg-config'` answers ABSENT, so a full C++ build has never worked inside the container
+      the container rule sends every accelerator build to. The offline build is unaffected --
+      it enables no lane it was not asked for, so it never probes.
+      THE FIX is four lines in `pkg_config_flags`: catch `FileNotFoundError` and raise the same
+      `SystemExit` the unresolvable-package path raises, naming the missing tool rather than
+      the missing package. A test can pin it by putting an empty directory first on `PATH`.
+      WORTH CHECKING IN THE SAME PASS whether the image should simply have `pkg-config`; the
+      answer is probably both, because the crash is wrong on any host and not only this one.
+
 - [ ] CI-WORKFLOW-PRS-MAY-BE-REVIEWABLE · OBSERVED 12 Sep on #236: the Claude review job ran to
       completion on a PR that edits `.github/workflows/**` and returned APPROVE, which is not
       what CLAUDE.md's "known permanent exception" predicts. One observation is not a rule, and
