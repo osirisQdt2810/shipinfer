@@ -241,6 +241,17 @@ namespace shipinfer::mtmc {
         //: The bound in force now -- the chain's number, or the live set against the floor.
         int max_instants() const;
         std::map<std::string, uint64_t> instant_stats() const;
+        //: How much of the fleet an instant actually held when it ended: the total cameras
+        //: over every instant that left the map, how many instants that was, and the largest
+        //: one. The number to read before touching `sync_window_ms`: a group whose instants
+        //: hold two cameras of fifty is not synchronised, whatever its reasons say, and no
+        //: cross-camera association can form in an instant that holds one.
+        struct InstantSizes {
+            uint64_t cameras = 0;
+            uint64_t instants = 0;
+            uint64_t largest = 0;
+        };
+        InstantSizes instant_sizes() const;
         std::map<std::string, uint64_t> frame_stats() const;
 
         //: Declared cameras that have never sent a frame. EMPTY is the healthy answer, and a
@@ -341,6 +352,10 @@ namespace shipinfer::mtmc {
         //: Resolved instants' capture spans, so a frame inside one is late rather than new.
         std::map<int64_t, std::pair<double, double>> recent_;
         size_t recent_limit_;
+        //: `instant_sizes`, tallied in `remember` -- the one place every ended bucket passes.
+        uint64_t cameras_held_ = 0;
+        uint64_t instants_ended_ = 0;
+        uint64_t cameras_held_max_ = 0;
         //: Each camera's newest capture stamp, and how many frames in a row it has refused
         //: against it. Both bounded by the fleet and erased with the camera.
         std::map<std::string, double> newest_capture_;

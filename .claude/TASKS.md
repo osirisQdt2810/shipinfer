@@ -3022,6 +3022,92 @@ hook down, for when the operator asked to see something before it is executed.
       not at all within a window of a drop), which is a small change and an easy test; what is
       missing is a reason to make it, i.e. a deployment that drains a group while it runs.
 
+- [~] MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD · MEASURED 12 Sep with a new instrument and
+      ONE HYPOTHESIS REFUTED BY THE SECOND MEASUREMENT, which is why both are here.
+      `mtmc_instant_cameras` says how much of the fleet an instant held when it ended -- the
+      number `window` and `advanced` cannot give. The fleet-size contrast:
+
+      | fleet | cameras an instant held (mean / largest) | offered | admitted | ids / tracks |
+      |---|---|---|---|---|
+      | 50 x 20 fps, 92 workers | **11.8 / 47** of fifty (24%) | 90 265 | **1 987 (2.2%)** | 18 / 18 |
+      | 12 x 20 fps, 24 workers | **10.5 / 12** of twelve (88%) | 42 067 | **31 440 (74.7%)** | 13 / 72 |
+
+      An instant holds about ELEVEN cameras whatever the fleet size, so the fleet grew and the
+      window did not. The arithmetic that fits THIS pair: `min_hits` counts consecutive
+      qualifying instants and a track can only qualify in an instant its camera is in, so
+      0.24^3 = 1.4% against 0.88^3 = 68% -- close to the measured 2.2% and 74.7%.
+      THE WINDOW SWEEP REFUTES THAT AS THE WHOLE STORY, same fleet, same load, window varied:
+
+      | sync_window_ms | cameras / instant | instants | admitted | ids / tracks | frames | p50 |
+      |---|---|---|---|---|---|---|
+      | 60 (default) | 11.8 | 1 951 | 1 987 | 18 / 18 | 36 081 | 259 ms |
+      | 120 | 9.4 | 3 067 | 898 | 42 / 67 | 33 272 | 309 ms |
+      | 250 | 12.3 | 2 335 | 3 512 | **50 / 77** | 30 085 | 334 ms |
+
+      Cameras per instant barely moves while admission goes 1 987 -> 898 -> 3 512 and identities
+      go 18 -> 42 -> 50, so cameras-per-instant is NOT the variable identity tracks. What does
+      move is the close REASON: `advanced` is 21% of instants at 60 ms and 85% at 250 ms,
+      because a window wider than the frame period (50 ms at 20 fps) puts a camera's next frame
+      inside its own bucket's span -- which `barrier.h`'s own docstring predicted and this is
+      the first time it has been measured.
+      SO THE WINDOW IS A REAL LEVER AND IT IS NOT FREE: 250 ms buys 18 -> 50 identities and
+      costs 17% of the frames (36 081 -> 30 085) and 29% of p50 latency (259 -> 334 ms).
+      WHAT TO MEASURE NEXT, in this order: (a) `min_hits 1` at the default window, which
+      separates "the gate never accumulates" from "the appearance distance never matches" and
+      needs no upstream change; (b) the same window sweep at 12 cameras, to tell the fleet size
+      apart from the rate; (c) only then the reference change (`min_hits` over the instants a
+      camera WAS in), which is `shipvision`'s gate and the only free fix if (a) points at it.
+
+- [ ] MTMC-A-DRAIN-CAN-EVICT-WHAT-THE-SURVIVORS-ARE-FILLING · FOUND by #238's review, and it
+      is the other side of the derived bound. `drop_camera` recomputes the bound DOWNWARD, so
+      tearing a 50-camera group down to 8 drops it to 8 while up to 50 buckets are open -- the
+      next `open()` then evicts down to 7 in one `while` pass and marks `evicted` on buckets
+      the surviving cameras are still filling.
+      SELF-LIMITING, which is why it is a note and not a defect: those buckets retire on their
+      own deadlines one window later, so the burst needs the drop and the submit inside the
+      same 60 ms. It has never been seen -- no run here shrinks a fleet mid-flight.
+      THE FIX WHEN IT IS NEEDED is to let the bound fall only as fast as buckets retire (or
+      not at all within a window of a drop), which is a small change and an easy test; what is
+      missing is a reason to make it, i.e. a deployment that drains a group while it runs.
+
+- [~] MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD · MEASURED 12 Sep, and the mechanism is
+      arithmetic. The new `mtmc_instant_cameras` counter says how much of the fleet an instant
+      actually held when it ended -- the number `window` and `advanced` cannot give -- and it
+      is an ABSOLUTE number rather than a fraction:
+
+      | fleet | cameras an instant held (mean / largest) | offered | admitted | ids / tracks |
+      |---|---|---|---|---|
+      | 50 x 20 fps, 92 workers | **11.8 / 47** of fifty (24%) | 90 265 | **1 987 (2.2%)** | 18 / 18 |
+      | 12 x 20 fps, 24 workers | **10.5 / 12** of twelve (88%) | 42 067 | **31 440 (74.7%)** | 13 / 72 |
+
+      THE MECHANISM: the gate's `min_hits` counts CONSECUTIVE qualifying instants, and a track
+      can only qualify in an instant its camera is in. At 24% that is 0.24^3 = 1.4% of the time;
+      at 88% it is 68%. The measured admission rates are 2.2% and 74.7%. That is the whole of
+      the "erratic identity" -- not noise, not the clusterer, and no longer the instant bound.
+      WHAT DECIDES IT is therefore how many cameras reach one instant, which is the arrival
+      spread against `sync_window_ms` (60 ms): eleven cameras land inside a window whatever the
+      fleet size, so the fleet grew and the window did not.
+      THREE LEVERS, and they are not equivalent: (a) a wider `sync_window_ms`, which buys
+      cameras per instant and pays a window of latency per frame; (b) `min_hits` counting the
+      instants a camera WAS IN rather than all instants, which is a reference change
+      (`shipvision`'s gate) and the only one that costs nothing; (c) less reordering ahead of
+      the barrier, which is `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY`.
+      MEASURE (a) FIRST, because it needs no upstream change: sweep `sync_window_ms` 60 / 120 /
+      250 at the design load and read `mtmc_instant_cameras`, `admitted`, the identities, and
+      `frame_us_p50` -- the last one is what the window costs.
+
+- [ ] MTMC-A-DRAIN-CAN-EVICT-WHAT-THE-SURVIVORS-ARE-FILLING · FOUND by #238's review, and it
+      is the other side of the derived bound. `drop_camera` recomputes the bound DOWNWARD, so
+      tearing a 50-camera group down to 8 drops it to 8 while up to 50 buckets are open -- the
+      next `open()` then evicts down to 7 in one `while` pass and marks `evicted` on buckets
+      the surviving cameras are still filling.
+      SELF-LIMITING, which is why it is a note and not a defect: those buckets retire on their
+      own deadlines one window later, so the burst needs the drop and the submit inside the
+      same 60 ms. It has never been seen -- no run here shrinks a fleet mid-flight.
+      THE FIX WHEN IT IS NEEDED is to let the bound fall only as fast as buckets retire (or
+      not at all within a window of a drop), which is a small change and an easy test; what is
+      missing is a reason to make it, i.e. a deployment that drains a group while it runs.
+
 - [ ] MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD · FOUND 11 Sep while closing
       `MTMC-EIGHT-OPEN-INSTANTS-IS-A-SMALL-GROUP'S-BOUND`, and it is what that item uncovered
       rather than caused. With eviction gone, the design load (50 cameras x 20 fps, pan

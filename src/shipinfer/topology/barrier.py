@@ -401,6 +401,9 @@ class InstantBarrier:
         "_next_instant",
         "_on_event",
         "_recent",
+        "_cameras_held",
+        "_cameras_held_max",
+        "_instants_ended",
         "_recent_limit",
         "_seen",
         "_waiters",
@@ -455,6 +458,10 @@ class InstantBarrier:
         #: late frame *late* rather than the first member of a brand-new instant.
         self._recent: OrderedDict[int, tuple[float, float]] = OrderedDict()
         self._recent_limit = max(8, self._max_instants * 4)
+        #: How much of the fleet each ended instant held — :attr:`instant_sizes`.
+        self._cameras_held = 0
+        self._instants_ended = 0
+        self._cameras_held_max = 0
         #: Cameras the runner announced through the lifecycle hooks.
         self._announced: set[str] = set()
         #: Cameras that have actually submitted a frame. Only consulted before the first
@@ -507,6 +514,17 @@ class InstantBarrier:
         """
         with self._cond:
             return self._live_set
+
+    @property
+    def instant_sizes(self) -> tuple[int, int, int]:
+        """``(cameras, instants, largest)`` over every instant that ended.
+
+        The number to read before touching ``sync_window_ms``: a group whose instants hold two
+        cameras of fifty is not synchronised, whatever its reasons say, and no cross-camera
+        association can form in an instant that holds one.
+        """
+        with self._cond:
+            return (self._cameras_held, self._instants_ended, self._cameras_held_max)
 
     @property
     def max_instants(self) -> int:
@@ -856,7 +874,15 @@ class InstantBarrier:
             self._on_event(reason)
 
     def _remember(self, bucket: _Bucket) -> None:
-        """Record a resolved instant's capture span so a frame inside it is late, not new."""
+        """Record a resolved instant's capture span, and how much of the fleet it held.
+
+        Every ended bucket passes here — closed, evicted, expired or shut down — which is why
+        the tally is in this method and not in :meth:`_close`.
+        """
+        held = len(bucket.reported)
+        self._cameras_held += held
+        self._instants_ended += 1
+        self._cameras_held_max = max(self._cameras_held_max, held)
         self._recent[bucket.instant] = (bucket.first, bucket.last)
         self._recent.move_to_end(bucket.instant)
         while len(self._recent) > self._recent_limit:

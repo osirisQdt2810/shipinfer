@@ -992,6 +992,16 @@ int main(int argc, char** argv) {
                 // count is non-zero is read against this number.
                 std::cout << "mtmc_max_instants " << slot << " " << barrier->max_instants()
                           << "\n";
+                // HOW MUCH OF THE FLEET AN INSTANT HELD, which is the number the reasons below
+                // cannot give: `window` says an instant ran out of time, not how many cameras
+                // were in it when it did, and a cross-camera association over one camera is
+                // not one. Mean and largest, over every instant that ended.
+                const mtmc::InstantBarrier::InstantSizes sizes = barrier->instant_sizes();
+                std::cout << "mtmc_instant_cameras " << slot << " "
+                          << (sizes.instants == 0
+                                  ? 0.0
+                                  : static_cast<double>(sizes.cameras) / sizes.instants)
+                          << " largest " << sizes.largest << " over " << sizes.instants << "\n";
                 for (const auto& [reason, count] : barrier->instant_stats()) {
                     std::cout << "mtmc_instants " << slot << " " << reason << " " << count
                               << "\n";
