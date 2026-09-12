@@ -2909,6 +2909,20 @@ hook down, for when the operator asked to see something before it is executed.
       measure the pair: host cores at 240 img/s (4.55 today) and p50/p99 frame latency.
       NOTE the same pattern sits in `DetectStage::do_run`, which calls `scratch_.synchronise()`
       after the letterbox kernel before it even enqueues inference.
+      RE-PRICED 12 Sep, BEFORE BUILDING IT, because the headline number has the wrong
+      denominator: 32.2% is of CUDA API TIME, and what decides this item is the sync's share of
+      an instance thread's WALL time. From the profile's own numbers -- 9.64 s of
+      `cudaStreamSynchronize` over a 20 s run -- spread across the 28 instance threads a design-
+      load run reports, that is 0.34 s each, under 2% of each thread's wall. The same run's
+      threads are 42% busy on CPU (542 s over 46 s wall, 28 threads) while `per_device_busy_pct`
+      says the segmenter's instances are ~116% occupied, so most of the gap is real work and
+      queue wait rather than blocked sync.
+      SO MEASURE THE SHARE FIRST, and only then build the ring: one nsys run at the DESIGN load
+      (`--wait=primary`, the leak that cost a container 8 hours) reading `cuda_api_sum` for
+      `cudaStreamSynchronize` against the instance threads' wall time from `host_cpu.py`. If it
+      is 2%, the ring buys 2% and costs ~1 GB of VRAM and the most delicate restructuring in
+      this plane; if the design load is different from the 12-camera profile, that number is the
+      justification this item currently lacks.
       WHAT THE FIX ACTUALLY COSTS, worked out 12 Sep before writing any of it: an event and a
       completion queue are NOT enough on their own, because `TrtInstance`'s output buffers are
       one set per instance. Letting the thread enqueue batch N+1 while N is still in flight
