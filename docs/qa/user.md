@@ -1215,6 +1215,68 @@ WHAT WAS IN FLIGHT, so nothing is lost: #236's blocking finding is fixed and reb
 fix is committed on `fix/a-drain-cannot-evict-what-the-survivors-are-filling` and unpushed.
 Nothing is mid-write and no run holds a GPU.
 
+### V171 — 12 Sep. Why is `ducdam-2002` a contributor on shipvision
+
+> tại sao lại có https://github.com/ducdam-2002 gì trong contributor nào ở đây trong shipvision đây? đến từ commit nào và từ bao giờ vậy
+
+Two commits, `1930d16` and `5a2170f`, both 27 Aug 2026, authored **and** committed as
+`osirisQdt2810 <duc.dam@moreh.com.vn>`. GitHub has that address on the `ducdam-2002`
+account. They lived only on the stale head of shipvision PR #12 -- but that is not what
+listed the account. GitHub's squash of #12 folded the branch's second author into the merge
+message as `Co-authored-by:`, and that commit, `90b0c41`, was on **main**. The contributor
+graph reads the default branch *including* co-author trailers, so deleting the branch alone
+would have changed nothing.
+
+### V172 — 12 Sep. Can it be removed from the remote
+
+> có cách nào để xóa đi trên remote được không?
+
+Yes, and without deleting the repository. See V175 for what was done.
+
+### V173 — 12 Sep. Willing to go as far as deleting the repo
+
+> nếu cần thiết, tôi có thể xóa remote repo đi và sau đó tạo lại repo mới, làm mọi cách sđể xoas contributors này đi
+
+Offered as the nuclear option. It was not needed: the surgical route removed the
+attribution and kept every PR, issue and review.
+
+### V174 — 12 Sep. Why does the commit say Đức Đàm when I was the one pushing
+
+> nhưng mà tôi có 1 thắc mắc như sau: tại sao tôi chỉ dùng tài khoản claude của người khác, của ducdam, mà lúc push lên vẫn là đức đàm, rõ ràng tôi mới là người push mà? ngoài ra người đó - ducdam có biết là mình có contribute vào khjông
+
+Git stores **author** and **committer** inside the commit; the **pusher** is not stored at
+all, it is just the key that authenticated the transport. GitHub displays the author and
+links it to whichever account has that email verified. The Claude account plays no part --
+Claude Code runs `git commit`, and git reads `user.email` from the repo config then
+`~/.gitconfig`. Working on that person's machine, or in a container built from their home
+directory, stamps their identity on every commit regardless of whose subscription or whose
+SSH key was used. Both checkouts here are already
+`152402665+osirisQdt2810@users.noreply.github.com` with no global fallback, so it cannot
+recur from this box. And yes, it was visible to them: shipvision is public, so the commits
+sat on that account's public contribution graph for 27 Aug -- though GitHub never emails
+about an attribution, so there was no active notification.
+
+### V175 — 12 Sep. Remove the contributor, by whatever means
+
+> sau khi trả lời câu hỏi, bạn hãy làm mọi thứ để xóa đi được contributor ducdam đi nhé
+
+Done, without deleting the repository. `90b0c41`'s message was amended to drop the trailer
+and the three commits above it replayed, so shipvision main went `5a5359a` -> `05ea75b`;
+proof it is a message-only change is that both pins name the same tree,
+`f0deadeb8156bbf42c206abd6a847a57b6fd81e8`, with the same 15 commits. Then `main` and PR
+#16's branch were force-pushed, and the three stale squash-merged branches deleted. Scan of
+all 16 remaining remote branches: **0 occurrences**, and the contributors API now returns
+`osirisQdt2810` alone with 15 contributions. shipinfer's pin was dangling after that, fixed
+in #246. One honest limit, stated at the time: GitHub keeps `refs/pull/12/head` forever, so
+the two original commits stay visible on PR #12's Commits tab; that ref does not feed the
+contributor graph, and only deleting the repository would remove it.
+
+### V176 — 12 Sep. Then carry on with the tasks
+
+> sau khi clean xong thì tiếp tục tassk nhé
+
+The cleanup was an interruption, not a new destination. Back to `.claude/TASKS.md`.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
