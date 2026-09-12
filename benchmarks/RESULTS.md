@@ -796,8 +796,10 @@ Here is that sweep. `queue_rejected` is **0** on every arm, so nothing is being 
 does not print — they are in the log.
 
 **The reordering is real and it is negligible.** Untracked rises about 3–4× from 24 workers to
-92 — the effect the item describes — on a base of one frame in fifteen hundred. Admission,
-identities and frames accepted do not move at all.
+92 — the effect the item describes — on a base of one frame in fifteen hundred. Admission and
+frames accepted do not move at all; the identity count moves once, 96 tracks to 91 on the
+repeat arm, which is run-to-run variation at a constant 17 identities rather than a trend —
+the 92 arm itself gives 96.
 
 **So the 37.3% was the rate, not the worker count**, which is what the item suspected of its own
 rows and could not prove without this arm. Affinity trades load balance for ordering, and load

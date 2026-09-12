@@ -2851,13 +2851,13 @@ hook down, for when the operator asked to see something before it is executed.
       camera), so 17-41% of a camera's frames reach a tracker and a track cannot be present in
       three CONSECUTIVE instants. So affinity's worth has to be measured as admission at a load
       the queue does not decimate -- 12 x 20 fps with workers swept -- and not from these rows.
-      THAT SWEEP IS DONE, 12 Sep, and it says DO NOT BUILD IT. 12 x 20 fps with
-      `queue_rejected` 0 on every arm: untracked 12 / 13 / 36 frames at 24 / 48 / 92 workers --
-      0.07% / 0.08% / 0.22%, and 45 (0.27%) on a repeat of the 92 arm. Admission is 89.9% and
-      identities 17 over 96 at EVERY worker count; frames accepted do not move.
-      RE-MEASURED 12 Sep for #256 r2, because the original logs no longer existed and this
-      item's own thesis is that a number with no raw output gets struck. Four arms, one
-      variable, `queue_rejected 0` and `frames_dropped 0` on every one
+      THAT SWEEP IS DONE, 12 Sep, and it says DO NOT BUILD IT. Its first run's figures are
+      NOT repeated here on purpose: their logs no longer existed, this item's own thesis is
+      that a number with no raw output gets struck, and a superseded table left standing beside
+      its replacement is two answers to one measurement (#256 r3 -- it also made "identities 17
+      over 96 at EVERY worker count" false, since the repeat arm gives 17/91). The figures
+      below are the only ones, re-measured 12 Sep with the logs kept. Four arms, one variable,
+      `queue_rejected 0` and `frames_dropped 0` on every one
       (`.artifacts/cpp/aff{24,48,92,92b}.log`):
         24 workers: 12 untracked of 16 730 (0.07%), 66 446/73 844 admitted, ids 17/96
         48 workers: 23 untracked of 16 746 (0.14%), 66 505/73 924 admitted, ids 17/96
