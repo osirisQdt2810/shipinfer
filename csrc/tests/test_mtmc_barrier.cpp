@@ -467,6 +467,34 @@ namespace {
               "and nothing was evicted: eviction is for a stale clock, not for a fleet");
     }
 
+    void a_drain_does_not_evict_what_the_survivors_are_still_filling() {
+        // `drop_camera` recomputes the bound DOWNWARD, so draining a group would take it under
+        // the buckets the surviving cameras are still filling -- and the next `open()` evicts
+        // them in one `while` pass, marking `evicted` on instants doing nothing wrong.
+        // Thirteen announced against twelve reporting, so `evict`'s `>=` does not fire before
+        // the drain under test.
+        InstantBarrier barrier(unbounded(0.06, 1));
+        barrier.camera_added("cam-absent");
+        for (int camera = 0; camera < 12; ++camera) {
+            barrier.camera_added("cam" + std::to_string(camera));
+        }
+        for (int camera = 0; camera < 12; ++camera) {
+            barrier.submit("cam" + std::to_string(camera), 100.0 + camera, payload_of("x"),
+                           kJoin);
+        }
+        check(barrier.open_instants() == 12, "twelve instants are open before the drain");
+
+        for (int camera = 0; camera < 8; ++camera) {
+            barrier.drop_camera("cam" + std::to_string(camera));
+        }
+        check(barrier.max_instants() >= 12, "the bound does not fall under what is open");
+
+        barrier.submit("cam11", 200.0, payload_of("y"), kJoin);
+
+        check(barrier.instant_stats().count(mtmc::kDroppedEvicted) == 0,
+              "and the drain evicted nothing");
+    }
+
     void a_bound_the_chain_names_is_exact() {
         // Both directions, because a floor that silently raised an operator's number would
         // make the knob untestable -- including for the sweep that chose the default.
@@ -1105,6 +1133,7 @@ int main() {
     a_fleet_larger_than_the_floor_evicts_nothing_it_is_still_filling();
     a_roster_smaller_than_the_traffic_does_not_shrink_the_bound();
     a_bound_the_chain_names_is_exact();
+    a_drain_does_not_evict_what_the_survivors_are_still_filling();
     at_most_workers_minus_one_ever_wait();
     a_starved_frame_still_contributes_its_payload_to_the_instant();
     a_barrier_nobody_announced_learns_its_group_from_traffic();

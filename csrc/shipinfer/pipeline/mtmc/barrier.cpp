@@ -161,6 +161,11 @@ namespace shipinfer::mtmc {
         std::set<std::string> fleet = announced_;
         fleet.insert(seen_.begin(), seen_.end());
         max_instants_ = std::max<int>(kDefaultMaxInstants, static_cast<int>(fleet.size()));
+        // AND NEVER UNDER WHAT IS OPEN: a drain recomputes downward, so the next `open()`
+        // would evict buckets the SURVIVING cameras are still filling. `+ 1` because `evict`
+        // is `>=`. A snapshot taken when the fleet changes, not a ratchet: it falls with the
+        // map as those buckets retire on their own deadlines.
+        max_instants_ = std::max<int>(max_instants_, static_cast<int>(buckets_.size()) + 1);
         recent_limit_ = static_cast<size_t>(std::max(8, max_instants_ * 4));
     }
 

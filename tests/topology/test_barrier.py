@@ -504,6 +504,30 @@ class TestTheBucketsAreBounded:
         assert held.open_instants == 12
         assert DROPPED_EVICTED not in held.instant_stats()
 
+    def test_a_drain_does_not_evict_what_the_survivors_are_still_filling(self) -> None:
+        """`drop_camera` recomputes the bound DOWNWARD, so draining a group would take it under
+        the buckets the surviving cameras are still filling — and the next `_open` evicts them
+        in one pass, marking `evicted` on instants that were doing nothing wrong. Eviction is
+        for a stale clock, and a drain is not one."""
+        # A narrow window so each capture below is its OWN instant: the fixture's default is
+        # 30 s, which would put all twelve in one bucket and test nothing about a drain.
+        held = barrier(sync_window_s=0.06, workers=1)
+        # Thirteen announced and twelve reporting, so the bound (13) is above what is open
+        # (12) and `_evict`'s `>=` does not fire before the drain under test.
+        held.camera_added("cam-absent")
+        for index in range(12):
+            held.camera_added(f"cam-{index}")
+        for index in range(12):
+            held.submit(f"cam-{index}", 100.0 + index, "p", associate=flat)
+        assert held.open_instants == 12
+
+        for index in range(8):
+            held.drop_camera(f"cam-{index}")
+
+        assert held.max_instants >= 12, "the bound does not fall under what is open"
+        held.submit("cam-11", 200.0, "p", associate=flat)
+        assert DROPPED_EVICTED not in held.instant_stats(), "and nothing was evicted"
+
     @pytest.mark.parametrize("named", [3, 64])
     def test_a_bound_the_chain_names_is_exact(self, named: int) -> None:
         """Both directions. A floor that silently raised an operator's number would make

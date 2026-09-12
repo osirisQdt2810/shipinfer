@@ -819,6 +819,10 @@ class InstantBarrier:
         # an instant to be complete, which is a roster decision; the bound answers how many
         # instants can legitimately be open, which is a fact about traffic.
         self._max_instants = max(DEFAULT_MAX_INSTANTS, len(self._announced | self._seen))
+        # And never under what is open: a drain recomputes downward, so the next `_open` would
+        # evict buckets the SURVIVING cameras are still filling. `+ 1` because `_evict` is `>=`.
+        # A snapshot taken when the fleet changes, not a ratchet: it falls as buckets retire.
+        self._max_instants = max(self._max_instants, len(self._buckets) + 1)
         self._recent_limit = max(8, self._max_instants * 4)
 
     def _match(self, capture_s: float) -> _Bucket | None:
