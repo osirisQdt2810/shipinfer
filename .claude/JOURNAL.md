@@ -1,6 +1,46 @@
 # Journal
 
 
+## 12 Sep (later) — the gate's fix, measured, and a stray contributor removed
+
+**The loop closed.** Yesterday's third turn ended with a diagnosis and no fix: `min_hits` counts
+CONSECUTIVE instants, a camera is in 24% of them at fifty cameras, so the gate admitted 2.2% and
+every identity held exactly one track. Today that went upstream (shipvision#16), was ported with
+the roster it needs (#249), and was re-measured at the design load. **Admission 2.2% -> 84.2%
+and 83.8%; identities 18 over 18 tracks -> 16 over 167 and 22 over 193.** Cameras per instant is
+the control and did not move, so the jump is the counting rule. Unlike the window lever it cost
+neither latency nor frames -- which is exactly what the ledger line predicted when it said (b)
+was the fix worth having.
+
+**Two harness gaps, the same shape, one hour apart.** Porting the gate, re-emitting its golden
+changed nothing: the scenario format had no way to write "a camera reported and saw nothing", so
+both planes would have agreed while differing. Porting the identity fix (#251), re-emitting THAT
+golden changed nothing either: no committed scenario had a contested camera slot. Both formats
+now express the case and both goldens separate it. A golden that does not move after a
+behaviour change is not reassurance; it is a question about the scenarios.
+
+**A probe whose build is hidden is not a probe.** The stage test's new roster assertion looked
+exercised -- the probe passed, which should have been impossible. The rebuild had failed and I
+had sent its output to `/dev/null`, so a stale binary reported green. Visible build, and the
+probe fails for the right reason.
+
+**Also today.** `ducdam-2002` appeared in shipvision's contributor list; the cause was not the
+two commits authored with that email on a stale branch but a `Co-authored-by:` trailer GitHub's
+squash had written into a commit on `main`. Rewritten and force-pushed, stale branches deleted,
+0 occurrences across 16 remote refs, and the contributors API now returns one account. Git
+stores author and committer; the pusher is not in the commit at all, and the Claude account sets
+no identity -- `user.email` on whatever machine ran `git commit` does.
+
+Merged: the drain fix (#247), the derived CI job set (#248), the gate port (#249), a missing
+`pkg-config` becoming a missing lane rather than a dead build (#250), the identity port (#251).
+Open: the blocking-sync default (#214), which is the operator's to merge.
+
+**And an environment trap worth naming, because it cost a confusing test run.** The dev venv
+installs `shipvision` editable against the MAIN checkout, so a worktree's submodule bump is
+invisible to pytest: a branch pinning `d247d5f` ran its parity tests against `9c53df1` and four
+of them failed for a reason that had nothing to do with the branch. `git submodule update` in
+the main checkout after every bump, or `PYTHONPATH` at the worktree's copy.
+
 ## 12 Sep — the optimisation loop, twice round, and what the gate was really doing
 
 V168 asked for a loop: benchmark, then profile, then fix what the profile names. Two turns

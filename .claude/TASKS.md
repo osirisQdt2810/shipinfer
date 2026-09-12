@@ -3088,7 +3088,7 @@ hook down, for when the operator asked to see something before it is executed.
       planes, twelve open instants drained to four. Deleting the clamp turns the C++ check red
       on both of its assertions (139 checks, 2 failures) and the Python one on the bound.
 
-- [~] MTMC-GATE-COUNTS-INSTANTS-NOT-SIGHTINGS · (1)-(4) DONE 12 Sep, (5) OPEN. THE UPSTREAM HALF of
+- [x] MTMC-GATE-COUNTS-INSTANTS-NOT-SIGHTINGS · DONE 12 Sep, ALL FIVE STEPS. THE UPSTREAM HALF of
       `MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD`, opened as shipvision#16 on 12 Sep.
       `ObservationGate` enforced "consecutive" by REPLACING its hit map every call, so a track
       lost its streak whenever its camera was not in the instant the caller built -- fine when
@@ -3119,11 +3119,22 @@ hook down, for when the operator asked to see something before it is executed.
       scenario can reach (33 instant lines for one number), so a new test compares the C++
       constant against the reference's signature directly.
       EVIDENCE: both probes are parity failures at the right lines -- dropping the carry
-      breaks golden lines 21-22, deriving the roster instead of taking it breaks line 27. (4) re-emit the gate goldens (`benchmarks/parity/scenarios/gate`) and any
+      breaks golden lines 21-22, deriving the roster instead of taking it breaks line 27.
+      (5) MEASURED 12 Sep at the design load, two arms, and it is decisive. 50 x 20 fps over
+      GStreamer RTSP, 4 GPUs, 70 s: admission goes 2.2% -> **84.2% and 83.8%**, and identities
+      go 18 over 18 TRACKS to 16 over 167 and 22 over 193 -- about nine tracks an identity
+      where every identity used to hold exactly one. Cameras per instant is the control and it
+      did not move (11.8 -> 11.2 / 11.3), so the jump is the counting rule and not a
+      differently-shaped instant. Frames and latency are NOT attributable here: 61 981/61 979
+      accepted at 279/267 ms p50 on 16.2 cores, but several unrelated changes merged between
+      this run and the 36 081 in the window table, so that is not a control for it.
+      NEW, from the same run: `mtmc_frames late` is 24 950 of 68 538 frames read -- better than
+      a third of the fleet's frames reach the barrier after their instant closed. Filed as
+      `MTMC-A-THIRD-OF-FRAMES-ARRIVE-LATE`. (4) re-emit the gate goldens (`benchmarks/parity/scenarios/gate`) and any
       identity golden the change moves; (5) re-run the design load and compare admission and
       identities against 2.2% / 18-over-18. Only (5) answers whether the fix is the whole of it.
 
-- [~] MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD · MEASURED 12 Sep with a new instrument and
+- [~] MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD · (a) and (b) DONE, (c) OPEN. MEASURED 12 Sep with a new instrument and
       ONE HYPOTHESIS REFUTED BY THE SECOND MEASUREMENT, which is why both are here.
       `mtmc_instant_cameras` says how much of the fleet an instant held when it ended -- the
       number `window` and `advanced` cannot give. The fleet-size contrast:
@@ -3163,11 +3174,33 @@ hook down, for when the operator asked to see something before it is executed.
       SO THE GATE IS THE VARIABLE, and `min_hits 3` is not conservative at this fleet size, it
       is UNREACHABLE: three consecutive qualifying instants, a track qualifying only in an
       instant its camera is in, a camera in 24% of them.
-      WHAT REMAINS: (b) the reference change -- `min_hits` counting the instants a camera WAS
-      in rather than all instants -- which is `shipvision`'s gate and the only fix that costs
-      neither latency nor frames; and (c) the same sweep at 12 cameras, to tell the fleet size
-      apart from the rate. (b) is an upstream PR against `3rdparty/shipvision` and needs its own
-      golden re-emission here (`MTMC-ONE-CAMERA-TWICE-IN-A-CONTESTED-CLUSTER` is the template).
+      WHAT REMAINS: (c) the same sweep at 12 cameras, to tell the fleet size apart from the
+      rate.
+      (b) DONE 12 Sep and it was the whole of it. shipvision#16 made `min_hits` count the
+      instants a camera WAS in; #249 ported it. Re-measured at the design load, two arms:
+      admission 2.2% -> 84.2% / 83.8%, identities 18 over 18 tracks -> 16 over 167 and 22 over
+      193. AND IT COST NEITHER LATENCY NOR FRAMES, which is what this line predicted: p50 279
+      and 267 ms against 259, frames 61 981/61 979, where the window lever bought 50 identities
+      for 17% of the frames and 29% of p50. The 12-camera control reproduces its old row
+      exactly (13 identities over 72 tracks), so the instrument has not moved under us.
+      (c) is still worth doing: 12 cameras admitted 74.7% before and 89.3% in the smoke run
+      above, so the fleet-size term did not vanish, it stopped dominating.
+
+- [ ] MTMC-A-THIRD-OF-FRAMES-ARRIVE-LATE · MEASURED 12 Sep on the gate's design-load arm and
+      not yet explained. `mtmc_frames late` is 24 950 of 68 538 frames read at 50 x 20 fps --
+      better than a third of the fleet reaches the barrier after its instant has already closed,
+      so those frames carry no global id at all. It is a different question from the gate's
+      (which decided what an OPEN instant admits) and the two were measured in the same run, so
+      the number is free of confounds even though the cause is not known.
+      WHAT IT IS NOT: `late` is not `would_starve` (8) and not `expired` (1); those are bounded
+      and tiny. It is frames whose capture stamp falls inside a bucket that has already ended.
+      THE FIRST QUESTION is whether it is the barrier's window or the chain's own latency: p50
+      per frame is 267-279 ms against a 60 ms window, so a frame that takes four windows to
+      reach `mtmc` is late by construction and the window is not the variable. If that is it,
+      the fix is upstream of the barrier (the chain's latency) or the barrier has to bucket on
+      arrival rather than capture -- and ADR on the capture stamp says why it cannot.
+      MEASURE FIRST: the distribution of (arrival - capture) at the mtmc stage, which nothing
+      reports today. Do not touch the window until that histogram exists.
 
 - [ ] MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK · (a) DONE 11 Sep, (b) STILL OPEN. #222 converged the two planes onto the
       CAPTURE (wall) stamp, because keying instants on different clocks is two sets of global
