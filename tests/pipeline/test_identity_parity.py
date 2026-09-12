@@ -53,15 +53,13 @@ class TestTheGoldenIsStillTheReferencesAnswer:
         assert "emit_parity_golden.py --kind identity" in text
 
 
-class TestTheReferenceStillAdoptsTwoTracksFromOneCamera:
-    """The tripwire for `MTMC-ONE-CAMERA-TWICE-IN-A-CONTESTED-CLUSTER`.
+class TestAContestedCameraSlotHasOneHolder:
+    """What `MTMC-ONE-CAMERA-TWICE-IN-A-CONTESTED-CLUSTER` was, now asserted the right way up.
 
-    A second challenger from one camera contests the ALREADY-DISPLACED incumbent, wins on the
-    same evidence and is adopted too, because the contest re-reads `members_` while the loser
-    leaves only in the deferred loop. The C++ port answers identically, so the fix starts
-    upstream. **No scenario can hold this claim** (#219 round 2): `drive_identity.py` runs the
-    reference with `validate_every_step=True`, where it throws instead of answering -- so the
-    pin lived in a comment and nothing would notice the day upstream fixed it. This notices.
+    It used to be a tripwire: the reference adopted BOTH challengers and this file pinned that,
+    so the day upstream fixed it something would notice. shipvision#17 is that day. The tests
+    below are the same two instants with the assertions inverted, and they stay because the
+    parity golden reaches the answer but not the reference's own `validate()`.
     """
 
     def observation(self, camera: str, track: int, x: float, y: float):
@@ -81,13 +79,11 @@ class TestTheReferenceStillAdoptsTwoTracksFromOneCamera:
             frame_width=1920,
         )
 
-    def test_both_challengers_land_and_the_day_they_do_not_is_the_day_to_port_it(self) -> None:
-        from shipvision.mtmc.frames import TrackKey
+    def _contested(self, validate: bool, second: float, third: float):
         from shipvision.mtmc.identity import GlobalIdAssigner
 
         look = self.observation
-        # `validate_every_step=False` is production's default, and how this stays silent there.
-        assigner = GlobalIdAssigner(validate_every_step=False)
+        assigner = GlobalIdAssigner(validate_every_step=validate)
         assigner.assign(
             [look("cam0", 1, 0, 1), look("cam1", 1, 1, 0), look("cam2", 1, 1, 0)], [0, 0, 0]
         )
@@ -96,48 +92,41 @@ class TestTheReferenceStillAdoptsTwoTracksFromOneCamera:
                 look("cam0", 1, 0, 1),
                 look("cam1", 1, 1, 0),
                 look("cam2", 1, 1, 0),
-                look("cam0", 2, 1, 0),
-                look("cam0", 3, 1, 0),
+                look("cam0", 2, 1, second),
+                look("cam0", 3, 1, third),
             ],
             [1, 0, 0, 0, 0],
         )
+        return assigner
+
+    @pytest.mark.parametrize(
+        "second,third,holder", [(0.3, 0.8, 2), (0.8, 0.3, 3)], ids=["second", "third"]
+    )
+    def test_only_the_better_challenger_holds_the_slot(
+        self, second: float, third: float, holder: int
+    ) -> None:
+        """Both directions. A fix that skipped the displaced track without still holding a
+        contest would pass the first case and fail the second."""
+        from shipvision.mtmc.frames import TrackKey
+
+        # `validate_every_step=False` is production's default, and how this stayed silent.
+        assigner = self._contested(False, second, third)
 
         target = assigner.owner_of(TrackKey(camera_id="cam1", track_id=1))
-        members = assigner.members(target)
-        from_cam0 = [key for key in members if key.camera_id == "cam0"]
+        from_cam0 = [key for key in assigner.members(target) if key.camera_id == "cam0"]
 
-        assert len(from_cam0) == 2, (
-            f"the reference now adopts {len(from_cam0)} track(s) from one camera into a "
-            f"contested cluster, so `MTMC-ONE-CAMERA-TWICE-IN-A-CONTESTED-CLUSTER` has been "
-            f"fixed upstream: bump the submodule, port the same change to "
-            f"`csrc/shipinfer/pipeline/mtmc/identity.cpp`, re-emit `golden/identity/basic.txt`, "
-            f"and flip `two_challengers_from_one_camera_BOTH_land_and_the_reference_does_the_"
-            f"same` in `csrc/tests/test_mtmc_identity.cpp` from 2 to 1"
+        assert from_cam0 == [TrackKey(camera_id="cam0", track_id=holder)], (
+            f"a contested camera slot has one holder, and it is the better challenger. "
+            f"{len(from_cam0)} here means the upstream fix has been reverted or lost in a "
+            f"submodule bump; the C++ port in `csrc/.../mtmc/identity.cpp` carries the same "
+            f"rule and `golden/identity/basic.txt` holds the answer"
         )
 
-    def test_its_own_validation_refuses_the_state_it_built(self) -> None:
-        """The other half of the same fact, and the reason no golden can carry it: asked to
-        check itself, the reference calls this state a fault."""
-        from shipvision.errors import TrackingError
-        from shipvision.mtmc.identity import GlobalIdAssigner
-
-        look = self.observation
-        assigner = GlobalIdAssigner(validate_every_step=True)
-        assigner.assign(
-            [look("cam0", 1, 0, 1), look("cam1", 1, 1, 0), look("cam2", 1, 1, 0)], [0, 0, 0]
-        )
-
-        with pytest.raises(TrackingError, match="two tracks from one camera"):
-            assigner.assign(
-                [
-                    look("cam0", 1, 0, 1),
-                    look("cam1", 1, 1, 0),
-                    look("cam2", 1, 1, 0),
-                    look("cam0", 2, 1, 0),
-                    look("cam0", 3, 1, 0),
-                ],
-                [1, 0, 0, 0, 0],
-            )
+    def test_the_reference_validates_its_own_state_now(self) -> None:
+        """The half no golden can carry: asked to check itself, the reference used to call the
+        state it had just built a fault. `validate_every_step=True` is what the parity driver
+        runs with, so this is also why the golden can hold these scenarios at all."""
+        self._contested(True, 0.3, 0.8)  # raises TrackingError if the invariant is broken
 
 
 class TestTheCppGateReadsTheSameFiles:

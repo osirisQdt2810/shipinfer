@@ -260,12 +260,15 @@ namespace shipinfer::mtmc {
         last_seen_.erase(key);
     }
 
-    const TrackKey* GlobalIdAssigner::member_from_camera(int64_t global_id,
-                                                         const std::string& camera_id) const {
+    const TrackKey* GlobalIdAssigner::member_from_camera(
+        int64_t global_id, const std::string& camera_id,
+        const std::vector<TrackKey>& ignoring) const {
         const auto found = members_.find(global_id);
         if (found == members_.end()) return nullptr;
         for (const TrackKey& member : found->second) {
-            if (member.camera_id == camera_id) return &member;
+            if (member.camera_id != camera_id) continue;
+            if (contains(ignoring, member)) continue;
+            return &member;
         }
         return nullptr;
     }
@@ -387,7 +390,12 @@ namespace shipinfer::mtmc {
         std::vector<TrackKey> displaced;
 
         for (const TrackKey& key : non_overlap) {
-            const TrackKey* incumbent_ptr = member_from_camera(target, key.camera_id);
+            // AGAINST THE CURRENT HOLDER, not the one this cluster started with. A winner is
+            // placed at once and the loser leaves in the deferred pass below, so a second
+            // challenger from this camera used to contest a track that had already lost, win
+            // on the same evidence, and be adopted alongside it -- both then stayed.
+            const TrackKey* incumbent_ptr =
+                member_from_camera(target, key.camera_id, displaced);
             const int64_t owner = owner_of(key);
 
             if (incumbent_ptr == nullptr) {
