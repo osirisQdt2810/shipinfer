@@ -41,6 +41,15 @@ namespace shipinfer {
                         Device src_device) override;
         void execute(int rows) override;
         const float* output(size_t index = 0) const override;
+        const float* output_device(size_t index) const override;
+
+        // Declare an output kept where the network wrote it, for a consumer that reads it on
+        // the device. Before the first `execute`, like the fold -- the buffers do not move,
+        // but a batch already run would have copied it home and the two answers would
+        // disagree about which buffer is the truth.
+        void keep_on_device(const std::string& output_name) {
+            instance_->keep_on_device(output_name);
+        }
         TrtInstance& instance() { return *instance_; }
         //: Whether this adapter answers a folded output. For the stage that would otherwise
         //: fold on the host, and for a test.

@@ -133,10 +133,15 @@ namespace shipinfer {
         bool folds() const { return static_cast<bool>(fold_); }
         // The fold's answer on the host: `rows` floats, valid until the next `execute`.
         const float* fold_result() const { return fold_host_.as<float>(); }
-        // An output where the network wrote it. For a fold; nothing else needs this.
+        // An output where the network wrote it. The fold was the first caller; any output
+        // named to `keep_on_device` is read this way too, which is why the comment that said
+        // "nothing else needs this" is gone rather than qualified.
         const float* output_device(size_t index) const {
             return static_cast<const float*>(output_buffers_.at(index).get());
         }
+        //: Whether `execute` skips this output's copy home -- so a reader knows that
+        //: `output(index)` is a buffer nothing wrote and `output_device(index)` is the answer.
+        bool keeps_on_device(size_t index) const { return kept_on_device_.count(index) != 0; }
 
         // Runs `rows` of already-preprocessed input that is *already on the device*, in this
         // instance's input buffer. Returns when the outputs are readable on the host.

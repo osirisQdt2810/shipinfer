@@ -90,6 +90,65 @@ namespace {
         return response;
     }
 
+    void an_output_kept_on_the_device_holds_the_same_numbers() {
+        // `ENGINE-COPIES-EVERY-OUTPUT-HOME`. The fold proved ONE output can stay where the
+        // network wrote it; this proves the general door does, and that skipping the copy is
+        // all it skips. Two adapters over one plan, the same batch, one variable -- and the
+        // kept side is copied home BY THE TEST, so what is compared is the skip rather than
+        // another copy.
+        std::shared_ptr<TrtEngine> engine;
+        try {
+            engine = TrtEngine::load(plan_path(), 0);
+        } catch (const std::exception& error) {
+            std::printf("SKIP: no engine at %s (%s)\n", plan_path().c_str(), error.what());
+            return;
+        }
+        const int rows = engine->max_batch();
+        const size_t width = engine->inputs().front().elements_per_row();
+        const std::vector<float> input = a_batch(static_cast<size_t>(rows), width);
+        // THE SECOND output, because the first is the one every consumer reads and a bug that
+        // kept index 0 would be caught by everything. `outputs()` is checked below rather than
+        // assumed -- a one-output plan would make this case vacuous.
+        if (engine->outputs().size() < 2) {
+            std::printf("SKIP: %s has one output\n", plan_path().c_str());
+            return;
+        }
+        const std::string kept = engine->outputs()[1].name;
+
+        TrtEngineAdapter home(std::make_unique<TrtInstance>(engine, 0));
+        TrtEngineAdapter stays(std::make_unique<TrtInstance>(engine, 0));
+        stays.keep_on_device(kept);
+        for (Engine* adapter : {static_cast<Engine*>(&home), static_cast<Engine*>(&stays)}) {
+            adapter->write_rows(0, input.data(), static_cast<size_t>(rows), Device::cpu());
+            adapter->execute(rows);
+        }
+
+        size_t index = 0;
+        for (size_t o = 0; o < home.outputs(); ++o) {
+            if (home.output_name(o) == kept) index = o;
+        }
+        check(home.output_device(index) == nullptr,
+              "an ordinary output reports no device pointer, so nothing changes for a reader "
+              "that never heard of this");
+        const float* on_device = stays.output_device(index);
+        check(on_device != nullptr, "and a kept one does");
+        if (on_device == nullptr) return;
+
+        const size_t elems = home.output_row_elems(index) * static_cast<size_t>(rows);
+        std::vector<float> copied(elems, 0.f);
+        GPU_CHECK(
+            gpuMemcpy(copied.data(), on_device, elems * sizeof(float), gpuMemcpyDeviceToHost));
+        const float* expected = home.output(index);
+        size_t differing = 0;
+        for (size_t i = 0; i < elems; ++i) {
+            if (copied[i] != expected[i]) ++differing;
+        }
+        check(differing == 0,
+              "every one of " + std::to_string(elems) +
+                  " floats matches the host-resident run: the skip skips the copy and "
+                  "nothing else");
+    }
+
     void the_device_fold_answers_what_the_host_fold_answers() {
         std::shared_ptr<TrtEngine> engine;
         try {
@@ -161,6 +220,7 @@ namespace {
 
 int main() {
     the_device_fold_answers_what_the_host_fold_answers();
+    an_output_kept_on_the_device_holds_the_same_numbers();
     std::printf("%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

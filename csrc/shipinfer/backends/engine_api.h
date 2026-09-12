@@ -62,6 +62,20 @@ namespace shipinfer {
         // Run `rows` rows. Returns when every `output()` is readable on the host.
         virtual void execute(int rows) = 0;
         virtual const float* output(size_t index = 0) const = 0;
+        // WHERE THE NETWORK LEFT IT, for an output this engine was asked to keep on the
+        // device. `nullptr` -- the default every backend inherits -- means host-resident, so
+        // `output(index)` holds the answer and nothing changes for an implementation that
+        // never heard of this.
+        //
+        // THE SAFE DIRECTION, unlike the `outputs()` default above: forgetting to override
+        // this says "everything came home", which is what every backend that does not skip a
+        // copy is in fact doing. A backend that DOES skip one and forgets to say so would
+        // hand `instance.cpp` a host buffer nothing wrote, which is why the skip and this
+        // accessor live in the same class.
+        virtual const float* output_device(size_t index) const {
+            (void)index;
+            return nullptr;
+        }
     };
 
     // Every output's width and shape state the same row, checked once where the engine is

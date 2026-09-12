@@ -2986,7 +2986,7 @@ hook down, for when the operator asked to see something before it is executed.
       this batch is noise and at a permissive cut every mask fills its crop, so one cut would
       agree with a fold that never read the bank.
 
-- [~] ENGINE-COPIES-EVERY-OUTPUT-HOME · `backends/tensorrt/engine.cpp` ends every `execute`
+- [x] ENGINE-COPIES-EVERY-OUTPUT-HOME · `backends/tensorrt/engine.cpp` ends every `execute`
       with one `gpuMemcpyAsync(host_outputs_[i], output_buffers_[i], ..., DeviceToHost)` per
       output, unconditionally, and then a blocking sync. The prototype bank above is the
       expensive case and `MASK-FOLD-BELONGS-ON-THE-DEVICE` removes that one; the SHAPE is the
@@ -3030,8 +3030,29 @@ hook down, for when the operator asked to see something before it is executed.
       wrong for the general case -- a device consumer needs it visible and device-resident, so
       the adapter needs to distinguish "hidden because folded" from "kept for a reader".
       `instance.cpp:250` then fills `device_data` rather than `data` for those. Then the Python
-      `TensorRTBackend` mirror and the parity test. NOT PUSHED AS A PR yet: #256 is still in
-      review and the house rule is one at a time.
+      `TensorRTBackend` mirror and the parity test.
+      DONE 12 Sep, all four pieces. `Engine::output_device(index)` joined the interface with a
+      `nullptr` default -- the SAFE direction, because forgetting to override it says
+      "everything came home", which is what a backend that skips no copy is in fact doing.
+      `TrtEngineAdapter` overrides it, `ModelInstance` carries the pointer into each request's
+      OWN SPAN and leaves `data` empty, and on the Python side `Binding` already had `ptr` and
+      `nbytes` so `kind` + `device` finished `MemoryHandle` and a kept output is just
+      `Tensor.from_handle`. The adapter needed NO change to `visible_`, which an earlier note
+      here got wrong: it hides the fold's bank deliberately and was never a general mechanism.
+      THE ADAPTER'S `visible_` AND `keep_on_device` ARE DIFFERENT QUESTIONS -- "nothing above
+      reads this" versus "something above reads it on the device" -- and conflating them is
+      what would have hidden a kept output from its own consumer.
+      EVIDENCE, each probed red by removing what it guards: `test_engine` 65 checks (two
+      batched requests of DIFFERENT row counts, so the pointer is advanced per span -- handing
+      both the batch's front is the host scatter test's bug one bus away; 5 red),
+      `test_fold_wiring` 12 checks on the real plan with the kept output copied home BY THE
+      TEST and compared float for float (1 red), and four Python cases in
+      `tests/backends/test_mask_fold_wiring.py` (1 red). 36 C++ binaries green in the
+      container; offline Python 4376 passed.
+      NOT WIRED TO A CHAIN YET, and that is deliberate: nothing declares `keep_on_device` in
+      `config.yaml` or a chain file, so no deployment behaviour changes. The door is open and
+      the first consumer that wants an output on the device -- a crop-from-mask, anything
+      fused -- brings its own declaration with it.
 
 - [x] PROFILE-DIES-AT-THE-DESIGN-LOAD · FIXED 12 Sep: it is nsys 2025.1.3. NARROWED to one sentence: **a binary that loads
       a TensorRT plan segfaults under this Nsight Systems; a binary that only uses CUDA does

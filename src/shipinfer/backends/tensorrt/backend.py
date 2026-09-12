@@ -48,6 +48,10 @@ class TensorRTBackend(ModelBackend):
     #: this object with `object.__new__`, where an `__init__`-only field would surface as an
     #: `AttributeError` from inside `execute`.
     _fold: MaskAreaFold | None = None
+    #: A class attribute for the same reason `_fold` is: the contract test builds this object
+    #: with `object.__new__`, so `__init__` never runs and an instance attribute would not
+    #: exist to read.
+    _kept_on_device: frozenset[str] = frozenset()
 
     def __init__(self, context: BackendContext) -> None:
         super().__init__(context)
@@ -70,6 +74,7 @@ class TensorRTBackend(ModelBackend):
         self._graph_replays = 0
         self._enqueues = 0
         self._fold: MaskAreaFold | None = None
+        self._kept_on_device: frozenset[str] = frozenset()
 
     # -- lifecycle -----------------------------------------------------------------------
 
@@ -234,6 +239,28 @@ class TensorRTBackend(ModelBackend):
         )
         return (*kept, area)
 
+    def keep_on_device(self, output_name: str) -> None:
+        """Leave one output where the network wrote it, for a consumer that reads it there.
+
+        The C++ twin is `TrtInstance::keep_on_device`. BY NAME, because which position an
+        output occupies is the export's choice; refused when the artefact has no such output,
+        with the list, rather than keeping nothing in silence.
+        """
+        if self._loaded is None:
+            raise ConfigurationError(
+                f"{self.context.instance_name}: an output can only be kept on the device on a "
+                f"loaded engine, because the name is checked against that engine's outputs"
+            )
+        # AGAINST THE ARTEFACT, not `output_specs`, for the reason `set_fold` does the same:
+        # `output_specs` is what this backend ADVERTISES, which a fold has already edited.
+        known = tuple(tensor.name for tensor in self._loaded.outputs)
+        if output_name not in known:
+            raise ConfigurationError(
+                f"{self.context.instance_name}: cannot keep output {output_name!r} on the "
+                f"device; the engine has no such output. It has {', '.join(known)}"
+            )
+        self._kept_on_device = self._kept_on_device | {output_name}
+
     def set_fold(self, fold: Any) -> None:
         """Compute ``fold.name`` on the device and stop copying the bank it reduces home.
 
@@ -303,6 +330,16 @@ class TensorRTBackend(ModelBackend):
             for spec in self.output_specs:
                 if fold is not None and spec.name == fold.name:
                     continue  # computed below; the engine has no such output to fetch
+                if spec.name in self._kept_on_device:
+                    # THE COPY HOME NEVER HAPPENS: a `Tensor` over the binding itself, which
+                    # satisfies `MemoryHandle`, rather than a numpy view of bytes that stayed
+                    # on the GPU. Shaped at THIS batch, not the binding's `max_batch_size`, or
+                    # a consumer reads rows the run did not fill.
+                    binding = bindings[spec.name]
+                    outputs[spec.name] = Tensor.from_handle(
+                        binding, spec.dtype, (batch_size, *binding.shape[1:])
+                    )
+                    continue
                 array = bindings.fetch_output(
                     spec.name, batch_size, stream, async_copy=async_copy
                 )

@@ -40,6 +40,16 @@ namespace shipinfer {
         if (folds() && index == visible_.size()) return 1;  // the fold: one area a row
         return instance_->output_rows(visible_.at(index));
     }
+    const float* TrtEngineAdapter::output_device(size_t index) const {
+        // THE FOLD'S OWN ANSWER IS ALWAYS ON THE HOST: it is one float a row, copied home by
+        // `execute` because that is the whole saving -- a bank reduced to a number that
+        // travels. So the synthetic index past `visible_` is host-resident like any other.
+        if (folds() && index == visible_.size()) return nullptr;
+        const size_t real = visible_.at(index);
+        if (!instance_->keeps_on_device(real)) return nullptr;
+        return instance_->output_device(real);
+    }
+
     size_t TrtEngineAdapter::outputs() const {
         return visible_.size() + (folds() ? 1 : 0);
     }
