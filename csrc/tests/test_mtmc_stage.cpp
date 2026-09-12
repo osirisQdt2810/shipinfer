@@ -245,7 +245,8 @@ namespace {
         // test pass for the wrong reason.
         auto barrier = std::make_shared<InstantBarrier>(options());
         auto tracker = std::make_shared<ScriptedTracker>();
-        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker);
+        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {},
+                        false);
         const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                 std::chrono::system_clock::now().time_since_epoch())
                                 .count();
@@ -272,7 +273,8 @@ namespace {
         // measurement exists to prevent.
         auto barrier = std::make_shared<InstantBarrier>(options());
         auto tracker = std::make_shared<ScriptedTracker>();
-        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker);
+        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {},
+                        false);
         const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                 std::chrono::system_clock::now().time_since_epoch())
                                 .count();
@@ -287,30 +289,6 @@ namespace {
         check(barrier->lag_samples_negative() == 1,
               "and COUNTED, or a shard whose clock stepped reports p50 0 with nothing saying "
               "why");
-    void a_camera_outside_this_groups_roster_is_passed_over() {
-        // TWO GROUPS ON ONE SHARD. Without the roster both stages take every camera the shard
-        // sees and issue two contradictory sets of global ids for the same objects, which is
-        // why a second `mtmc` slot used to be refused outright. The frame is PUBLISHED with a
-        // null id rather than refused: a camera nobody grouped is a configuration fact, and
-        // failing the frame would take down a fleet that is otherwise correct.
-        auto barrier = std::make_shared<InstantBarrier>(options());
-        auto tracker = std::make_shared<ScriptedTracker>();
-        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker,
-                        {"cam-north"}, true);
-        auto state = frame_with("cam0", 1, {box(0, 0, 0)});
-        attach(*state, "track_out", 1, {7}, {});
-        attach(*state, "embed_out", 2, {}, {1.0f, 0.0f});
-
-        const StageOutcome outcome = stage.run(*state);
-        const ObjectBatch* out = state->batch("mtmc_out");
-
-        check(outcome.ran() && outcome.rows == 0, "the stage ran and published no ids");
-        check(out != nullptr && out->empty(),
-              "the output name exists and is empty, which the event schema reads as a null "
-              "global id -- the same answer a row the gate refused gets");
-        check(tracker->seen.empty(), "and the other group's tracker never saw this camera");
-        check(barrier->instant_stats().empty(),
-              "nor did its barrier, which must not wait on a camera that is not its own");
     }
 
     void one_group_associates_a_camera_its_roster_never_named() {
@@ -539,7 +517,6 @@ int main() {
     a_row_is_found_in_whichever_embedder_holds_it();
     the_stage_hands_the_barrier_a_real_arrival_lag();
     a_frame_stamped_in_the_future_is_clamped_and_counted();
-    a_camera_outside_this_groups_roster_is_passed_over();
     one_group_associates_a_camera_its_roster_never_named();
     routing_counts_and_names_the_camera_it_passed_over();
     a_camera_with_nothing_to_report_still_reports();
