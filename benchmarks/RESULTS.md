@@ -569,6 +569,64 @@ one folding on the device and one not, and compares the areas against `graph/mas
 answer on the unfolded outputs — at two mask thresholds, because a fold that never read the
 bank would agree at one.
 
+## How much of the fleet is in one instant, and what the window costs
+
+Every reason the barrier reports is about TIME — an instant ran out of window, or a camera moved
+on. None of them says how many cameras were actually in the instant when it ended, and a
+cross-camera association over one camera is not one. `mtmc_instant_cameras` reports that now,
+tallied where every ended bucket passes.
+
+**An instant holds about eleven cameras, whatever the fleet is.** Same rate, same fixture, same
+60 ms window:
+
+| fleet | cameras an instant held (mean / largest) | offered | admitted | ids / tracks |
+|---|---|---|---|---|
+| 50 × 20 fps, 92 workers | **11.8 / 47** of fifty (24%) | 90 265 | **1 987 (2.2%)** | 18 / 18 |
+| 12 × 20 fps, 24 workers | **10.5 / 12** of twelve (88%) | 42 067 | **31 440 (74.7%)** | 13 / 72 |
+
+So the fleet grew and the window did not. The arithmetic that fits this pair is the gate's:
+`min_hits` counts *consecutive* qualifying instants and a track can only qualify in an instant
+its camera is in, so 0.24³ = 1.4% against 0.88³ = 68% — close to the measured 2.2% and 74.7%.
+
+**And the window sweep refutes that as the whole story**, which is why both tables are here.
+Same fifty cameras, same load, only `sync_window_ms` moved:
+
+| `sync_window_ms` | cameras / instant | instants | admitted | ids / tracks | frames accepted | frame p50 |
+|---|---|---|---|---|---|---|
+| **60** (the default) | 11.8 | 1 951 | 1 987 | 18 / 18 | 36 081 | 259 ms |
+| 120 | 9.4 | 3 067 | 898 | 42 / 67 | 33 272 | 309 ms |
+| 250 | 12.3 | 2 335 | 3 512 | **50 / 77** | 30 085 | 334 ms |
+
+Cameras per instant barely moves while identities go 18 → 42 → 50, so cameras-per-instant is not
+the variable identity tracks. What moves is the close **reason**: `advanced` is 21% of instants
+at 60 ms and 85% at 250 ms, because a window wider than the frame period (50 ms at 20 fps) puts
+a camera's next frame inside its own bucket's span — which `barrier.h`'s docstring predicted
+from first principles and nothing had measured until now.
+
+**The window is a real lever and it is not free.** 250 ms buys 18 → 50 identities and costs 17%
+of the frames (36 081 → 30 085) and 29% of p50 latency (259 → 334 ms). Whether that trade is the
+right one is a deployment's question, not a benchmark's — what this page can say is that it is a
+trade, with both sides measured.
+
+**And the gate is where the evidence actually goes.** One more arm, the default window and the
+reference's `min_hits` dropped from 3 to 1:
+
+| `min_hits` | offered | admitted | ids / tracks | frames accepted | frame p50 |
+|---|---|---|---|---|---|
+| **3** (production's default) | 90 265 | 1 987 (2.2%) | 18 / **18** | 36 081 | 259 ms |
+| 1 | 75 376 | **75 322 (99.9%)** | 23 / **190** | 34 419 | 282 ms |
+
+Read the last column of the ids pair, not the first. At the shipped defaults every identity
+holds **exactly one track** — 18 identities over 18 tracks is not cross-camera association, it
+is eighteen cameras each holding its own. With the gate open, 190 tracks resolve into 23
+identities: about eight tracks an identity, which is what the mtmc stage exists to produce.
+
+So `min_hits 3` is not merely conservative at this fleet size — it is **unreachable**. It counts
+three *consecutive* qualifying instants, a track can only qualify in an instant its camera is
+in, and a camera is in 24% of them. The gate's intent (three confirmations before a merge) needs
+a counter over the instants a camera *was* in; until it has one, the design load's identities are
+singletons whatever the window does.
+
 ## The verdict, and the one open question
 
 The ≥5× target needs a ratio to be against, and the four above give opposite answers. Absent

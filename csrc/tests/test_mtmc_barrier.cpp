@@ -963,6 +963,30 @@ namespace {
                   next.reason);
     }
 
+    void an_instant_says_how_much_of_the_fleet_it_held() {
+        // `window` says an instant ran out of time; it does not say how many cameras were in
+        // it when it did, and a cross-camera association over ONE camera is not one. Every
+        // ended bucket is counted, however it ended -- which is why the tally is in
+        // `remember` and not in `close`.
+        InstantBarrier barrier(options(0.06, 1));
+        barrier.camera_added("cam0");
+        barrier.camera_added("cam1");
+        barrier.submit("cam0", 100.0, payload_of("a"), kJoin);
+        barrier.submit("cam1", 100.0, payload_of("b"), kJoin);  // completes: two cameras
+        barrier.submit("cam0", 200.0, payload_of("c"), kJoin);  // its own, still open
+
+        InstantBarrier::InstantSizes sizes = barrier.instant_sizes();
+        check(sizes.instants == 1, "one instant has ended so far");
+        check(sizes.cameras == 2 && sizes.largest == 2, "and it held both cameras");
+
+        barrier.close_all();
+        sizes = barrier.instant_sizes();
+
+        check(sizes.instants == 2, "shutdown ends the open one too");
+        check(sizes.cameras == 3, "which held one camera");
+        check(sizes.largest == 2, "the largest is still the complete one");
+    }
+
     void a_declared_camera_that_never_sends_is_named() {
         // The fault this exists to make visible: an announced camera is waited for whether it
         // exists or not, so a roster naming cameras the fleet does not have makes `complete`
@@ -1102,6 +1126,7 @@ int main() {
     a_single_future_stamp_does_not_wedge_a_camera();
     an_adoption_on_the_late_path_is_still_recorded();
     a_first_stamp_is_recorded_as_itself();
+    an_instant_says_how_much_of_the_fleet_it_held();
     one_event_per_instant_and_not_one_per_frame();
     every_frame_of_a_group_gets_the_same_answer_or_an_honest_gap();
     std::printf("%d checks, %d failure(s)\n", checks, failures);

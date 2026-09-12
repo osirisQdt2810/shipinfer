@@ -960,6 +960,45 @@ class TestACaptureClockThatStepsBack:
         assert held.frame_stats()[MISSED_BACKWARD] == 2
 
 
+class TestAnInstantSaysHowMuchOfTheFleetItHeld:
+    """`window` says an instant ran out of time; it does not say how many cameras were in it
+    when it did, and a cross-camera association over ONE camera is not one. Measured at the
+    design load, this is the number that decides whether `sync_window_ms` is the problem."""
+
+    def test_every_ended_instant_is_counted_however_it_ended(self) -> None:
+        held = barrier(sync_window_s=0.06, workers=1)
+        held.camera_added("cam-a")
+        held.camera_added("cam-b")
+        held.submit("cam-a", 100.0, "p", associate=flat)  # joins, then completes below
+        held.submit("cam-b", 100.0, "p", associate=flat)
+        held.submit("cam-a", 200.0, "p", associate=flat)  # its own instant, never completed
+
+        cameras, instants, largest = held.instant_sizes
+        assert instants == 1, "one instant has ended so far"
+        assert cameras == 2 and largest == 2, "and it held both cameras"
+
+        held.close_all()
+
+        cameras, instants, largest = held.instant_sizes
+        assert instants == 2, "shutdown ends the open one too"
+        assert cameras == 3, "which held one camera"
+        assert largest == 2, "the largest is still the complete one"
+
+    def test_an_instant_nobody_joined_holds_one(self) -> None:
+        """The shape the counter exists to make visible: a fleet whose instants hold one
+        camera is not synchronised, and its reasons would say `window` all day."""
+        held = barrier(sync_window_s=0.06, workers=1)
+        for index in range(4):
+            held.camera_added(f"cam-{index}")
+        for index in range(4):
+            # A capture of its own, so no two cameras share an instant.
+            held.submit(f"cam-{index}", 100.0 + index, "p", associate=flat)
+        held.close_all()
+
+        cameras, instants, largest = held.instant_sizes
+        assert instants == 4 and cameras == 4 and largest == 1
+
+
 class TestARosterNobodyAnswers:
     """`MTMC-ROSTER-NAMES-NO-CAMERA-A-RUN-HAS`: a declared camera is waited for whether it
     exists or not, so a roster naming cameras this fleet does not have makes a complete instant

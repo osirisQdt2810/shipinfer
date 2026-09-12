@@ -3022,30 +3022,51 @@ hook down, for when the operator asked to see something before it is executed.
       not at all within a window of a drop), which is a small change and an easy test; what is
       missing is a reason to make it, i.e. a deployment that drains a group while it runs.
 
-- [ ] MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD · FOUND 11 Sep while closing
-      `MTMC-EIGHT-OPEN-INSTANTS-IS-A-SMALL-GROUP'S-BOUND`, and it is what that item uncovered
-      rather than caused. With eviction gone, the design load (50 cameras x 20 fps, pan
-      fixture, 92 workers, four A5000s, 40 s) admits 527-2 258 observations per run and
-      resolves anywhere from 0 to 25 global identities across nine runs at the SAME settings --
-      including one arm that admitted the most of any run (2 180, the fifty-camera roster) and
-      resolved NONE, and one that admitted 1 683 and resolved 25 over 68 tracks.
-      WHY IT IS NOT NOISE TO SHRUG AT: a deployment cannot be handed "identity works about
-      two thirds of the time". Either the gate's `min_hits` over CONSECUTIVE instants is being
-      broken by a stream the queue decimates (23% refused at this load -- see
-      `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY`), or the clusterer's thresholds are wrong for a
-      50-camera instant, or both.
-      AND ONE THING THE DERIVED BOUND DOES NOT HAVE (#238's review): a ceiling. It is
-      `|announced union seen|`, and `seen` only shrinks on `drop_camera`, so a source that
-      mints a fresh camera id per reconnect grows the bound, `recent_limit` (4x) and the open
-      bucket map without limit -- the failure mode inverts from "evicts too eagerly" to "never
-      evicts, grows". Camera ids are roster-stable today, which is why this is a note; the fix
-      when it is needed is a cap, and the number for it is a memory budget rather than a guess.
-      WHAT TO MEASURE FIRST, in this order: (a) the admitted observations PER CAMERA per
-      instant -- if a typical instant holds two cameras rather than fifty, no cross-camera
-      cluster can form and the barrier's `window` share says why; (b) `min_hits` at 1 against
-      the production 3, which separates "the gate never accumulates" from "the appearance
-      distance never matches"; (c) the same run at 12 cameras, where the queue refuses nothing,
-      to tell the rate apart from the fleet size.
+- [~] MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD · MEASURED 12 Sep with a new instrument and
+      ONE HYPOTHESIS REFUTED BY THE SECOND MEASUREMENT, which is why both are here.
+      `mtmc_instant_cameras` says how much of the fleet an instant held when it ended -- the
+      number `window` and `advanced` cannot give. The fleet-size contrast:
+
+      | fleet | cameras an instant held (mean / largest) | offered | admitted | ids / tracks |
+      |---|---|---|---|---|
+      | 50 x 20 fps, 92 workers | **11.8 / 47** of fifty (24%) | 90 265 | **1 987 (2.2%)** | 18 / 18 |
+      | 12 x 20 fps, 24 workers | **10.5 / 12** of twelve (88%) | 42 067 | **31 440 (74.7%)** | 13 / 72 |
+
+      An instant holds about ELEVEN cameras whatever the fleet size, so the fleet grew and the
+      window did not. The arithmetic that fits THIS pair: `min_hits` counts consecutive
+      qualifying instants and a track can only qualify in an instant its camera is in, so
+      0.24^3 = 1.4% against 0.88^3 = 68% -- close to the measured 2.2% and 74.7%.
+      THE WINDOW SWEEP REFUTES THAT AS THE WHOLE STORY, same fleet, same load, window varied:
+
+      | sync_window_ms | cameras / instant | instants | admitted | ids / tracks | frames | p50 |
+      |---|---|---|---|---|---|---|
+      | 60 (default) | 11.8 | 1 951 | 1 987 | 18 / 18 | 36 081 | 259 ms |
+      | 120 | 9.4 | 3 067 | 898 | 42 / 67 | 33 272 | 309 ms |
+      | 250 | 12.3 | 2 335 | 3 512 | **50 / 77** | 30 085 | 334 ms |
+
+      Cameras per instant barely moves while admission goes 1 987 -> 898 -> 3 512 and identities
+      go 18 -> 42 -> 50, so cameras-per-instant is NOT the variable identity tracks. What does
+      move is the close REASON: `advanced` is 21% of instants at 60 ms and 85% at 250 ms,
+      because a window wider than the frame period (50 ms at 20 fps) puts a camera's next frame
+      inside its own bucket's span -- which `barrier.h`'s own docstring predicted and this is
+      the first time it has been measured.
+      SO THE WINDOW IS A REAL LEVER AND IT IS NOT FREE: 250 ms buys 18 -> 50 identities and
+      costs 17% of the frames (36 081 -> 30 085) and 29% of p50 latency (259 -> 334 ms).
+      (a) MEASURED, and it is decisive. `min_hits 1` at the default window: admission goes
+      2.2% -> **99.9%** (75 322 of 75 376) and the identities go 18 over 18 tracks to 23 over
+      **190**. Read the second number: at the shipped defaults every identity holds EXACTLY ONE
+      track, which is not cross-camera association at all -- it is eighteen cameras each holding
+      its own. With the gate open, 190 tracks resolve into 23 identities, about eight tracks
+      each, which is what the stage exists to produce. Cost: 34 419 frames against 36 081 and
+      282 ms p50 against 259.
+      SO THE GATE IS THE VARIABLE, and `min_hits 3` is not conservative at this fleet size, it
+      is UNREACHABLE: three consecutive qualifying instants, a track qualifying only in an
+      instant its camera is in, a camera in 24% of them.
+      WHAT REMAINS: (b) the reference change -- `min_hits` counting the instants a camera WAS
+      in rather than all instants -- which is `shipvision`'s gate and the only fix that costs
+      neither latency nor frames; and (c) the same sweep at 12 cameras, to tell the fleet size
+      apart from the rate. (b) is an upstream PR against `3rdparty/shipvision` and needs its own
+      golden re-emission here (`MTMC-ONE-CAMERA-TWICE-IN-A-CONTESTED-CLUSTER` is the template).
 
 - [ ] MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK · (a) DONE 11 Sep, (b) STILL OPEN. #222 converged the two planes onto the
       CAPTURE (wall) stamp, because keying instants on different clocks is two sets of global

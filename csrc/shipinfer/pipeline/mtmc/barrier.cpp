@@ -124,6 +124,11 @@ namespace shipinfer::mtmc {
         return instant_counts_;
     }
 
+    InstantBarrier::InstantSizes InstantBarrier::instant_sizes() const {
+        std::lock_guard<std::mutex> guard(lock_);
+        return {cameras_held_, instants_ended_, cameras_held_max_};
+    }
+
     std::map<std::string, uint64_t> InstantBarrier::frame_stats() const {
         std::lock_guard<std::mutex> guard(lock_);
         return frame_counts_;
@@ -267,6 +272,12 @@ namespace shipinfer::mtmc {
     }
 
     void InstantBarrier::remember(const Bucket& bucket) {
+        // EVERY ended bucket passes here -- closed, evicted, expired or shut down -- which is
+        // why the tally lives in this function and not in `close`.
+        const uint64_t held = static_cast<uint64_t>(bucket.reported.size());
+        cameras_held_ += held;
+        ++instants_ended_;
+        cameras_held_max_ = std::max(cameras_held_max_, held);
         recent_[bucket.instant] = {bucket.first, bucket.last};
         while (recent_.size() > recent_limit_) recent_.erase(recent_.begin());
     }
