@@ -2948,7 +2948,7 @@ hook down, for when the operator asked to see something before it is executed.
       backend-contract change, so it needs the Python plane's `TensorRTBackend` in the same
       PR (V88) and a parity test that a device-resident output reads the same numbers.
 
-- [~] PROFILE-DIES-AT-THE-DESIGN-LOAD · NARROWED 12 Sep to one sentence: **a binary that loads
+- [x] PROFILE-DIES-AT-THE-DESIGN-LOAD · FIXED 12 Sep: it is nsys 2025.1.3. NARROWED to one sentence: **a binary that loads
       a TensorRT plan segfaults under this Nsight Systems; a binary that only uses CUDA does
       not.** `deploy/rootless/profile.sh --cpp` prints `loading engines...`, ends ~1.2 s later
       with an empty `threads: {}`, and writes a report holding only the driver's context calls.
@@ -2974,11 +2974,20 @@ hook down, for when the operator asked to see something before it is executed.
       TEXT even inside `deploy/rootless/run.sh`, which is the advisory-deny-list limitation
       CLAUDE.md describes -- put the invocation in a script file under `scripts/` and run THAT
       through `run.sh` rather than reaching for `SHIPINFER_ALLOW_HOST_RUN`.
-      IF IT IS nsys x TensorRT: the profile leg of V168's loop needs either a different nsys
-      (the image's, or a newer one mounted like TensorRT is) or `--trace=none` plus NVTX ranges
-      the code emits itself, which is the shape that does not depend on CUPTI at all.
+      IT IS nsys x TensorRT, AND IT IS ONE VERSION. `scripts/probe_nsys_trtexec.sh` runs
+      NVIDIA's OWN `trtexec --loadEngine` -- none of our code -- under each nsys on this box,
+      same container, same plan, same flags: 2024.5.1 exit 0, 2024.6.2 exit 0, **2025.1.3 exit
+      139**. So nothing of ours is involved and no NVTX rewrite is needed.
+      WHY IT KEPT HAPPENING: `profile.sh` picked `ls -d ... | sort -V | tail -1`, the NEWEST,
+      which is exactly how it chose the broken one and went on choosing it. It now skips a
+      version measured to segfault on engine load, says so on stderr, and `SHIPINFER_NSYS_DIR`
+      still overrides. `SHIPINFER_NSYS_BROKEN` carries the list -- one entry, a recorded
+      measurement rather than a guess. Re-run the probe when a new Nsight lands.
+      VERIFIED END TO END: the design load profiles under 2024.6.2 -- 50 cameras x 20 fps over
+      GStreamer RTSP, 4 GPUs, 40 s, 37 572 frames read, 32 445 accepted, a 584 MB report with
+      real counters instead of the 1.2 s death and the empty `threads: {}`.
 
-- [ ] EXECUTE-BLOCKS-THE-INSTANCE-THREAD · PROFILED 11 Sep: `cudaStreamSynchronize` is **32.2%
+- [ ] EXECUTE-BLOCKS-THE-INSTANCE-THREAD · PRICED 12 Sep at the design load: ~14% of instance-thread wall. PROFILED 11 Sep: `cudaStreamSynchronize` is **32.2%
       of all CUDA API time** -- 9.64 s over 5 564 calls, 1.73 ms average -- because
       `TrtEngine::execute` synchronises before returning, so the instance thread stops dead for
       the length of a batch instead of taking the next one. The launches are the floor (1.03 M
@@ -3002,6 +3011,18 @@ hook down, for when the operator asked to see something before it is executed.
       is 2%, the ring buys 2% and costs ~1 GB of VRAM and the most delicate restructuring in
       this plane; if the design load is different from the 12-camera profile, that number is the
       justification this item currently lacks.
+      MEASURED 12 Sep, once `PROFILE-DIES-AT-THE-DESIGN-LOAD` was fixed (it was nsys 2025.1.3,
+      not us). THE DESIGN LOAD IS DIFFERENT, which is the finding: `cudaStreamSynchronize` is
+      304.29 s over 150 629 calls averaging 2.02 ms, against 28 instance threads (7 a GPU x 4)
+      over ~77 s of an 80.85 s process -- about **14%** of their wall. The 12-camera profile on
+      the same denominator is **3.2%**, so the re-pricing's "under 2%" was an underestimate
+      taken from the smaller fleet.
+      SO THE JUSTIFICATION EXISTS NOW and the decision does not: ~14% against ~1 GB of VRAM and
+      the buffer-ring restructuring is a judgement, and the cost analysis below it still stands.
+      What is no longer true is that the number is unknown. The denominator is stated in
+      `benchmarks/RESULTS.md` because it is the whole argument -- over the 40 s measurement
+      window alone the same seconds read as 25%, and the threads are alive for startup and
+      drain too.
       WHAT THE FIX ACTUALLY COSTS, worked out 12 Sep before writing any of it: an event and a
       completion queue are NOT enough on their own, because `TrtInstance`'s output buffers are
       one set per instance. Letting the thread enqueue batch N+1 while N is still in flight
