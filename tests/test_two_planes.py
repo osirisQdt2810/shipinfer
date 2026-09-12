@@ -184,6 +184,23 @@ class TestBothPlanesNameTheSameLatencyWindow:
         assert "shipinfer_pipeline_frame_latency_us" in metrics
         assert 'report_window("frame_us"' in bench
 
+    def test_the_arrival_lag_window_is_reported_on_both(self) -> None:
+        """The third window: capture to barrier-submit, which is what separates "the window is
+        too narrow" from "the chain is too slow to reach it".
+
+        It landed on the C++ plane first as a bench summary while the Python plane only STORED
+        the samples -- 200 000 of them per element, read by nothing (#255's review). The ring
+        is the parity-preserving storage, because the C++ plane has no histogram type; the
+        report is what this asserts, on the same rule as the two windows above.
+        """
+        element = (ROOT / "src" / "shipinfer" / "topology" / "elements" / "mtmc.py").read_text(
+            encoding="utf-8"
+        )
+        bench = (ROOT / "csrc" / "shipinfer" / "cli" / "bench.cpp").read_text(encoding="utf-8")
+
+        assert "shipinfer_mtmc_arrival_lag_us" in element
+        assert "mtmc_arrival_lag_us" in bench
+
     def test_both_measure_it_from_the_collector_opening_the_frame(self) -> None:
         """Same window, or the two figures are not comparable however they are named.
 

@@ -849,7 +849,6 @@ class TestHowLateAFrameArrivedReachesTheBarrier:
         monotonic clock (hugely negative, clamped to 0) and a millisecond/microsecond mix-up
         (50 instead of 50 000) both fall outside them.
         """
-        import time
 
         element = opened()
         try:
@@ -884,7 +883,6 @@ class TestHowLateAFrameArrivedReachesTheBarrier:
         history, so a stepped server clock leaves it at zero while every lag reads 0 — a
         barrier every frame appears to reach instantly, which is the inversion the whole
         measurement exists to prevent."""
-        import time
 
         element = opened()
         try:

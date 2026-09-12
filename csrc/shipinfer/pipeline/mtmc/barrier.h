@@ -281,7 +281,8 @@ namespace shipinfer::mtmc {
         //: two numbers a reader compares would have spanned different windows.
         //: `negative` says this sample was clamped: the frame arrived before its capture
         //: stamp, so what it measures is the two clocks disagreeing and not a fast chain.
-        void note_arrival_lag_us(uint32_t lag_us, bool negative = false);
+        void note_arrival_lag_us(uint32_t lag_us, bool negative = false,
+                                 bool saturated = false);
         std::vector<uint32_t> arrival_lag_us() const;
         //: How many samples have been overwritten. Non-zero says the ring wrapped, so the
         //: percentiles above describe the last `kMaxLagSamples` frames and not the run.
@@ -295,6 +296,13 @@ namespace shipinfer::mtmc {
         //: at zero while every lag clamps to 0 -- a barrier every frame appears to reach
         //: instantly, which is the inversion this whole measurement exists to prevent.
         uint64_t lag_samples_negative() const;
+
+        //: How many samples hit the `uint32_t` ceiling (~71.6 minutes) and were clamped down
+        //: to it. The other plane clamps at the same value with the same counter -- without a
+        //: ceiling there it turned one input into two different histograms. Non-zero at all is
+        //: a stalled source rather than a latency figure, and flattening it silently would
+        //: pull the p99 toward a number no deployment ever produced.
+        uint64_t lag_samples_saturated() const;
 
         //: Declared cameras that have never sent a frame. EMPTY is the healthy answer, and a
         //: non-empty one is a configuration fault that is otherwise silent: announced cameras
@@ -382,6 +390,7 @@ namespace shipinfer::mtmc {
         size_t lag_next_ = 0;
         uint64_t lag_overwritten_ = 0;
         uint64_t lag_negative_ = 0;
+        uint64_t lag_saturated_ = 0;
         OnEvent on_event_;
 
         mutable std::mutex lock_;

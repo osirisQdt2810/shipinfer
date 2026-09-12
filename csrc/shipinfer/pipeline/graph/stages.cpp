@@ -461,10 +461,12 @@ namespace shipinfer {
         // two clocks disagreeing -- an NTP step on this shard, or a source stamping ahead --
         // and `backward` cannot see it: that compares a camera's stamps against its OWN
         // history, so a stepped server clock leaves it at zero while every lag reads 0.
-        barrier_->note_arrival_lag_us(
-            static_cast<uint32_t>(std::min<int64_t>(std::max<int64_t>(lag_ns, 0) / 1000,
-                                                    std::numeric_limits<uint32_t>::max())),
-            lag_ns < 0);
+        // AND CLAMPED AT THE CEILING, counted too: the other plane has no `uint32_t` of its
+        // own, so an uncounted clamp here is one input becoming two histograms (#255 r1).
+        const int64_t lag_us_raw = std::max<int64_t>(lag_ns, 0) / 1000;
+        const int64_t ceiling = static_cast<int64_t>(std::numeric_limits<uint32_t>::max());
+        barrier_->note_arrival_lag_us(static_cast<uint32_t>(std::min(lag_us_raw, ceiling)),
+                                      lag_ns<0, lag_us_raw> ceiling);
         // CAUGHT AT THE SUBMIT CALL SITE, which is where the other plane catches it
         // (`elements/mtmc.py`) -- and that matters twice over. ONE CAMERA'S FAULT COSTS THE
         // GROUP'S INSTANT AND NOT THE CLOSING FRAME: `barrier.h` says a throwing association

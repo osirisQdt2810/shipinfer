@@ -1009,7 +1009,8 @@ int main(int argc, char** argv) {
                 std::vector<uint32_t> lag = barrier->arrival_lag_us();
                 std::cout << "mtmc_arrival_lag_us " << slot << " samples " << lag.size()
                           << " overwritten " << barrier->lag_samples_overwritten()
-                          << " negative " << barrier->lag_samples_negative() << "\n";
+                          << " negative " << barrier->lag_samples_negative() << " saturated "
+                          << barrier->lag_samples_saturated() << "\n";
                 std::cout << "mtmc_arrival_lag_us " << slot << " p50 " << percentile(lag, 0.50)
                           << " p95 " << percentile(lag, 0.95) << " p99 "
                           << percentile(lag, 0.99) << " max "

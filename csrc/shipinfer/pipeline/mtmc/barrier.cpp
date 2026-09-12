@@ -124,9 +124,10 @@ namespace shipinfer::mtmc {
         return instant_counts_;
     }
 
-    void InstantBarrier::note_arrival_lag_us(uint32_t lag_us, bool negative) {
+    void InstantBarrier::note_arrival_lag_us(uint32_t lag_us, bool negative, bool saturated) {
         std::lock_guard<std::mutex> held(lock_);
         if (negative) ++lag_negative_;
+        if (saturated) ++lag_saturated_;
         if (arrival_lag_us_.size() < kMaxLagSamples) {
             arrival_lag_us_.push_back(lag_us);
             return;
@@ -134,6 +135,9 @@ namespace shipinfer::mtmc {
         // WRAPS rather than stops. Keeping the first N froze the distribution on the warm-up
         // of any run longer than the ring, while the frame percentiles printed beside it
         // covered the whole run -- two numbers over different windows, with nothing saying so.
+        // AND THE ORDER STOPS BEING CHRONOLOGICAL HERE. `arrival_lag_us()` is ring order
+        // after the first wrap, which the only consumers -- percentiles and a max -- do not
+        // care about. Nothing may read it as a time series.
         arrival_lag_us_[lag_next_] = lag_us;
         lag_next_ = (lag_next_ + 1) % kMaxLagSamples;
         ++lag_overwritten_;
@@ -152,6 +156,11 @@ namespace shipinfer::mtmc {
     uint64_t InstantBarrier::lag_samples_negative() const {
         std::lock_guard<std::mutex> held(lock_);
         return lag_negative_;
+    }
+
+    uint64_t InstantBarrier::lag_samples_saturated() const {
+        std::lock_guard<std::mutex> held(lock_);
+        return lag_saturated_;
     }
 
     InstantBarrier::InstantSizes InstantBarrier::instant_sizes() const {

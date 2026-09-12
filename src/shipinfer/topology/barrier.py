@@ -63,6 +63,7 @@ __all__ = [
     "DROPPED_EXPIRED",
     "DROPPED_FAILED",
     "DROPPED_SHUTDOWN",
+    "LAG_CEILING_US",
     "MAX_LAG_SAMPLES",
     "MISSED_BACKWARD",
     "MISSED_DUPLICATE",
@@ -164,9 +165,15 @@ DEFAULT_SYNC_WINDOW_MS = 60.0
 #: evicts buckets the group is still filling. Measured: `benchmarks/RESULTS.md`.
 DEFAULT_MAX_INSTANTS = 8
 
-#: How many arrival-lag samples one barrier keeps. Mirrors `kMaxLagSamples` on the C++
-#: side: ~800 KB, about an hour of one camera at 50 fps.
-MAX_LAG_SAMPLES = 200000
+#: How many arrival-lag samples one barrier keeps -- `kMaxLagSamples`'s count, which is what
+#: parity needs, at ~7 MB here against the C++ side's ~800 KB (a CPython int is ~28 B plus a
+#: pointer). About three minutes of the fifty-camera fleet this is sized for.
+MAX_LAG_SAMPLES = 200_000
+
+#: The largest lag one sample may hold, mirroring the C++ `uint32_t` clamp (~71.6 minutes).
+#: Python has no ceiling of its own, so without this one input becomes two histograms -- the
+#: V88 sync rule's subject. Saturation is COUNTED, like the negative clamp beside it.
+LAG_CEILING_US = 4_294_967_295
 
 
 class InstantSizes(NamedTuple):
@@ -424,6 +431,7 @@ class InstantBarrier:
         "_lag_negative",
         "_lag_next",
         "_lag_overwritten",
+        "_lag_saturated",
         "_live_set",
         "_max_instants",
         "_newest_capture",
@@ -491,6 +499,7 @@ class InstantBarrier:
         self._lag_next = 0
         self._lag_overwritten = 0
         self._lag_negative = 0
+        self._lag_saturated = 0
         #: How much of the fleet each ended instant held — :attr:`instant_sizes`.
         self._cameras_held = 0
         self._instants_ended = 0
@@ -548,7 +557,9 @@ class InstantBarrier:
         with self._cond:
             return self._live_set
 
-    def note_arrival_lag_us(self, lag_us: int, *, negative: bool = False) -> None:
+    def note_arrival_lag_us(
+        self, lag_us: int, *, negative: bool = False, saturated: bool = False
+    ) -> None:
         """Record how late one frame was: microseconds from its capture stamp to its submit.
 
         HANDED IN rather than measured here, and the C++ twin says the same. The capture
@@ -560,12 +571,15 @@ class InstantBarrier:
         with self._cond:
             if negative:
                 self._lag_negative += 1
+            if saturated:
+                self._lag_saturated += 1
             if len(self._arrival_lag_us) < MAX_LAG_SAMPLES:
                 self._arrival_lag_us.append(int(lag_us))
                 return
-            # WRAPS rather than stops. Keeping the first N froze the distribution on the
-            # warm-up of any run longer than the ring, while the frame percentiles printed
-            # beside it covered the whole run — two numbers over different windows.
+            # WRAPS rather than stops: keeping the first N froze the distribution on a long
+            # run's warm-up while the frame percentiles beside it covered the whole run. So
+            # `arrival_lag_us` is RING order past here, not chronological — percentiles and a
+            # max do not care, and nothing may read it as a time series.
             self._arrival_lag_us[self._lag_next] = int(lag_us)
             self._lag_next = (self._lag_next + 1) % MAX_LAG_SAMPLES
             self._lag_overwritten += 1
@@ -575,6 +589,18 @@ class InstantBarrier:
         """A copy of the samples, because a percentile reorders what it is given."""
         with self._cond:
             return list(self._arrival_lag_us)
+
+    @property
+    def lag_samples_saturated(self) -> int:
+        """How many samples hit the ceiling and were clamped down to it.
+
+        The C++ twin's `uint32_t` clamps at the same value with the same counter. Non-zero at
+        all is a frame more than seventy minutes late, which is a stalled source rather than a
+        latency figure -- and flattening it silently would pull the p99 toward a number no
+        deployment ever produced.
+        """
+        with self._cond:
+            return self._lag_saturated
 
     @property
     def lag_samples_negative(self) -> int:

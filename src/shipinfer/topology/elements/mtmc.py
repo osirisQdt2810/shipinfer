@@ -71,6 +71,7 @@ from shipinfer.topology.barrier import (
     DEFAULT_SYNC_WINDOW_MS,
     DROPPED_FAILED,
     DROPPED_SHUTDOWN,
+    LAG_CEILING_US,
     MISSED_LATE,
     MISSED_WOULD_STARVE,
     InstantBarrier,
@@ -191,7 +192,16 @@ class _MtmcMetrics:
     ``context.metrics is None`` gets one answer instead of an ``if`` per call.
     """
 
-    __slots__ = ("cameras", "element", "instants", "late", "latency", "missing", "starved")
+    __slots__ = (
+        "arrival_lag",
+        "cameras",
+        "element",
+        "instants",
+        "late",
+        "latency",
+        "missing",
+        "starved",
+    )
 
     def __init__(self, registry: Any, element: str) -> None:
         self.element = element
@@ -203,6 +213,7 @@ class _MtmcMetrics:
             self.starved: Counter | None = None
             self.cameras: Gauge | None = None
             self.latency: Histogram | None = None
+            self.arrival_lag: Histogram | None = None
             return
         self.instants = registry.counter(
             "shipinfer_mtmc_instants_total",
@@ -246,6 +257,14 @@ class _MtmcMetrics:
             "Wall-clock microseconds inside one cross-camera association -- cluster "
             "construction, the tracker call and the scatter map. Held under the barrier lock, "
             "so this is also how long the next instant's first frame can queue.",
+        )
+        self.arrival_lag = registry.histogram(
+            "shipinfer_mtmc_arrival_lag_us",
+            "Microseconds between a frame's CAPTURE stamp and its arrival at the barrier. "
+            "Read it against `sync_window_ms`: a p50 above the window means instants close "
+            "on time rather than on evidence, and the lever is chain latency, not the "
+            "window. The barrier keeps the same samples in a ring for the C++ plane's "
+            "summary; this is the Python plane's report of them.",
         )
 
     def instant(self, reason: str) -> None:
@@ -702,7 +721,12 @@ class ShipvisionMtmc(Element):
         # is the two clocks disagreeing, and `backward` cannot see that: it compares a
         # camera's stamps against its OWN history. See `note_arrival_lag_us`.
         lag_us = (time.time() - capture_s) * 1e6
-        self._barrier.note_arrival_lag_us(int(max(0.0, lag_us)), negative=lag_us < 0.0)
+        clamped = int(min(max(0.0, lag_us), LAG_CEILING_US))
+        self._barrier.note_arrival_lag_us(
+            clamped, negative=lag_us < 0.0, saturated=lag_us > LAG_CEILING_US
+        )
+        if self._metrics.arrival_lag is not None:
+            self._metrics.arrival_lag.observe(clamped)
         try:
             outcome = self._barrier.submit(
                 camera_id,
