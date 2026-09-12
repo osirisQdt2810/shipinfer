@@ -769,6 +769,82 @@ Measured with `SHIPINFER_BENCH_SOURCE=nvdec scripts/run_cpp_bench.sh <label>` ov
 RTSP from the pan fixture, 4 GPUs, 70 s with the analysis's 10 s warm-up;
 `SHIPINFER_BENCH_CHAIN` points at a chain whose `sync_window_ms` is the swept variable.
 
+## Camera affinity: a saturation effect, not a deployment-density one
+
+`PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` said the shared worker pool reorders a camera's frames,
+the per-camera tracker refuses a frame that does not advance its stream, and the refusal rate
+rises with the worker count — 2.8% → 16.2% → 37.3% untracked at 24/48/92 workers. It also said,
+in its own words, what those rows could not settle: they were measured at **saturation**
+(12 cameras × 200 fps), where 50 601–76 420 frames were refused at the pipeline queue, so
+"affinity's worth has to be measured as admission at a load the queue does not decimate —
+12 × 20 fps with workers swept — and not from these rows."
+
+Here is that sweep. `queue_rejected` is **0** on every arm, so nothing is being decimated:
+
+| workers | untracked | untracked % | admitted | ids / tracks | frames accepted |
+|---|---|---|---|---|---|
+| **24** | 12 | **0.07%** | 66 446 / 73 844 (90.0%) | 17 / 96 | 16 730 |
+| 48 | 23 | **0.14%** | 66 505 / 73 924 (90.0%) | 17 / 96 | 16 746 |
+| 92 | 32 | **0.19%** | 66 397 / 73 781 (90.0%) | 17 / 96 | 16 737 |
+| 92 (repeat) | 40 | **0.24%** | 66 199 / 73 643 (89.9%) | 17 / 91 | 16 733 |
+
+`frames_dropped 0` on every arm as well. Raw per-arm output is
+`.artifacts/cpp/aff{24,48,92,92b}.log`; the counters above are `track_frames_untracked`,
+`mtmc_observations offered`/`admitted` and `mtmc_identities`, which the run summary's own grep
+does not print — they are in the log.
+
+**The reordering is real and it is negligible.** Untracked rises about 3–4× from 24 workers to
+92 — the effect the item describes — on a base of one frame in fifteen hundred. Admission and
+frames accepted do not move at all; the identity count moves once, 96 tracks to 91 on the
+repeat arm, which is run-to-run variation at a constant 17 identities rather than a trend —
+the 92 arm itself gives 96.
+
+**So the 37.3% was the rate, not the worker count**, which is what the item suspected of its own
+rows and could not prove without this arm. Affinity trades load balance for ordering, and load
+balance is what this project exists to get right; paying that for 0.2% is the wrong trade *at
+this density*.
+
+**WHICH DENSITY, and it is the whole claim** — an earlier draft said "at the design rate" and
+this page has two rows with a claim on that phrase. The deployment is fifty cameras on **sixteen**
+GPUs: **3.1 cameras per device**. This sweep is twelve on four: **3.0 per device** — the same
+box, and that is why it is the right arm. The fifty-on-four row at "### The design load, on four
+of the sixteen GPUs" is **12.5 per device**, four times the deployment's, and it refuses
+`queue_rejected 8645` (23%) — so it fails *this section's own control* and cannot be compared
+with these arms at all. On four devices fifty cameras cannot reach `queue_rejected 0`.
+
+So the verdict is scoped to what was measured, and **the re-open condition is arithmetic rather
+than a feeling**: re-read this table at any load where `queue_rejected` is non-zero — which on
+four devices is fifty cameras, and on the deployment's sixteen is a load this box cannot yet
+generate. The 3.7% untracked in that fifty-on-four row is 17× these numbers and is **not**
+evidence against building the sequencer; it is a measurement at 4× the density with a fifth of
+the frames refused upstream.
+
+**Where the frames that carry no ids go is NOT answered by THESE arms, and a draft of this row
+claimed it was.** It carried a `lag p50` column and a "~240 ms at fifty cameras" beside it, and
+concluded chain latency rather than ordering. Every arm here is **twelve** cameras, so no
+fifty-camera figure came out of this run — that is the whole defect, and the column is struck
+for it.
+
+The instrument itself is real and lives 47 lines up: **"How late a frame reaches the barrier"**
+reports `mtmc_arrival_lag_us` p50 248.5 / 246.8 / 237.5 ms at fifty cameras and 19.4 ms at
+twelve, from `bench.cpp`'s own mtmc block. `MTMC-A-THIRD-OF-FRAMES-ARRIVE-LATE` is closed
+against those numbers. Read that section for the lag; this one is about the worker count.
+
+Measured with, verbatim:
+
+```
+SHIPINFER_BENCH_IMAGE=shipinfer-gst:jammy-nvdec SHIPINFER_BENCH_GPUS=2,3,4,5 \
+SHIPINFER_BENCH_WORKERS=<n> SHIPINFER_BENCH_SOURCE=nvdec SHIPINFER_BENCH_CAMERAS=12 \
+  scripts/run_cpp_bench.sh <label>
+```
+
+The IMAGE is named because `deploy/rootless/cpp.sh` defaults to `shipinfer-gst:jammy`, where an
+nvdec-less binary refuses the source outright; the GPU IDS because the script's own default is
+`2,3,4,5` while neighbouring sections use `0/2/5/6`, so "4 GPUs" alone names a different set.
+GStreamer RTSP from the pan fixture, 70 s. The 10 s warm-up is the ANALYSIS window, not an
+exclusion: 16 730 accepted ÷ (12 × 20) ≈ 69.7 s, so these counters span the whole run. That can
+only inflate untracked, which is the direction that does not flatter the conclusion.
+
 ## The verdict, and the one open question
 
 The ≥5× target needs a ratio to be against, and the four above give opposite answers. Absent
