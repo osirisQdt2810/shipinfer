@@ -136,6 +136,25 @@ class ModelInstance:
         return self._ewma_latency_us
 
     @property
+    def output_specs(self) -> Any:
+        """What this instance's backend says it returns, which a fold changes."""
+        return self._backend.output_specs
+
+    def attach_fold(self, fold: Any) -> bool:
+        """Hand this instance's backend a device fold, if its backend has one.
+
+        True when it took. A backend without ``set_fold`` -- onnx, TorchScript, a mock -- is
+        not a failure: the caller keeps folding on the host, which is what every backend did
+        before. The answer is returned rather than logged here so the caller can say so once
+        for the model instead of once per instance.
+        """
+        setter = getattr(self._backend, "set_fold", None)
+        if setter is None:
+            return False
+        setter(fold)
+        return True
+
+    @property
     def is_ready(self) -> bool:
         return self._ready.is_set()
 
