@@ -1094,16 +1094,24 @@ class TestDocumentationCapsOnlyGetTighter:
 
 
 def _sections(path: Path, heading: str) -> list[tuple[str, int]]:
-    """``(title, line count)`` per section, split on lines starting with ``heading``."""
+    """``(title, line count)`` per section, split on lines starting with ``heading``.
+
+    The blank lines and ``---`` rule that separate two sections belong to NEITHER of them.
+    Counting them as the earlier section's made a section's length depend on whether anything
+    came after it: the last ADR in the file measured three lines shorter than the same text
+    with a successor, so adding one pushed its predecessor over the cap and reddened a ratchet
+    nobody had touched. The allowances below are set against this measure.
+    """
     lines = path.read_text().splitlines()
     starts = [i for i, line in enumerate(lines) if line.startswith(heading)]
-    return [
-        (
-            lines[start][: len(heading) + 60],
-            (starts[n + 1] if n + 1 < len(starts) else len(lines)) - start,
-        )
-        for n, start in enumerate(starts)
-    ]
+    counted = []
+    for n, start in enumerate(starts):
+        end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+        body = lines[start:end]
+        while body and (not body[-1].strip() or body[-1].strip() == "---"):
+            body.pop()
+        counted.append((lines[start][: len(heading) + 60], len(body)))
+    return counted
 
 
 class TestTheCppTiersGatePullRequests:
@@ -1249,7 +1257,7 @@ class TestTheProjectsMarkdownKeepsItsCaps:
     entry is ever split; never raise them to make a new one fit.
     """
 
-    _LOG_MAX, _LOG_ALLOWED = 15, 35
+    _LOG_MAX, _LOG_ALLOWED = 15, 34
     _ADR_MAX, _ADR_ALLOWED = 30, 10
 
     @property
