@@ -953,10 +953,16 @@ class TestTheDeclaredGroupIsWhatAnInstantWaitsFor:
 
     def test_a_chain_with_no_roster_still_learns_its_group_from_traffic(self) -> None:
         """The degenerate case stays degenerate: no roster means the live set is what has been
-        seen, which is what a runner that never drives the lifecycle hooks gets."""
+        SEEN, which is what a runner that never drives the lifecycle hooks gets. Traffic is what
+        makes that testable — asserting an empty set after `open()` would be true before this
+        change as well, and would prove only that an undeclared chain announces nothing."""
         element = opened()
         try:
-            assert element.barrier.live == frozenset()
+            assert element.barrier.live == frozenset(), "nothing is announced"
+
+            element.process(item("cam-a", 0, tracks=[track(1, "cam-a", 0, TALL, SAME_A)]))
+
+            assert element.barrier.live == frozenset({"cam-a"}), "the group is what reported"
         finally:
             element.close()
 
@@ -1121,19 +1127,12 @@ class TestAGroupItsWorkersCannotCoverIsSaidOutLoud:
         assert "4 frame(s) of each instant can be answered" in warned[0], "and the coverage"
         assert "pipeline.workers" in warned[0] and "at least 8" in warned[0], "and the fix"
 
-    def test_a_declared_roster_says_it_again_when_the_cameras_actually_arrive(
+    def test_a_declared_roster_says_it_once_and_not_again_as_its_cameras_arrive(
         self, caplog
     ) -> None:
-        """Two lines in a process lifetime, and deliberately two: the first says the declared
-        configuration cannot work, the second says it has started happening and with how many
-        cameras.
-
-        The second says **8**, not the 5 a ramp would cross at: a chain that declares a roster
-        has it announced at ``open()`` (`_announce_roster`), so the group an instant waits for
-        is the declared one from the first frame — which is what the other plane has always
-        done. A shard that is handed cameras it was never told about still crosses on the way
-        up, which is the case the live count is for.
-        """
+        """One line for a declared roster, because the roster IS the live set from `open()`
+        (ADR-021). Saying it again as the runner announces the same cameras would be the same
+        number twice, the second time when one camera has connected."""
         roster = [f"cam-{index}" for index in range(8)]
         with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
             built = opened({"group": "quay", "cameras": roster}, workers=4)
@@ -1144,9 +1143,26 @@ class TestAGroupItsWorkersCannotCoverIsSaidOutLoud:
                 built.close()
 
         warned = self._warnings(caplog)
-        assert len(warned) == 2, warned
+        assert len(warned) == 1, warned
         assert "8 cameras (its declared roster)" in warned[0]
-        assert "8 cameras (live on this shard)" in warned[1], "the declared group, once"
+
+    def test_a_shard_handed_cameras_nobody_declared_says_it_when_they_arrive(
+        self, caplog
+    ) -> None:
+        """The case the live count is named for, and the one that still crosses on the way up:
+        a chain with no roster, handed cameras by the runner. The line fires once, at the
+        crossing, with the count that crossed."""
+        with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
+            built = opened({"group": "quay"}, workers=4)
+            try:
+                for index in range(8):
+                    built.camera_added(f"cam-{index}")
+            finally:
+                built.close()
+
+        warned = self._warnings(caplog)
+        assert len(warned) == 1, warned
+        assert "5 cameras (live on this shard)" in warned[0], "the crossing, once"
 
     def test_a_group_the_workers_do_cover_says_nothing(self, caplog) -> None:
         roster = [f"cam-{index}" for index in range(8)]
