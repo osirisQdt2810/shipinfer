@@ -3506,12 +3506,18 @@ hook down, for when the operator asked to see something before it is executed.
       `--systems shipinfer` run the flag changed nothing except which file the digest guard
       compared against -- and when that flat file was absent the guard warned and continued,
       while `summary.json` reported the precision anyway.
-      DONE: naming a precision is a CLAIM now, and one the run has to be able to keep.
+      DONE, MERGED as #245 (two review rounds). Naming a precision is a CLAIM now, and one
+      the run has to be able to keep.
       `--precision` defaults to `None` ("nobody asked") rather than to `fp32`, and
       `require_same_engines` REFUSES when a precision was named and there is no flat engine to
       hold the plan to -- naming both ways out (build and install them, or drop the flag and
       measure what is installed). An unnamed precision keeps today's behaviour and its warning,
-      which is what every chain run here takes.
+      which is what every chain run here takes. Round 1 found the remedy line naming
+      `build_engines.py --precision`, a flag that parser has never had, so the operator's way
+      out did not start -- fixed, and the test now hands the printed command to the real
+      parser instead of matching a substring of it. Round 2 ungated the refusal: it had been
+      conditional on a plan existing, so a named precision with neither engine nor plan fell
+      through in silence and the server autobuilt from ONNX after the guard passed.
       WHAT REMAINS is the selection, and it is still the design call this item was filed for:
       resolve the PLAN path by precision (`model.<precision>.plan`, which the repository's
       `engine_file` parameter can already express) or have the bench install the precision's
