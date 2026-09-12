@@ -2808,8 +2808,20 @@ hook down, for when the operator asked to see something before it is executed.
       59 checks / 0 failures with it, 4 parity checks / 0 failures against the re-emitted
       golden.
 
-- [ ] PIPELINE-WORKERS-NEED-CAMERA-AFFINITY · MEASURED 11 Sep and it is the chain's real
-      ceiling: one shared worker pool reorders a camera's frames, the per-camera tracker
+- [x] PIPELINE-WORKERS-NEED-CAMERA-AFFINITY · NOT WORTH BUILDING at the deployment's density,
+      measured 12 Sep. It was OPENED 11 Sep as the chain's real ceiling, and that is the half
+      this item closes against -- the new clause was spliced ahead of the old headline and the
+      line asserted both at once (#256 r1).
+      "DESIGN RATE" WAS THE WRONG PHRASE and #256 r2 was right to block on it: this page uses it
+      for BOTH the fifty-on-four row and this sweep, and they are not the same load. The
+      deployment is 50 cameras on SIXTEEN GPUs = 3.1 per device; this sweep is 12 on four = 3.0
+      per device, the same box, which is why it is the right arm. The fifty-on-four row is 12.5
+      per device -- 4x -- and refuses 23% at the queue, so it fails this measurement's own
+      control and its 3.7% untracked is not evidence against the sequencer.
+      THE RE-OPEN CONDITION IS ARITHMETIC, not a feeling: re-read the table at any load where
+      `queue_rejected` is non-zero, which on four devices is fifty cameras and on the
+      deployment's sixteen is a load this box cannot yet generate.
+      WHAT 11 SEP SAW: one shared worker pool reorders a camera's frames, the per-camera tracker
       refuses a frame that does not advance its stream, and the refusal rate rises with the
       worker count -- 1.8% at 24 workers, 20.2% at 48, 41.9% at 92, while the TRACKED rate
       stays flat at ~260 img/s. So every worker past ~24 buys frames that carry no ids, which
@@ -2839,6 +2851,43 @@ hook down, for when the operator asked to see something before it is executed.
       camera), so 17-41% of a camera's frames reach a tracker and a track cannot be present in
       three CONSECUTIVE instants. So affinity's worth has to be measured as admission at a load
       the queue does not decimate -- 12 x 20 fps with workers swept -- and not from these rows.
+      THAT SWEEP IS DONE, 12 Sep, and it says DO NOT BUILD IT. Its first run's figures are
+      NOT repeated here on purpose: their logs no longer existed, this item's own thesis is
+      that a number with no raw output gets struck, and a superseded table left standing beside
+      its replacement is two answers to one measurement (#256 r3 -- it also made "identities 17
+      over 96 at EVERY worker count" false, since the repeat arm gives 17/91). The figures
+      below are the only ones, re-measured 12 Sep with the logs kept. Four arms, one variable,
+      `queue_rejected 0` and `frames_dropped 0` on every one
+      (`.artifacts/cpp/aff{24,48,92,92b}.log`):
+        24 workers: 12 untracked of 16 730 (0.07%), 66 446/73 844 admitted, ids 17/96
+        48 workers: 23 untracked of 16 746 (0.14%), 66 505/73 924 admitted, ids 17/96
+        92 workers: 32 untracked of 16 737 (0.19%), 66 397/73 781 admitted, ids 17/96
+        92 repeat : 40 untracked of 16 733 (0.24%), 66 199/73 643 admitted, ids 17/91
+      SO THE 37.3% WAS THE RATE, which this item suspected of its own rows and could not prove
+      without this arm. The reordering is real -- untracked rises 3-4x across the sweep -- and
+      it is one frame in fifteen hundred. Affinity trades load balance for ordering and load
+      balance is what this project exists to get right; paying that for 0.2% is the wrong
+      trade. The per-camera sequencer stays unbuilt until a deployment runs saturated, and
+      `benchmarks/RESULTS.md` holds the table to re-read when one does.
+      WHERE THE FRAMES THAT CARRY NO IDS GO IS NOT ANSWERED BY THESE ARMS, and a draft of this
+      line claimed it was: it quoted a ~20 ms arrival lag against the 60 ms window and ~240 ms
+      at fifty cameras, and concluded chain latency rather than ordering. Every arm here is
+      TWELVE cameras, so no fifty-camera figure came out of this run -- that is the defect, and
+      the column is struck for it.
+      AN EARLIER DRAFT OF THIS RETRACTION OVERREACHED and is corrected here rather than left
+      standing (#256 r4): it said the bench emits no arrival-lag metric, which was true when
+      written and false by the time it was read -- #255 merged `mtmc_arrival_lag_us` into
+      `bench.cpp`'s mtmc block, tabled p50 248.5/246.8/237.5 ms at fifty cameras and 19.4 ms at
+      twelve in `benchmarks/RESULTS.md`, and CLOSED `MTMC-A-THIRD-OF-FRAMES-ARRIVE-LATE` against
+      those numbers. It also pointed at `MTMC-LAG-IS-NOT-INSTRUMENTED`, which exists nowhere.
+      A rebase can falsify prose that was true when it was written; the pointer is now to the
+      section and the closed item that actually hold the measurement.
+      ONE PART OF THAT REVIEW IS WRONG, checked rather than accepted: it inferred these arms'
+      logs "almost certainly DO contain a p50 lag line". They do not -- `grep mtmc_arrival_lag_us
+      .artifacts/cpp/aff*.log` is empty, because the binary that ran them was built from this
+      branch's base, which predates #255. The fourteen `mtmc_*` lines they DO carry are the
+      instant, frame and identity counters. So the narrow claim stands on its own evidence and
+      not only on the twelve-camera argument.
       AND THE PRIORITY IS LOWER THAN THIS ITEM READS, which is the useful thing today's
       measurements say about it. At the DESIGN load -- 50 cameras x 20 fps, the sizing this box
       is arranged around -- the tracker refuses **3.7%** of accepted frames, not 37%: 1 105 of
