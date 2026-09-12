@@ -53,6 +53,7 @@ from typing import Any
 from shipinfer.core.errors import ConfigurationError, ServerStateError
 
 __all__ = [
+    "BACKWARD_REFUSALS_BEFORE_ADOPTING",
     "CLOSED_ADVANCED",
     "CLOSED_COMPLETE",
     "CLOSED_WINDOW",
@@ -125,11 +126,24 @@ MISSED_DUPLICATE = "duplicate"
 #: part in the group's association — only the *answer* is not delivered to this frame.
 #: Dropping the entry instead would degrade the instant for every camera that did wait.
 MISSED_WOULD_STARVE = "would_starve"
-#: This camera's *capture* clock went backwards by more than an instant is wide — measured
-#: against that camera's own newest stamp, so a clock that merely sits behind the group never
-#: trips it. What it catches is a STEP, which NTP can deliver at any moment
-#: (`MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK`).
+#: This camera's *capture* clock stepped back past a window, measured against that camera's
+#: own newest stamp — so a clock merely sitting behind the group never trips it, and NTP's
+#: step (`MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK`) does. **One frame per step**:
+#: :data:`BACKWARD_REFUSALS_BEFORE_ADOPTING`.
 MISSED_BACKWARD = "backward"
+# doc: long why a step is adopted rather than refused for its whole length
+#: How many frames a camera is refused before its offered stamp becomes the new reference.
+#:
+#: A step is a **new, persistent time base**, not a transient anomaly, so the reference has to
+#: follow it. Every camera on a shard shares one ``CLOCK_REALTIME`` (``ingest/frame/tag.py``
+#: stamps ``time.time_ns()`` at decode), so an NTP step moves the whole fleet at once: holding
+#: the old reference would refuse *every* frame of *every* camera for the length of the step —
+#: a total MTMC outage in place of the single re-anchoring the anchored instant already
+#: absorbs. One refusal is what the counter needs to make the step visible, and it is also
+#: what stops one stray past stamp from opening an instant nobody joins. The same rule
+#: recovers a camera whose stamp jumped into the future (the DeepStream path takes the
+#: camera's own RTCP clock): one frame refused, then the real clock is adopted again.
+BACKWARD_REFUSALS_BEFORE_ADOPTING = 1
 
 #: How wide an instant is, in milliseconds — the maximum capture spread of one instant, and
 #: the longest any caller waits. **A proposal, not a measurement** (the phase-C plan's open
@@ -366,6 +380,7 @@ class InstantBarrier:
 
     __slots__ = (
         "_announced",
+        "_backward_run",
         "_buckets",
         "_budget",
         "_clock",
@@ -433,10 +448,11 @@ class InstantBarrier:
         self._announced: set[str] = set()
         #: Cameras that have actually submitted a frame. Only consulted before the first
         #: announcement — see :meth:`camera_added`.
-        #: Each camera's newest capture stamp, for the backward-step test. Bounded by the
-        #: fleet and dropped with the camera.
-        self._newest_capture: dict[str, float] = {}
         self._seen: set[str] = set()
+        #: Each camera's newest capture stamp, and how many frames in a row it has refused
+        #: against it. Both bounded by the fleet and dropped with the camera.
+        self._newest_capture: dict[str, float] = {}
+        self._backward_run: dict[str, int] = {}
         self._hooked = False
         #: The answer :meth:`_live` gives, recomputed only when the two sets above change, so
         #: the per-frame completeness test allocates nothing and still hands out an object
@@ -576,6 +592,7 @@ class InstantBarrier:
             self._announced.discard(camera_id)
             self._seen.discard(camera_id)
             self._newest_capture.pop(camera_id, None)
+            self._backward_run.pop(camera_id, None)
             self._refresh_live()
             live = self._live_set
             woken = False
@@ -624,12 +641,17 @@ class InstantBarrier:
                 self._seen.add(camera_id)
                 self._refresh_live()
 
-            # BEFORE ANY BUCKET, against this camera's OWN newest stamp: a step past the
-            # window matches no open bucket and no resolved span, so it would open an instant
-            # in the past and hold a window for cameras whose clocks did not step.
+            # BEFORE ANY BUCKET, against this camera's OWN newest stamp: a stamp past the
+            # window backwards would open an instant in the past that nothing joins. Refused
+            # once and counted, then the camera's next offer becomes the reference — a step is
+            # a new time base (`BACKWARD_REFUSALS_BEFORE_ADOPTING`).
             newest = self._newest_capture.get(camera_id)
             if newest is not None and capture_s < newest - self._window_s:
-                return self._missed(MISSED_BACKWARD, 0)
+                refused = self._backward_run.get(camera_id, 0)
+                if refused < BACKWARD_REFUSALS_BEFORE_ADOPTING:
+                    self._backward_run[camera_id] = refused + 1
+                    return self._missed(MISSED_BACKWARD, 0)
+                newest = None  # adopted: this stamp is the reference from here
 
             bucket = self._match(capture_s)
             if bucket is None:
@@ -646,7 +668,13 @@ class InstantBarrier:
                 self._seal(bucket, CLOSED_ADVANCED)
                 bucket = self._open(capture_s, now)
 
-            self._newest_capture[camera_id] = max(newest or capture_s, capture_s)
+            # `newest is None` is either a first frame or an adopted step; neither may be
+            # dragged forward by a `max` against a reference that no longer applies. And
+            # `newest or capture_s` was a falsy-zero the C++ twin does not have.
+            self._backward_run.pop(camera_id, None)
+            self._newest_capture[camera_id] = (
+                capture_s if newest is None else max(newest, capture_s)
+            )
             bucket.reported[camera_id] = capture_s
             bucket.entries.append(InstantEntry(camera_id, payload))
             bucket.first = min(bucket.first, capture_s)
