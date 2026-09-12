@@ -94,6 +94,11 @@ BLOCKED_SCRIPTS = (
     "csrc/build/bench",
     "csrc/build/test_pipeline",
     "csrc/build/test_dataplane",
+    # A SHELL WRAPPER IS NOT A GATE. This one runs `trtexec` and `nsys profile`, and `trtexec`
+    # is in BLOCKED_COMMANDS precisely because it opens a CUDA context -- it is NVIDIA's binary
+    # and has no `runtime/containment.h` of its own. Putting it in a file removed the only
+    # check it had, which is the "false allow costs a host CUDA context" case exactly.
+    "probe_nsys_trtexec.sh",
 )
 
 # `shipinfer <subcommand>` -- only the ones that touch a device or serve.

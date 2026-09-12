@@ -63,6 +63,12 @@ class TestRefuses:
             "csrc/build/bench --plan model.plan --cameras 50",
             "./csrc/build/test_dataplane",
             "trtexec --onnx=models/yolo26n.onnx",
+            # A SHELL WRAPPER IS NOT A GATE. This one runs `trtexec` and `nsys profile`, and
+            # putting them in a file hid them from a deny-list over command text -- `trtexec`
+            # is NVIDIA's binary and has no containment gate of its own, so the wrapper
+            # removed the only check it had. The script refuses on its own too.
+            "bash scripts/probe_nsys_trtexec.sh",
+            "scripts/probe_nsys_trtexec.sh",
             "python benchmarks/run_bench.py --cameras 50",
             "python benchmarks/compare_baseline.py",
             "ls && pytest -m gpu && echo done",
