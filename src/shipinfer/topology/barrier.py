@@ -668,7 +668,13 @@ class InstantBarrier:
                 if refused < BACKWARD_REFUSALS_BEFORE_ADOPTING:
                     self._backward_run[camera_id] = refused + 1
                     return self._missed(MISSED_BACKWARD, 0)
-                newest = None  # adopted: this stamp is the reference from here
+                # ADOPTED HERE, where the decision is made: `late` and `duplicate` return
+                # below this and above the record, so an adoption decided on a frame those
+                # paths take would be lost and the camera re-measured against the reference
+                # it replaced.
+                self._newest_capture[camera_id] = capture_s
+                self._backward_run.pop(camera_id, None)
+                newest = None
 
             bucket = self._match(capture_s)
             if bucket is None:

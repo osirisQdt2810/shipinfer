@@ -396,8 +396,12 @@ namespace shipinfer::mtmc {
                 ++run;
                 return missed(kMissedBackward, 0);
             }
-            // The camera is on a new time base. Adopt it, and do not let the `max` below drag
-            // the reference back to the one it abandoned.
+            // ADOPTED HERE, where the decision is made, and not below where the bucket is
+            // resolved: `late` and `duplicate` return above that, so a frame that was decided
+            // to be an adoption would otherwise be measured against the reference it replaced
+            // on the very next frame.
+            newest->second = capture_s;
+            backward_run_.erase(camera_id);
             adopted = true;
         }
 
@@ -421,8 +425,18 @@ namespace shipinfer::mtmc {
         }
 
         backward_run_.erase(camera_id);
-        double& newest_for_camera = newest_capture_[camera_id];
-        newest_for_camera = adopted ? capture_s : std::max(newest_for_camera, capture_s);
+        // FIND, not `operator[]`: the subscript default-constructs to 0.0 and `std::max` then
+        // keeps it, so a camera's FIRST frame at a negative stamp recorded 0.0 here and the
+        // real value on the Python plane -- the mirror image of the falsy-zero that plane's
+        // comment warns about, and `test_barrier.py` already submits at -0.4.
+        const auto recorded = newest_capture_.find(camera_id);
+        if (recorded == newest_capture_.end()) {
+            newest_capture_.emplace(camera_id, capture_s);
+        } else if (adopted) {
+            recorded->second = capture_s;
+        } else {
+            recorded->second = std::max(recorded->second, capture_s);
+        }
         bucket->reported[camera_id] = capture_s;
         bucket->entries.push_back(InstantEntry{camera_id, std::move(payload)});
         bucket->first = std::min(bucket->first, capture_s);

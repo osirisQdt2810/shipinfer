@@ -937,6 +937,28 @@ class TestACaptureClockThatStepsBack:
         assert after.reason != MISSED_BACKWARD
         assert held.frame_stats()[MISSED_BACKWARD] == 1
 
+    def test_an_adoption_on_the_late_path_is_still_recorded(self) -> None:
+        """`late` and `duplicate` return before the record at the end of `submit`, so an
+        adoption decided on a frame that takes one of those paths used to be forgotten — and
+        the camera was re-measured against the reference it had already abandoned. The visible
+        cost is the counter: a second, genuine step is then adopted silently instead of being
+        refused and counted once, which is the one thing this guard exists to do."""
+        held = barrier(sync_window_s=0.06, workers=1)
+        held.submit("cam-a", 99.50, "p", associate=flat)  # resolves; span [99.50, 99.50]
+        held.submit("cam-a", 100.0, "p", associate=flat)  # resolves; the reference is 100.0
+
+        stepped = held.submit("cam-a", 99.49, "p", associate=flat)
+        late = held.submit("cam-a", 99.50, "p", associate=flat)  # adopted, and ON the span
+        second_step = held.submit("cam-a", 98.0, "p", associate=flat)
+
+        assert stepped.reason == MISSED_BACKWARD, "one frame pays for the step"
+        assert late.reason == MISSED_LATE, "the adopted frame lands inside a resolved span"
+        assert second_step.reason == MISSED_BACKWARD, (
+            "and the second step is refused against the ADOPTED reference, not adopted "
+            "silently against one the camera left behind"
+        )
+        assert held.frame_stats()[MISSED_BACKWARD] == 2
+
 
 class TestARosterNobodyAnswers:
     """`MTMC-ROSTER-NAMES-NO-CAMERA-A-RUN-HAS`: a declared camera is waited for whether it
