@@ -34,9 +34,10 @@ namespace {
     // Answers one identity per camera, counting calls. Enough to see WHICH tracker a slot got.
     class CountingTracker : public ClusterTracker {
       public:
-        std::map<TrackKey, int64_t> ids(
-            const std::vector<ClusterObservation>& instant) override {
+        std::map<TrackKey, int64_t> ids(const std::vector<ClusterObservation>& instant,
+                                        const std::vector<std::string>& cameras) override {
             ++calls;
+            rostered = cameras;
             std::map<TrackKey, int64_t> out;
             int64_t next = 0;
             for (const ClusterObservation& observation : instant) {
@@ -44,6 +45,9 @@ namespace {
             }
             return out;
         }
+
+        //: The roster the seam was handed, so a test can see it arrive rather than assume it.
+        std::vector<std::string> rostered;
 
         IdentitySizes sizes() const override {
             IdentitySizes out;
@@ -212,7 +216,7 @@ namespace {
         ClusterObservation second{
             TrackKey{"cam1", 4}, {1.f, 0.f}, {0.f, 0.f, 10.f, 10.f}, 1920, 1080};
 
-        const auto out = tracker->ids({first, second});
+        const auto out = tracker->ids({first, second}, {"cam0", "cam1"});
 
         check(out.size() == 2, "every observation of the instant is answered");
         check(out.count(TrackKey{"cam0", 1}) == 1 && out.count(TrackKey{"cam1", 4}) == 1,

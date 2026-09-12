@@ -16,7 +16,13 @@ admitted
 admitted
 admitted cam0#1
 held 1
-scenario gap_restarts
+scenario absence_carries_the_run
+admitted
+admitted
+admitted
+admitted cam0#1
+held 2
+scenario an_empty_view_restarts_the_run
 admitted
 admitted
 admitted
