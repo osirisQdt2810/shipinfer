@@ -2900,6 +2900,18 @@ hook down, for when the operator asked to see something before it is executed.
       measure the pair: host cores at 240 img/s (4.55 today) and p50/p99 frame latency.
       NOTE the same pattern sits in `DetectStage::do_run`, which calls `scratch_.synchronise()`
       after the letterbox kernel before it even enqueues inference.
+      WHAT THE FIX ACTUALLY COSTS, worked out 12 Sep before writing any of it: an event and a
+      completion queue are NOT enough on their own, because `TrtInstance`'s output buffers are
+      one set per instance. Letting the thread enqueue batch N+1 while N is still in flight
+      overwrites the buffers N's scatter has not read yet -- the same use-after-overwrite the
+      mask fold had to be moved to avoid (#239). So the shape is: **the I/O buffers become a
+      small ring** (two sets is enough to overlap one batch with one scatter), the event is
+      recorded per slot, and the instance thread drains completions before reusing a slot. The
+      fold's own `fold_device_`/`fold_host_` join the ring for the same reason.
+      THE PART THAT IS NOT MECHANICAL is `max_batch`-sized buffers x N: the segmenter's are
+      3.1 MB a row x 8 rows x 2 = 50 MB a slot pair per instance, x 2 instances x 4 devices.
+      Measure VRAM before and after, and remember #239 already stopped the largest of those
+      from being copied home -- the host set can be smaller than the device set now.
 
 - [x] THE-BUILD-NEVER-VECTORISES · MEASURED AND CLOSED 11 Sep. `scripts/build_csrc.py` compiles with `-O2` and nothing else
       (`optimise = ["-O0", "-g"] if args.debug else ["-O2"]`), and this box's g++ is 11.4, where
