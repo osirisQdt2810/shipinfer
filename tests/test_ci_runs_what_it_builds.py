@@ -51,12 +51,19 @@ def test_the_glob_is_not_narrowed_to_a_prefix(job: str) -> None:
 
 @pytest.mark.parametrize("job", BUILDING_JOBS)
 def test_a_build_that_produced_nothing_cannot_pass(job: str) -> None:
-    """The other half: a glob that matches nothing must fail the job rather than loop zero
-    times and exit 0."""
+    r"""The other half: a glob that matches nothing must fail the job rather than loop zero
+    times and exit 0.
+
+    `[1-9]` and not `\d`, which matches ZERO: `-ge 0` is true for an empty array, so a
+    workflow where a build that produced nothing passes would have satisfied a test with this
+    name. That is the shape this PR exists to argue against, found in its own guard by #236's
+    review, and the ledger records the scenario: a lane goes red on a runner that built fewer
+    binaries than expected and somebody relaxes the threshold to unstick the queue.
+    """
     text = run_step(job)
 
     assert re.search(
-        r'test "\$\{#binaries\[@\]\}" -ge \d', text
+        r'test "\$\{#binaries\[@\]\}" -ge [1-9][0-9]*', text
     ), f"{job} does not count what it found, so a build that produced nothing would pass"
 
 
