@@ -306,14 +306,76 @@ namespace {
     // `shipvision` asserts on a slot the plan correctly calls unsupported. These two registrars
     // make the tests below about the PLAN rather than about which lanes the build happened to
     // include.
-    const tracking::AssociatorRegistrar kPlanTrack("plan-test", [] {
-        return std::shared_ptr<tracking::Associator>{};
-    });
+    const tracking::AssociatorRegistrar kPlanTrack(
+        "plan-test", [](const tracking::TrackerOptions&) {
+            return std::shared_ptr<tracking::Associator>{};
+        });
     const mtmc::ClusterRegistrar kPlanMtmc("plan-test", [](const mtmc::ClusterOptions&) {
         return std::shared_ptr<mtmc::ClusterTracker>{};
     });
 
     const std::string kTrack = "node track track plan-test\nper camera\n";
+
+    // ----------------------------------------------------------------------- the tracker slot
+
+    void a_track_slot_carries_the_chains_tracker_params() {
+        // `CSRC-TRACKER-OPTIONS`: a chain stating `options: {max_age: 90}` and
+        // `regression_reset: 0` loaded on BOTH planes, both reported `track` as having run,
+        // and they emitted different ids -- because none of it crossed. Zero is the value
+        // that made it undeniable: it says "never recover from a stream restart", and this
+        // plane recovered anyway.
+        const PlanStages built = plan_stages(
+            plan_of(kDetect + "node track track plan-test\nper camera\nregression_reset 0\n" +
+                    "tracker_option max_age 90\ntracker_option track_threshold 0.4\n"),
+            kLoaded);
+
+        check(built.tracks.size() == 1, "one tracker slot");
+        if (built.tracks.empty()) return;
+        const tracking::TrackerOptions& options = built.tracks[0].options;
+        check(options.regression_reset && *options.regression_reset == 0,
+              "the operator's refusal to recover, carried as 0 rather than as an absence");
+        check(options.options.count("max_age") == 1 && options.options.at("max_age") == "90",
+              "and the tracker keyword the chain stated");
+        check(options.options.count("track_threshold") == 1 &&
+                  options.options.at("track_threshold") == "0.4",
+              "including one whose value is not an integer: the LANE converts");
+    }
+
+    void an_unstated_tracker_stays_absent_rather_than_becoming_a_number_here() {
+        // Absent means "the tracker's own default", which both planes already share. A number
+        // invented here would be a second place that default lives.
+        const PlanStages built = plan_stages(plan_of(kDetect + kTrack), kLoaded);
+
+        check(built.tracks.size() == 1, "the slot still runs");
+        check(!built.tracks.empty() && !built.tracks[0].options.regression_reset,
+              "with no frame count of its own");
+        check(!built.tracks.empty() && built.tracks[0].options.options.empty(),
+              "and no keywords: the implementation's defaults stand");
+    }
+
+    void a_tracker_option_stated_twice_is_refused() {
+        // Not last-wins: the lane would silently take whichever line came second, and the
+        // chain could not be read one way.
+        check(refused(kDetect + "node track track plan-test\nper camera\n" +
+                      "tracker_option max_age 90\ntracker_option max_age 30\n"),
+              "one key, one value");
+    }
+
+    void a_negative_frame_count_is_refused() {
+        // The other plane's element refuses it, so no chain produces this line -- and taking
+        // it would run a frame count nothing over there can mean.
+        check(refused(kDetect + "node track track plan-test\nper camera\n"
+                                "regression_reset -1\n"),
+              "a frame count cannot be negative");
+    }
+
+    void a_word_where_a_frame_count_belongs_names_the_line() {
+        // Through the reader's own `as_int`. A bare `stoll` threw `std::invalid_argument`,
+        // which is not a `ConfigError` and takes the reader down rather than refusing a line.
+        check(refused(kDetect + "node track track plan-test\nper camera\n"
+                                "regression_reset soon\n"),
+              "and it is a ConfigError, not an uncaught std::invalid_argument");
+    }
 
     void an_mtmc_slot_reads_the_chains_barrier_knobs() {
         // The reason they are on the plan at all: `ship_person_cpu.yaml` has stated
@@ -378,6 +440,11 @@ int main() {
     try {
         // INSIDE the try, like every other case: the four cross-camera ones were added
         // outside it, so an unexpected throw aborted instead of reporting (#222's review).
+        a_track_slot_carries_the_chains_tracker_params();
+        an_unstated_tracker_stays_absent_rather_than_becoming_a_number_here();
+        a_tracker_option_stated_twice_is_refused();
+        a_negative_frame_count_is_refused();
+        a_word_where_a_frame_count_belongs_names_the_line();
         an_mtmc_slot_reads_the_chains_barrier_knobs();
         an_unstated_window_stays_absent_rather_than_becoming_a_number_here();
         two_mtmc_slots_are_refused_because_no_chain_states_their_groups();
