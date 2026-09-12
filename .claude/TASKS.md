@@ -3074,6 +3074,20 @@ hook down, for when the operator asked to see something before it is executed.
       `SlotCachedRegistry<T>` -- interface, registrar, per-(impl, slot) cache, one refusal that
       takes the noun and the lane -- is cheaper than a third copy, and until then the two can
       drift independently, which is the real cost. Whoever adds the third writes the template.
+      THEY DRIFTED, AND #259 CONVERGED THEM AGAIN, which is this item's cost being paid rather
+      than avoided. `cluster.cpp` built into a LOCAL and inserted only on success, because
+      `made()[key]` default-inserts before the factory runs and a throwing constructor left a
+      null the bench dereferences; its comment named `associator.cpp` as owing the same fix.
+      #259 gave the tracker factory a key table that can throw -- exactly the change that
+      comment predicted would make it reachable -- and the review caught the null. So
+      `associator.cpp` now carries the same `Made{thing, options}` value, the same
+      build-into-a-local, and the same disagreeing-caller refusal.
+      THE TWO ARE NOW ~90 NEAR-IDENTICAL LINES rather than ~60, and one of them had to be
+      re-fixed from the other's comment. That is the strongest argument yet for the template,
+      but it is still TWO: the trigger stated above is unchanged and deliberately so, because
+      "the duplication got worse" is not the same fact as "a third caller exists". What HAS
+      changed is the estimate of the cost -- a drift here is now a defect one seam already
+      documented and the other still had.
 
 - [!] API-WEDGED-REPORT-FLAKE-IS-NOT-A-TIMEOUT · `tests/api/test_streams.py::
       TestNothingBlockingRunsOnTheEventLoop::test_a_wedged_report_is_a_504_and_the_next_request_still_answers`
@@ -3718,11 +3732,30 @@ hook down, for when the operator asked to see something before it is executed.
       parser instead of matching a substring of it. Round 2 ungated the refusal: it had been
       conditional on a plan existing, so a named precision with neither engine nor plan fell
       through in silence and the server autobuilt from ONNX after the guard passed.
-      WHAT REMAINS is the selection, and it is still the design call this item was filed for:
-      resolve the PLAN path by precision (`model.<precision>.plan`, which the repository's
-      `engine_file` parameter can already express) or have the bench install the precision's
-      plan before a run the way `build_engines.py --install` does. `int8` comes back to the
-      choices on the day one of those lands.
+      WHAT REMAINS is the selection, and the design call is now MADE, 12 Sep, in favour of
+      INSTALLING rather than path-resolving. Read the two against the code:
+        (a) `model.<precision>.plan` via `parameters.engine_file`. But `engine_file` is ONE
+            value read straight off `config.yaml`
+            (`repository/model_config.py::engine_file`), so a precision-aware path means
+            either a config file per precision or a dynamic override -- and an override
+            teaches the REPOSITORY layer about precision, which is not its question. Worse,
+            `serve` would then load a different file from `bench` on the same repository,
+            which is the divergence this whole item exists to close.
+        (b) the bench installs the precision's plan first, exactly as
+            `scripts/build_engines.py::_install` already does: copy the flat engine into
+            every version dir under the name `engine_file` resolves to. Precision stays out
+            of the repository entirely, and the digest guard stops being a comparison -- both
+            sides load the same bytes because the run put them there.
+      (b) WINS, and the deciding evidence is that the refusal added by #245 ALREADY tells the
+      operator to do this by hand: `benchmarks/harness/config.py` prints "Build the flat
+      engines with `scripts/build_engines.py <flag>` (which also installs the plan)". The
+      selection half is that sentence stopping being homework. THE COST, stated: the bench
+      would write into `model_repository/<name>/1/` before measuring. That is not a new
+      behaviour -- `--install` is the documented workflow and does it today -- only a new
+      caller, and it needs the same "already identical, skip the copy" guard `_install` has.
+      `int8` comes back to the choices on the day this lands.
+      NOT STARTED as code: two PRs from this session are in review (#256, #258) and the
+      house rule is one at a time, so this waits for them rather than becoming a third.
 
 - [x] BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE · **MERGED as #218 (squash `1054479`, 10 Sep),
       APPROVE on round 3 after two BLOCKING rounds.** Round 2's five findings, and the first is a
