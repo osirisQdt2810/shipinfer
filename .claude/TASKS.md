@@ -4435,6 +4435,13 @@ hook down, for when the operator asked to see something before it is executed.
       half and is only worth it if a chain wants one -- `ship_person_cpu.yaml` does not.
       The second open knob is `attribution_iou`, deliberately left with this entry rather than
       given its own line: it is one register entry, and splitting it would need a second.
+      AND A THIRD THING, from #259's review: `bytetrack.cpp`'s key table is a HAND-KEPT mirror
+      of a struct the other plane never enumerates. Python forwards `**options` to
+      `TRACKERS.build`, so a knob added to shipvision's `ByteTrackTracker::Options` works
+      there the day it lands and becomes a hard load refusal here. Loud is the right direction
+      -- silently dropping it is what #259 fixed -- but it is a drift channel with no test. A
+      test that reads the struct's fields out of the submodule header and compares them to the
+      table would close it, and belongs with whatever reopens this file.
 
 - [x] **CSRC-GRAPH-HAS-NO-TRACKING · COMPLETE 11 Sep. All six PRs merged: #215 (the `track`
       stage), #217 (the instant barrier), #219 (the identity map), #220 (the seam and the

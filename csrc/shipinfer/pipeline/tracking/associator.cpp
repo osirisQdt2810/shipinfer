@@ -53,18 +53,18 @@ namespace shipinfer::tracking {
             return lock;
         }
 
-        std::map<std::pair<std::string, std::string>, std::shared_ptr<Associator>>& made() {
-            static std::map<std::pair<std::string, std::string>, std::shared_ptr<Associator>>
-                cache;
-            return cache;
-        }
+        //: The tracker AND what it was built with, in one entry rather than two maps keyed
+        //: alike: a second caller asking for the same pair with different options is refused
+        //: rather than silently handed the first caller's tracker. `mtmc/cluster.cpp` holds
+        //: its pair the same way, and two parallel maps is a second chance to insert into one
+        //: and not the other.
+        struct Made {
+            std::shared_ptr<Associator> associator;
+            TrackerOptions options;
+        };
 
-        //: What each cached (impl, slot) was BUILT with, so a second caller asking for the
-        //: same pair with different options is refused rather than silently handed the first
-        //: caller's tracker. The cache is the whole reason: whoever calls first wins, and
-        //: without this the loser runs a configuration no chain states.
-        std::map<std::pair<std::string, std::string>, TrackerOptions>& made_options() {
-            static std::map<std::pair<std::string, std::string>, TrackerOptions> cache;
+        std::map<std::pair<std::string, std::string>, Made>& made() {
+            static std::map<std::pair<std::string, std::string>, Made> cache;
             return cache;
         }
 
@@ -73,8 +73,8 @@ namespace shipinfer::tracking {
     std::vector<MadeAssociator> made_associators() {
         std::lock_guard<std::mutex> held(made_lock());
         std::vector<MadeAssociator> out;
-        for (const auto& [key, associator] : made()) {
-            out.push_back(MadeAssociator{key.first, key.second, associator});
+        for (const auto& [key, entry] : made()) {
+            out.push_back(MadeAssociator{key.first, key.second, entry.associator});
         }
         return out;
     }
@@ -85,18 +85,26 @@ namespace shipinfer::tracking {
         if (ASSOCIATORS().has(impl)) {
             std::lock_guard<std::mutex> held(made_lock());
             const std::pair<std::string, std::string> key{impl, slot};
-            std::shared_ptr<Associator>& cached = made()[key];
-            if (!cached) {
-                cached = ASSOCIATORS().create(impl, options);
-                made_options()[key] = options;
-            } else if (!(made_options()[key] == options)) {
-                throw ConfigError(
-                    "tracker slot '" + slot + "' was already built for impl '" + impl +
-                    "' with different options; whoever calls first wins this cache, so the "
-                    "second set would be silently ignored and this slot would run a "
-                    "configuration no chain states");
+            const auto found = made().find(key);
+            if (found != made().end()) {
+                if (!(found->second.options == options)) {
+                    throw ConfigError(
+                        "tracker slot '" + slot + "' was already built for impl '" + impl +
+                        "' with different options; whoever calls first wins this cache, so "
+                        "the second set would be silently ignored and this slot would run a "
+                        "configuration no chain states");
+                }
+                return found->second.associator;
             }
-            return cached;
+            // BUILT INTO A LOCAL FIRST. `made()[key]` default-inserts before the factory runs,
+            // so a constructor that threw left a NULL under that key -- `made_associators()`
+            // publishes it and `bench.cpp`'s per-slot report dereferences it, losing the whole
+            // run's output including the message naming the bad key. Harmless while the
+            // factory could not fail; this PR's key table is what made it reachable, exactly
+            // as `mtmc/cluster.cpp` predicted when it took the same fix.
+            std::shared_ptr<Associator> built = ASSOCIATORS().create(impl, options);
+            made().emplace(key, Made{built, options});
+            return built;
         }
         std::ostringstream known;
         for (const std::string& name : ASSOCIATORS().names()) {

@@ -1222,9 +1222,20 @@ class TestTheTrackerReadsTheChainsParams:
 
     def test_only_a_track_slot_carries_them(self, dims: dict[str, tuple[int, int]]) -> None:
         """`options:` means something else on a `pool` slot, so reading it off every kind
-        would put a tracker line under a detector."""
-        text = self.resolved("{impl: shipvision}", dims)
+        would put a tracker line under a detector.
 
+        THE DETECTOR STATES ONE. Asserting on a slot with no `params:` at all passed with the
+        `node.kind == "track"` guards deleted, which is no guard (#259's review).
+        """
+        chain = self.chain("{impl: shipvision}").replace(
+            "  detect: {impl: pool, model: ship_detector}\n",
+            "  detect: {impl: pool, model: ship_detector, params: {options: {max_age: 90}}}\n",
+        )
+        text = plan_text(
+            resolve_plan(Topology.from_spec(ChainSpec.from_yaml(chain)), dims=dims)
+        )
+
+        assert "tracker_option" not in text
         assert parse_plan(text).node("detect").tracker_options == ()
 
     def test_a_key_stated_twice_is_refused(self) -> None:

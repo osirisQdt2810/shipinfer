@@ -1291,7 +1291,9 @@ def _tracker_option(node: dict[str, object], args: Sequence[str], where: str) ->
         raise PlanSyntaxError(
             f"{where}: tracker option {args[0]!r} is stated twice; one key has one value"
         )
-    node["tracker_options"] = (*options, (args[0], args[1]))
+    # SORTED, because the other plane keeps these in a `std::map` and always emits sorted:
+    # a plan whose lines were swapped by hand re-rendered differently on the two planes.
+    node["tracker_options"] = tuple(sorted((*options, (args[0], args[1]))))
 
 
 #: Verbs that attach to the `node` block above them, the way `capacity` attaches to `queue`.

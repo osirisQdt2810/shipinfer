@@ -183,6 +183,39 @@ namespace {
         check(refused, "and so is a value the key's type cannot take");
     }
 
+    void a_factory_that_threw_leaves_no_entry_behind() {
+        // `made()[key]` default-INSERTED before the factory ran, so a constructor that threw
+        // cached a null under that key. `made_associators()` publishes it and `bench.cpp`'s
+        // per-slot report dereferences it unconditionally -- the operator loses the whole
+        // run's output, including the message naming the key that was wrong. Harmless while
+        // every factory was trivial; the key table above is what made it reachable, which is
+        // what `mtmc/cluster.cpp` predicted when it took this fix first.
+        tracking::TrackerOptions typo;
+        typo.options["no_such_key"] = "1";
+        try {
+            tracking::create_associator("shipvision", "slot_threw", typo);
+        } catch (const ConfigError&) {
+        }
+
+        bool published = false;
+        for (const tracking::MadeAssociator& made : tracking::made_associators()) {
+            check(made.associator != nullptr,
+                  "every published associator is non-null, including after a failed build");
+            if (made.slot == "slot_threw") published = true;
+        }
+        check(!published, "a slot whose tracker never built is not in the cache at all");
+
+        // AND THE SLOT IS STILL BUILDABLE. A cached null would also have made the retry a
+        // silent success returning nothing, rather than a second honest refusal.
+        bool refused_again = false;
+        try {
+            tracking::create_associator("shipvision", "slot_threw", typo);
+        } catch (const ConfigError&) {
+            refused_again = true;
+        }
+        check(refused_again, "and asking again is refused again, not served the cached null");
+    }
+
     void two_callers_that_disagree_about_one_slot_are_refused() {
         // The cache is the reason: whoever calls first wins, so without this the second caller
         // is silently handed the first's tracker and that slot runs options no chain states.
@@ -257,6 +290,7 @@ int main() {
     an_option_bytetrack_does_not_have_is_refused_by_name();
     an_options_value_of_the_wrong_type_is_refused_by_name();
     two_callers_that_disagree_about_one_slot_are_refused();
+    a_factory_that_threw_leaves_no_entry_behind();
     the_registry_refuses_an_absent_name_with_its_own_error();
     made_associators_lists_what_was_built();
     an_unknown_impl_is_refused_by_name();
