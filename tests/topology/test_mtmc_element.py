@@ -988,10 +988,11 @@ class TestARosterNobodyAnswersIsSaidOutLoud:
         return opened({"group": "quay", "cameras": cameras, "sync_window_ms": 20.0})
 
     def test_the_camera_nobody_answers_for_is_named_once(self, caplog, monkeypatch) -> None:
-        """The camera is ANNOUNCED and then never sends, which is what this plane can reach
-        today: it announces what the runner tells it, not the declared roster
-        (`MTMC-THE-TWO-PLANES-DISAGREE-ABOUT-THE-ROSTER`). The C++ plane announces the roster
-        at graph build, which is how the measured fault arose there.
+        """The camera is declared and then never sends, which is the fault ADR-021 accepts and
+        makes visible: `open()` announces the roster, so an instant waits for `cam-ghost` and
+        `silent_cameras` names it. The `camera_added` calls below are the runner's half of the
+        same fact and are redundant with the announce; they stay because a shard really is told
+        about its cameras, and the warning must not depend on which of the two happened.
 
         The grace period is lowered rather than waited out: at the shipped 100 window closes a
         20 ms window takes two seconds, and what is being tested is the judgement, not the

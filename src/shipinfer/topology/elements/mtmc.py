@@ -512,12 +512,13 @@ class ShipvisionMtmc(Element):
                 self._group,
             )
         if self._roster:
-            self._warn_if_workers_cannot_cover(len(self._roster), "its declared roster")
-            # THE LATCH SET HERE, because the declared roster IS the live set from the next
-            # line: without it the first lifecycle hook fires the "live on this shard" line
-            # with the number the line above just gave, for a group with one camera connected.
-            # That second line is for a shard handed cameras nobody declared.
-            self._starved_group = len(self._roster) > self._barrier.budget.permits + 1
+            # THE LATCH IS WHAT THE WARNING SAID, not a second copy of its predicate: the
+            # declared roster IS the live set from the next line, so without the latch the
+            # first lifecycle hook fires "live on this shard" with the number just given, for
+            # a group with one camera connected. That line is for cameras nobody declared.
+            self._starved_group = self._warn_if_workers_cannot_cover(
+                len(self._roster), "its declared roster"
+            )
             self._announce_roster()
         # LAST, once the live set is final: the gauge is documented as "cameras this element's
         # barrier waits for", and announcing the roster after publishing it made that false for
@@ -882,9 +883,11 @@ class ShipvisionMtmc(Element):
         declared a roster of four and was given eight cameras crosses the line hours after
         ``open()``. Latched on the crossing rather than counted per announcement, and
         cleared when the group comes back under the budget so a shard that loses and
-        regains cameras says so each time. A chain that declared an over-large roster
-        gets a line here *as well as* the one at ``open()``, and deliberately: the first
-        says the configuration cannot work and the second says it has started happening.
+        regains cameras says so each time. A chain that declared an over-large roster is
+        judged ONCE, at ``open()``, because since ADR-021 the roster *is* the live set —
+        ``_do_open`` pre-sets the latch so this line cannot repeat the number that one just
+        gave. What is left here is the case ``live on this shard`` is named for: a shard handed
+        cameras nobody declared.
         """
         if self._barrier is None:
             return
@@ -898,7 +901,7 @@ class ShipvisionMtmc(Element):
                 self._starved_group = True
                 self._warn_if_workers_cannot_cover(count, "live on this shard")
 
-    def _warn_if_workers_cannot_cover(self, cameras: int, source: str) -> None:
+    def _warn_if_workers_cannot_cover(self, cameras: int, source: str) -> bool:
         """Warn when the pipeline has too few workers to answer a whole instant.
 
         An instant closes when the **last** live camera of the group reports, and every
@@ -915,13 +918,17 @@ class ShipvisionMtmc(Element):
             cameras: how many cameras an instant of this group waits for.
             source: where that number came from, so the line says whether it is the
                 declared roster or what is actually running.
+
+        Returns:
+            Whether it warned — which is the latch ``_do_open`` sets, so the predicate lives
+            in one place rather than being restated at the call site.
         """
         if self._barrier is None:
-            return
+            return False
         permits = self._barrier.budget.permits
         answerable = permits + 1
         if cameras <= answerable:
-            return
+            return False
         _LOG.warning(
             "mtmc element %r: group %r has %d cameras (%s) but only %d frame(s) of each "
             "instant can be answered -- %d worker(s) may park in a barrier at once and the "
@@ -938,6 +945,7 @@ class ShipvisionMtmc(Element):
             cameras - answerable,
             cameras,
         )
+        return True
 
     def __repr__(self) -> str:
         cameras = 0 if self._barrier is None else len(self._barrier.live)
