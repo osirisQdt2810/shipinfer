@@ -2912,10 +2912,16 @@ hook down, for when the operator asked to see something before it is executed.
       item it was blocking needs the sync's share of an instance thread's wall time AT FIFTY
       cameras, and an estimate from a twelve-camera profile is what that item is currently
       priced on.
-      WHERE TO LOOK FIRST: whether it is nsys's CUDA-event completion trace (the run warns
-      about it and it is on by default), the 50 RTSP servers plus 28 instance threads against
-      nsys's own buffers, or an engine-load failure the profiler swallows -- run the same
-      command with `--seconds 5 --cameras 12` and then 50 to see which variable moves it.
+      TWO CANDIDATES ELIMINATED, 12 Sep. It is NOT the camera count: twelve cameras segfault
+      the same way (`PROFILE=139`, which is SIGSEGV), and the SAME binary at the SAME twelve-
+      camera load exits 0 with 2 341 frames without nsys -- so the binary is fine and the
+      profiler is what breaks it. It is NOT nsys's device-side CUDA event trace either:
+      `--cuda-event-trace=false` (the thing nsys warns about on every run) changes nothing.
+      WHERE TO LOOK NEXT: `--trace` narrowed one at a time (`cuda` alone, then `osrt` alone) to
+      find which tracer takes it down; then whether it is CUPTI against 28 instance threads
+      each holding a TensorRT context, which would point at `--cuda-graph-trace` or at the
+      per-thread buffers. A core file would answer it in one run: the container would need
+      `ulimit -c` and a writable `/tmp`.
 
 - [ ] EXECUTE-BLOCKS-THE-INSTANCE-THREAD · PROFILED 11 Sep: `cudaStreamSynchronize` is **32.2%
       of all CUDA API time** -- 9.64 s over 5 564 calls, 1.73 ms average -- because
