@@ -3022,6 +3022,21 @@ hook down, for when the operator asked to see something before it is executed.
       not at all within a window of a drop), which is a small change and an easy test; what is
       missing is a reason to make it, i.e. a deployment that drains a group while it runs.
 
+- [~] MTMC-GATE-COUNTS-INSTANTS-NOT-SIGHTINGS · THE UPSTREAM HALF of
+      `MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD`, opened as shipvision#16 on 12 Sep.
+      `ObservationGate` enforced "consecutive" by REPLACING its hit map every call, so a track
+      lost its streak whenever its camera was not in the instant the caller built -- fine when
+      an instant holds the whole group, wrong at fleet scale where it holds 24% of it. A streak
+      now survives an instant its camera did not report in and breaks when the camera WAS there
+      without it, bounded by `max_absent_instants` (32, ~2 s at a 60 ms window) so a camera
+      that goes away for good does not leave its streaks behind.
+      THE SEQUENCE FROM HERE, and none of it is optional: (1) shipvision#16 merges; (2) bump
+      `3rdparty/shipvision` in its own commit (ADR-010); (3) port the same rule to
+      `csrc/shipinfer/pipeline/mtmc/gate.cpp`, which is this repository's twin and carries the
+      V88 sync rule; (4) re-emit the gate goldens (`benchmarks/parity/scenarios/gate`) and any
+      identity golden the change moves; (5) re-run the design load and compare admission and
+      identities against 2.2% / 18-over-18. Only (5) answers whether the fix is the whole of it.
+
 - [~] MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD · MEASURED 12 Sep with a new instrument and
       ONE HYPOTHESIS REFUTED BY THE SECOND MEASUREMENT, which is why both are here.
       `mtmc_instant_cameras` says how much of the fleet an instant held when it ended -- the
