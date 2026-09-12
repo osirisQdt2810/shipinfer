@@ -198,6 +198,23 @@ namespace shipinfer {
         return engine_->outputs().at(index).elements_per_row();
     }
 
+    void TrtInstance::set_fold(DeviceFold fold, size_t leave_on_device) {
+        // The buffers below are this instance's device's, and the caller is whoever built the
+        // instance rather than the worker thread that will use them -- so the device is set
+        // here rather than assumed from the constructor that ran just before (ADR-002).
+        GPU_CHECK(gpuSetDevice(device_));
+        if (leave_on_device >= engine_->outputs().size()) {
+            throw BackendError("fold names output " + std::to_string(leave_on_device) + " of " +
+                               engine_->path() + ", which has " +
+                               std::to_string(engine_->outputs().size()));
+        }
+        const size_t bytes = static_cast<size_t>(engine_->max_batch()) * sizeof(float);
+        fold_device_ = DeviceBuffer(bytes);
+        fold_host_ = PinnedBuffer(bytes);
+        kept_on_device_ = leave_on_device;
+        fold_ = std::move(fold);
+    }
+
     void TrtInstance::execute(int rows) {
         if (rows <= 0) return;
         if (rows > engine_->max_batch()) {
@@ -225,7 +242,19 @@ namespace shipinfer {
         }
         if (!context_->enqueueV3(stream_)) throw BackendError("enqueueV3 failed");
 
+        // ON THE STREAM, between the network and the copies: the fold reads what the network
+        // just wrote, and one float a row comes home in place of the bank it reduced.
+        if (fold_) {
+            fold_(*this, rows, static_cast<float*>(fold_device_.get()));
+            GPU_CHECK(gpuMemcpyAsync(fold_host_.get(), fold_device_.get(),
+                                     static_cast<size_t>(rows) * sizeof(float),
+                                     gpuMemcpyDeviceToHost, stream_));
+        }
         for (size_t i = 0; i < engine_->outputs().size(); ++i) {
+            // The folded output stays where it is. This is the copy the fold exists to
+            // remove -- a `(32, 160, 160)` bank is 3.1 MB a row, and nothing above reads it
+            // once an area has been computed from it.
+            if (i == kept_on_device_) continue;
             const auto& spec = engine_->outputs()[i];
             GPU_CHECK(gpuMemcpyAsync(host_outputs_[i].get(), output_buffers_[i].get(),
                                      spec.row_bytes() * static_cast<size_t>(rows),

@@ -170,6 +170,14 @@ namespace shipinfer {
     // have to guess at: no runnable detect slot, TWO of them, a non-square letterbox, a crop
     // element with two classes or with no extent, a class the label table does not name, or a
     // `field` naming a slot no `node` declares.
+    // The fold a slot's engine needs, or nothing when its answers need none.
+    //
+    // Exposed because TWO callers need the same answer at different times: `plan_stages`
+    // builds the stage that folds on the host, and the model loader attaches the same fold to
+    // the ENGINE so the prototype bank never comes home. The second runs before `plan_stages`
+    // can (it needs the loaded models), so the two cannot share through `PlanStages`.
+    std::optional<MaskAreaSpec> fold_of(const ResolvedPlan& plan, const PlanNode& node);
+
     PlanStages plan_stages(const ResolvedPlan& plan, const std::set<std::string>& loaded);
 
 }  // namespace shipinfer

@@ -7,8 +7,22 @@
 
 namespace shipinfer {
 
-    TrtEngineAdapter::TrtEngineAdapter(std::unique_ptr<TrtInstance> instance)
-        : instance_(std::move(instance)) {}
+    TrtEngineAdapter::TrtEngineAdapter(std::unique_ptr<TrtInstance> instance,
+                                       std::optional<AdapterFold> fold)
+        : instance_(std::move(instance)) {
+        const size_t count = instance_->engine().outputs().size();
+        for (size_t i = 0; i < count; ++i) {
+            if (fold && i == fold->prototypes_index) continue;
+            visible_.push_back(i);
+        }
+        if (!fold) return;
+        fold_name_ = fold->name;
+        instance_->set_fold(std::move(fold->fold), fold->prototypes_index);
+    }
+
+    bool TrtEngineAdapter::folds() const {
+        return !fold_name_.empty();
+    }
 
     Device TrtEngineAdapter::device() const {
         return Device::cuda(instance_->device());
@@ -20,19 +34,26 @@ namespace shipinfer {
         return instance_->engine().inputs().front().elements_per_row();
     }
     size_t TrtEngineAdapter::output_row_elems(size_t index) const {
-        return instance_->output_rows(index);
+        // GUARDED ON `folds()`, not on the index alone: with no fold attached
+        // `visible_.size()` is one past the last valid index, and answering 1 there would
+        // make an out-of-range question look like a sensible one.
+        if (folds() && index == visible_.size()) return 1;  // the fold: one area a row
+        return instance_->output_rows(visible_.at(index));
     }
     size_t TrtEngineAdapter::outputs() const {
-        return instance_->engine().outputs().size();
+        return visible_.size() + (folds() ? 1 : 0);
     }
     std::vector<int64_t> TrtEngineAdapter::output_dims(size_t index) const {
-        return instance_->engine().outputs().at(index).dims;
+        if (folds() && index == visible_.size()) return {1};
+        return instance_->engine().outputs().at(visible_.at(index)).dims;
     }
     std::string TrtEngineAdapter::output_name(size_t index) const {
         // The ARTEFACT's own name, which is what a chain file's
         // `params: {segment: {prototypes: output1}}` names -- so the fold asks for the output
-        // it needs rather than for a position the export controls.
-        return instance_->engine().outputs().at(index).name;
+        // it needs rather than for a position the export controls. The fold's own name is the
+        // one the chain gave it, which is how the stage finds it.
+        if (folds() && index == visible_.size()) return fold_name_;
+        return instance_->engine().outputs().at(visible_.at(index)).name;
     }
 
     void TrtEngineAdapter::write_rows(size_t row_offset, const float* src, size_t rows,
@@ -90,7 +111,8 @@ namespace shipinfer {
     }
 
     const float* TrtEngineAdapter::output(size_t index) const {
-        return instance_->output(index);
+        if (folds() && index == visible_.size()) return instance_->fold_result();
+        return instance_->output(visible_.at(index));
     }
 
 }  // namespace shipinfer

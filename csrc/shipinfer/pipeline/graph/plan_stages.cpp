@@ -173,6 +173,26 @@ namespace shipinfer {
         return slot + "_out";
     }
 
+    std::optional<MaskAreaSpec> fold_of(const ResolvedPlan& plan, const PlanNode& node) {
+        // A SEGMENT slot's engine answers detection rows and a prototype bank, never a mask,
+        // so something has to fold the two into one area per crop -- `PoolSegment._reduced` on
+        // the Python plane. An embedder's answers one vector per crop already, so it has no
+        // fold and its response is scattered as it is.
+        if (node.kind != "segment") return std::nullopt;
+        const CropSpec crop = crop_spec_of(plan, node);
+        MaskAreaSpec fold;
+        fold.crop_height = crop.height;
+        fold.crop_width = crop.width;
+        // The plan's cuts where it states them. The defaults on `MaskAreaSpec` agree with the
+        // Python fold's, which is exactly why an absent line was silent: both planes were
+        // right by luck until a chain file said otherwise.
+        if (!node.fold_detections.empty()) fold.detections = node.fold_detections;
+        if (!node.fold_prototypes.empty()) fold.prototypes = node.fold_prototypes;
+        if (node.fold_score) fold.score_threshold = static_cast<float>(*node.fold_score);
+        if (node.fold_mask) fold.mask_threshold = static_cast<float>(*node.fold_mask);
+        return fold;
+    }
+
     PlanStages plan_stages(const ResolvedPlan& plan, const std::set<std::string>& loaded) {
         PlanStages built;
         const PlanNode* detect = nullptr;
@@ -249,20 +269,7 @@ namespace shipinfer {
             // mask, so its stage folds the two into one area per crop before scattering --
             // `PoolSegment._reduced` on the Python plane. An embedder's answers one vector per
             // crop already, so it has no fold and its response is scattered as it is.
-            if (node->kind == "segment") {
-                MaskAreaSpec fold;
-                fold.crop_height = crop.height;
-                fold.crop_width = crop.width;
-                // The plan's cuts where it states them. The defaults on `MaskAreaSpec` agree
-                // with the Python fold's, which is exactly why an absent line was silent:
-                // both planes were right by luck until a chain file said otherwise.
-                if (!node->fold_detections.empty()) fold.detections = node->fold_detections;
-                if (!node->fold_prototypes.empty()) fold.prototypes = node->fold_prototypes;
-                if (node->fold_score)
-                    fold.score_threshold = static_cast<float>(*node->fold_score);
-                if (node->fold_mask) fold.mask_threshold = static_cast<float>(*node->fold_mask);
-                object.fold = fold;
-            }
+            object.fold = fold_of(plan, *node);
             built.objects.push_back(std::move(object));
             built.stage_names.push_back(node->slot);
         }

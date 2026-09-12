@@ -22,6 +22,7 @@
 
 #include "shipinfer/backends/tensorrt/adapter.h"
 #include "shipinfer/backends/tensorrt/engine.h"
+#include "shipinfer/backends/tensorrt/fold.h"
 #include "shipinfer/core/buffers.h"
 #include "shipinfer/core/env.h"
 #include "shipinfer/core/join_on_unwind.h"
@@ -382,9 +383,38 @@ int main(int argc, char** argv) {
         }
         std::cerr << "loading engines...\n";
         const auto load_start = std::chrono::steady_clock::now();
+        // THE FOLD A SLOT'S ENGINE NEEDS, read off the plan rather than off `PlanStages`:
+        // `plan_stages` needs the models loaded, and this is where they are loaded. One fold
+        // per MODEL, because one engine is loaded per model -- and two slots that name one
+        // model with different folds are refused here for the same reason `bench_models`
+        // refuses two slots feeding it rows of different extents.
+        // doc: long why there is a switch at all, and why it defaults to on
+        // THE ESCAPE HATCH, and the A/B this was measured with. `SHIPINFER_DEVICE_FOLD=0`
+        // leaves the fold on the host, where `graph/mask_area.cpp` has always done it: the
+        // same numbers, the bank copied home, and the 1.44 ms a crop back. It is on by default
+        // because the kernel is pinned against that readable fold on a real device
+        // (`test_mask_area_kernel.cpp`) and the copy it removes is the run's largest, and it is
+        // a SWITCH rather than a comment because a new device path on a shared box wants one
+        // command that takes it out of the picture.
+        const bool device_fold_wanted = std::getenv("SHIPINFER_DEVICE_FOLD") == nullptr ||
+                                        env_flag("SHIPINFER_DEVICE_FOLD");
+        std::map<std::string, MaskAreaSpec> folds;
+        for (const PlanNode& node : plan.nodes) {
+            if (!device_fold_wanted) break;
+            const std::optional<MaskAreaSpec> fold = fold_of(plan, node);
+            if (!fold || node.model.empty()) continue;
+            const auto seen = folds.find(node.model);
+            if (seen != folds.end() && !(seen->second == *fold)) {
+                throw ConfigError("slot '" + node.slot + "' folds model '" + node.model +
+                                  "' differently than an earlier slot does; one engine is "
+                                  "loaded per model, so its fold has to be one fold");
+            }
+            folds.emplace(node.model, *fold);
+        }
         std::map<std::string, std::unique_ptr<Model>> models;
         for (const BenchModel& spec : specs) {
             if (spec.engine.empty()) continue;
+            const auto fold = folds.find(spec.name);
             std::vector<std::unique_ptr<ModelInstance>> instances;
             for (int device : options.devices) {
                 // One engine per device, shared by that device's instances: the weights are
@@ -403,9 +433,23 @@ int main(int argc, char** argv) {
                 expect_input_row(engine->inputs().front(), spec.fed_row, spec.name);
                 for (const TensorSpec& t : engine->inputs()) expect_float32(t, spec.name);
                 for (const TensorSpec& t : engine->outputs()) expect_float32(t, spec.name);
+                // ONE PER DEVICE, because the closure captures nothing device-specific but
+                // the instance it is handed at call time -- resolved once here so a plan whose
+                // outputs do not match the fold fails at LOAD, on every device, rather than on
+                // the first batch of one of them.
+                std::optional<AdapterFold> device_fold;
+                if (fold != folds.end()) {
+                    device_fold = mask_area_fold(*engine, fold->second);
+                    if (device == options.devices.front()) {
+                        // Once per model, beside the "max_batch N, static plan" line: which
+                        // outputs come home is a property of the run worth reading in its log.
+                        std::printf("engine %s: folding `%s` on the device\n",
+                                    spec.name.c_str(), device_fold->name.c_str());
+                    }
+                }
                 for (int i = 0; i < spec.per_device; ++i) {
                     auto adapter = std::make_unique<TrtEngineAdapter>(
-                        std::make_unique<TrtInstance>(engine, device));
+                        std::make_unique<TrtInstance>(engine, device), device_fold);
                     const BatchWindow window(static_cast<size_t>(engine->max_batch()),
                                              spec.queue_delay_us);
                     instances.push_back(std::make_unique<ModelInstance>(

@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-12 — the mask fold runs where the batch is, not where its answer is read
+
+A segmentation engine answers 300x38 rows and a `(32, 160, 160)` prototype bank per crop, and
+the bank existed only to be reduced to ONE float: 3.1 MB copied down and 1.44 ms of host CPU a
+crop, 81.3% of all device-to-host memory time at the design load. #232 gave that reduction a
+kernel (10.0 us a crop); this puts it where it can run -- not on the stage, whose `combine`
+runs after the instance is free and its buffers are being overwritten. The fold is the MODEL's:
+`TrtInstance` runs it on its own stream after the network and skips the kept output's copy
+home, and `TrtEngineAdapter` stops advertising that output and adds a width-1 one named by the
+chain, leaving the scatter untouched. `graph/mask_area_plan.cpp` holds every refusal and is
+pure, so the config-facing half needs no driver; `backends/tensorrt/fold.cpp` is the closure
+alone, and the host fold stays as the fallback a non-TensorRT backend needs.
+
+---
+
 ## 2026-09-11 — the instant bound follows the fleet, not a four-camera group's number
 
 `max_instants` defaulted to 8 on both planes and the design load associated nothing: at 50

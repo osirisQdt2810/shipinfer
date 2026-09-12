@@ -42,6 +42,16 @@ namespace shipinfer {
         float mask_threshold = 0.5f;
     };
 
+    // Two slots that name one model have to fold it the same way -- one engine is loaded per
+    // model, so its fold is attached once. Written out rather than defaulted: `= default` for
+    // a comparison is C++20 and this plane is C++17.
+    inline bool operator==(const MaskAreaSpec& a, const MaskAreaSpec& b) {
+        return a.crop_height == b.crop_height && a.crop_width == b.crop_width &&
+               a.detections == b.detections && a.prototypes == b.prototypes &&
+               a.name == b.name && a.score_threshold == b.score_threshold &&
+               a.mask_threshold == b.mask_threshold;
+    }
+
     // `(rows, 1)` areas in the crop's own pixels, one per crop, in the order the crops went in.
     //
     // Throws `ConfigError` when an output is missing and `BackendError` when the two disagree

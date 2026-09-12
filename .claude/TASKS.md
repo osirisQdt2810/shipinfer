@@ -2824,54 +2824,45 @@ hook down, for when the operator asked to see something before it is executed.
       -- for a gain that only appears above the design rate. What it IS still needed for is
       identity at saturation (0.3% admitted), which is a different promise from throughput.
 
-- [ ] MASK-FOLD-BELONGS-ON-THE-DEVICE · HALF DONE 11 Sep (the kernel). PROFILED 11 Sep and it is the largest host item after
-      the engines. `ship_segmenter` answers `(300, 38)` rows and a `(32, 160, 160)` prototype
-      bank per crop; `TrtEngine::execute` copies BOTH to host memory and
-      `graph/mask_area.cpp` reduces the bank to ONE float -- the mask's area. Measured at the
-      shipped shapes on this box: **1.44 ms of CPU per crop** (one core sustains 693 crops/s)
-      and **3.1 MB copied down per crop**, which is the bulk of the run's 39.6 GiB of
-      device-to-host traffic (73.7% of all GPU memory-op time). At 3 000 img/s with ~1.4 ship
-      crops per frame that is 6 cores and 13 GB/s of PCIe to produce 4 200 floats a second.
-      THE FIX: one kernel -- a dot product of 32 coefficients against 32 planes per cell, a
-      compare and a reduction -- run before the copy, so what comes home is one float per crop.
-      It belongs in `shipvision` (`runtime/ops/` on the Python plane has the readable twin the
-      parity test needs), and the Python plane's `PoolSegment._reduced` needs the same seam so
-      the two planes still agree. MEASURE the fold's own time against the 1.44 ms, and the
-      chain's host CPU against 4.55 cores at 240 img/s.
-      THE KERNEL EXISTS AND AGREES (11 Sep, #232): `runtime/ops.cu::mask_area_into`, one block
-      per crop, pinned against `graph/mask_area.cpp` on a real device -- equal areas, the
-      score floor, the mask threshold moving both sides together, and the two refusals.
-      MEASURED at the shipped shapes: **10.0 us/crop against the host fold's 1 442**, 144x.
-      WHAT REMAINS IS WHERE IT RUNS, and it is not the stage: `TrtEngine`'s device output
-      buffers are overwritten by the NEXT batch on that instance, and `ObjectStage`'s `combine`
-      runs after `infer()` has returned and the instance is free again -- so folding there is a
-      use-after-overwrite race. The fold has to happen while the instance still owns the batch
-      (an optional device-side reduction run by the instance thread after `execute` and before
-      the response is published), which is the same seam `ENGINE-COPIES-EVERY-OUTPUT-HOME` needs
-      and is where the 3.1 MB per crop stops being copied. The Python plane needs the same move
-      in `PoolSegment._reduced` (V88), where the equivalent is reducing with torch before
-      `.cpu()`.
-      CORRECTION 11 Sep, from reading `engine/instance.cpp` before writing any of it: the fold
-      does NOT belong on the REQUEST, which is where this item first put it. One batch holds up
-      to `max_batch` requests and the instance scatters each one's SPAN of every output, so a
-      per-request fold would have to run per span (and two requests in one batch could carry
-      different folds, which nothing can reconcile). It belongs on the MODEL: one fold per
-      model, attached where the models are built from `planned.objects[i].fold`, run ONCE per
-      batch over all `offset` rows, and its answer becomes one more output of width 1 that the
-      existing span logic scatters like any other. That also keeps `engine->execute`'s
-      device-only skip list a per-model fact rather than a per-request one.
-      SHAPE, then: `request.h` gains a `DeviceOutput` view type; `TrtEngine::execute` takes the
-      names to leave on the device and exposes `output_device(i)`; `Model`/`ModelInstance` hold
-      the fold; `graph/mask_area_device.{h,cpp}` is a NEW unit on the CUDA line, because
-      `graph/mask_area.cpp` must stay pure -- it is the offline tier's and the golden's.
-      PROFILED AGAIN AT THE DESIGN LOAD, 11 Sep (50 cameras x 20 fps, 92 workers, four A5000s,
-      20 s), and the case is stronger there than at twelve cameras: device-to-host is **42.5 GiB
-      in 6 464 copies and 81.3% of all GPU memory-op time** (73.7% at twelve), host-to-device is
-      191 copies that are engine loads rather than per-frame traffic, and the eight
-      `*-ship_segme` instance threads are the largest single consumer of host CPU -- ~6.8-7.0 s
-      each of 262.7 s total, ~54 s between them. The 92 pipeline workers take 57.8 s and the
-      fifty camera threads 22.8 s. So the fold plus its copy home IS the top item at the load
-      the box is sized for, not only at the small one.
+- [x] MASK-FOLD-BELONGS-ON-THE-DEVICE · WIRED AND MEASURED 12 Sep (the C++ plane; the
+      Python plane's half is `PYTHON-SEGMENT-FOLDS-ON-THE-HOST`).
+      THE KERNEL landed as #232 (`runtime/ops.cu::mask_area_into`, one block per crop, pinned
+      against `graph/mask_area.cpp` on a real device): 10.0 us a crop against the host fold's
+      1 442. What remained was WHERE it runs, and the answer is on the MODEL rather than on the
+      request or the stage -- `TrtInstance` folds on its own stream after the network and
+      before anything is copied home, because the output buffers are overwritten by the next
+      batch and a stage's `combine` runs after the instance is free again.
+      THE SHAPE AS BUILT: `TrtInstance::set_fold(fold, leave_on_device)` runs the reduction and
+      SKIPS the kept output's copy home; `TrtEngineAdapter` stops advertising that output and
+      adds a width-1 one named by the chain, so `ModelInstance`'s scatter is unchanged and the
+      stage reads a named output; `graph/mask_area_plan.cpp` resolves names to shapes and holds
+      every refusal (pure, offline-tested); `backends/tensorrt/fold.cpp` is the closure and
+      nothing else. The host fold stays as the fallback a non-TensorRT backend still needs --
+      `from_plan` folds only when the response does not already carry the named output.
+      MEASURED 12 Sep at the design load, one binary and one switch, two arms twice each:
+      **+13.0% frames retired (35 693-35 839 against 31 519-31 801) and -13.3% host CPU a frame
+      (20.42-20.48 ms against 23.53-23.64)**, with non-overlapping ranges on both. The instance
+      threads' own CPU per frame does not move (15.1-15.3 against 15.3-15.4), which is what says
+      the saving is the copy and the fold rather than scheduling. The segmenter's occupancy
+      rises ~87% -> ~116%: `execute()`'s wall time now contains the fold, so work that was the
+      host's is the GPU's, and at this load the host was the wall.
+      WHAT IT DOES NOT REMOVE: the detection rows still come home -- 300x38 floats a crop,
+      45 KB against the bank's 3.1 MB -- because the host fold is the fallback and needs them.
+
+- [ ] PYTHON-SEGMENT-FOLDS-ON-THE-HOST · THE OTHER PLANE'S HALF of
+      `MASK-FOLD-BELONGS-ON-THE-DEVICE`, opened by the PR that moved the C++ one (V88's rule:
+      a PR that changes one plane says so and opens the item for the other). `PoolSegment.
+      _reduced` (`topology/elements/pool.py`) calls `InstanceMaskArea` on numpy arrays that
+      `TensorRTBackend` has already copied home, so the Python plane still pays the 3.1 MB a
+      crop the C++ plane stopped paying.
+      WHAT IT NEEDS, and it is the same seam in this language: an output a consumer can ask
+      for on the DEVICE (`ENGINE-COPIES-EVERY-OUTPUT-HOME` is the contract half), and the fold
+      done with torch on the device tensor before `.cpu()`. The readable numpy twin stays --
+      it is what `tests/runtime/test_ops_parity.py` and the offline tier check.
+      NOT A CORRECTNESS DIVERGENCE TODAY: both planes fold, both produce the same area, and
+      the cross-plane golden agrees. What diverges is WHERE, and therefore what the backend
+      contract advertises: the C++ adapter stops advertising the prototype bank once its
+      engine folds, and the Python backend advertises everything.
 
 - [ ] ENGINE-COPIES-EVERY-OUTPUT-HOME · `backends/tensorrt/engine.cpp` ends every `execute`
       with one `gpuMemcpyAsync(host_outputs_[i], output_buffers_[i], ..., DeviceToHost)` per

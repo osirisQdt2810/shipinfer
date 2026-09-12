@@ -21,6 +21,7 @@
 
 #include <NvInfer.h>
 
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -93,6 +94,36 @@ namespace shipinfer {
         TrtInstance(const TrtInstance&) = delete;
         TrtInstance& operator=(const TrtInstance&) = delete;
 
+        // doc: long what a fold is for, and the two things it changes about `execute`
+        // A reduction over this instance's own DEVICE outputs, run on its stream after the
+        // network and before anything is copied home. It writes `rows` floats to `areas`.
+        //
+        // WHY IT LIVES HERE AND NOT IN THE STAGE that consumes it: the output buffers are
+        // overwritten by the next batch on this instance, and a stage's `combine` runs after
+        // `execute` has returned and the instance is free again -- so folding there is a
+        // use-after-overwrite race. Only the instance thread, still holding the batch, can
+        // read those buffers safely.
+        //
+        // WHY IT IS A CALLBACK and not a kind of fold this class knows: `TrtInstance` is the
+        // TensorRT seam and has no business knowing what a mask is. The composition root
+        // builds the closure (`graph/mask_area_device.h`) and hands it over.
+        using DeviceFold = std::function<void(const TrtInstance&, int rows, float* areas)>;
+
+        // Attach one, and name the output it makes unnecessary. Call once, before `start`:
+        // the buffers it needs are allocated here.
+        //
+        // `leave_on_device` is the output whose host copy is then never made -- the prototype
+        // bank, 3.1 MB a crop, which is the whole point. `output(leave_on_device)` is not
+        // readable afterwards, which is why the adapter above stops advertising it.
+        void set_fold(DeviceFold fold, size_t leave_on_device);
+        bool folds() const { return static_cast<bool>(fold_); }
+        // The fold's answer on the host: `rows` floats, valid until the next `execute`.
+        const float* fold_result() const { return fold_host_.as<float>(); }
+        // An output where the network wrote it. For a fold; nothing else needs this.
+        const float* output_device(size_t index) const {
+            return static_cast<const float*>(output_buffers_.at(index).get());
+        }
+
         // Runs `rows` of already-preprocessed input that is *already on the device*, in this
         // instance's input buffer. Returns when the outputs are readable on the host.
         //
@@ -137,6 +168,11 @@ namespace shipinfer {
         std::vector<DeviceBuffer> output_buffers_;
         std::vector<PinnedBuffer> host_outputs_;
         DeviceBuffer scratch_;
+        DeviceFold fold_;
+        //: The output the fold replaces, left where the network wrote it. `npos` means none.
+        size_t kept_on_device_ = static_cast<size_t>(-1);
+        DeviceBuffer fold_device_;
+        PinnedBuffer fold_host_;
         uint64_t executed_ = 0;
         uint64_t rows_ = 0;
     };
