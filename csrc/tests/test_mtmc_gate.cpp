@@ -42,6 +42,14 @@ namespace {
         return out;
     }
 
+    // The gate with no roster but the observations' own. Most of these tests are about height
+    // and age, where the two are the same thing; the ones that are about the roster call
+    // `filter` directly and pass it.
+    std::vector<ClusterObservation> admit(ObservationGate& gate,
+                                          const std::vector<ClusterObservation>& instant) {
+        return gate.filter(instant, mtmc::cameras_of(instant));
+    }
+
     ObservationGate::Options options(int min_hits = 3, double min_height = 1.0 / 9.0) {
         ObservationGate::Options built;
         built.min_hits = min_hits;
@@ -71,9 +79,9 @@ namespace {
     void a_track_must_be_seen_min_hits_times_before_it_is_admitted() {
         ObservationGate gate(options(3));
 
-        check(gate.filter({seen("cam0", 1, 200)}).empty(), "not on the first frame");
-        check(gate.filter({seen("cam0", 1, 200)}).empty(), "not on the second");
-        check(gate.filter({seen("cam0", 1, 200)}).size() == 1, "admitted on the third");
+        check(admit(gate, {seen("cam0", 1, 200)}).empty(), "not on the first frame");
+        check(admit(gate, {seen("cam0", 1, 200)}).empty(), "not on the second");
+        check(admit(gate, {seen("cam0", 1, 200)}).size() == 1, "admitted on the third");
         check(gate.hits(TrackKey{"cam0", 1}) == 3, "and its run is three");
     }
 
@@ -84,29 +92,82 @@ namespace {
         // gate already satisfied.
         ObservationGate gate(options(3));
         for (int frame = 0; frame < 5; ++frame) {
-            check(gate.filter({seen("cam0", 1, 50)}).empty(),
+            check(admit(gate, {seen("cam0", 1, 50)}).empty(),
                   "a small track is never admitted");
         }
         check(gate.hits(TrackKey{"cam0", 1}) == 0, "and banks no age at all");
 
         // Now it comes close: it still needs its three qualifying frames.
-        check(gate.filter({seen("cam0", 1, 200)}).empty(), "the first usable frame is hit 1");
-        check(gate.filter({seen("cam0", 1, 200)}).empty(), "then 2");
-        check(gate.filter({seen("cam0", 1, 200)}).size() == 1, "and only then admitted");
+        check(admit(gate, {seen("cam0", 1, 200)}).empty(), "the first usable frame is hit 1");
+        check(admit(gate, {seen("cam0", 1, 200)}).empty(), "then 2");
+        check(admit(gate, {seen("cam0", 1, 200)}).size() == 1, "and only then admitted");
     }
 
-    void a_missed_instant_restarts_the_run_and_bounds_the_map() {
-        // Replacing the map rather than pruning it is what enforces "consecutive", and it is
-        // also what keeps the map bounded by the tracks in flight instead of by uptime.
+    void an_instant_its_camera_was_not_in_is_not_a_miss() {
+        // At fifty cameras an instant holds about a quarter of the fleet, so absence as a miss
+        // makes three consecutive sightings a 1.4% event -- measured, and what collapsed
+        // admission to 2.2%. "Consecutive" is about the track, not the caller's clock.
         ObservationGate gate(options(3));
-        gate.filter({seen("cam0", 1, 200)});
-        gate.filter({seen("cam0", 1, 200)});
-        check(gate.hits(TrackKey{"cam0", 1}) == 2, "two consecutive");
+        admit(gate, {seen("cam0", 1, 200)});
+        admit(gate, {seen("cam0", 1, 200)});
+        check(gate.hits(TrackKey{"cam0", 1}) == 2, "two sightings");
 
-        gate.filter({seen("cam1", 9, 200)});  // cam0#1 not reported
+        admit(gate, {seen("cam1", 9, 200)});  // an instant cam0 was not in
 
-        check(gate.hits(TrackKey{"cam0", 1}) == 0, "the run restarted from nothing");
+        check(gate.hits(TrackKey{"cam0", 1}) == 2, "the run is carried, not broken");
+        check(gate.absent_size() == 1,
+              "and it is counted as an absence, so the bound can end it");
+        check(admit(gate, {seen("cam0", 1, 200)}).size() == 1, "the third SIGHTING admits it");
+    }
+
+    void a_camera_that_reported_an_empty_view_breaks_the_run() {
+        // The other half, and the one the observations alone cannot express: cam0 WAS in this
+        // instant and its track was not. Only the roster tells this from the case above, which
+        // is why `filter` takes one rather than deriving it.
+        ObservationGate gate(options(3));
+        admit(gate, {seen("cam0", 1, 200)});
+        admit(gate, {seen("cam0", 1, 200)});
+
+        gate.filter({}, {"cam0"});  // reported, saw nothing
+
+        check(gate.hits(TrackKey{"cam0", 1}) == 0,
+              "the camera was there and the track was not");
+        check(admit(gate, {seen("cam0", 1, 200)}).empty(), "so the next sighting is hit 1");
+    }
+
+    void a_camera_that_goes_quiet_for_good_does_not_leak_its_streaks() {
+        // The bound, and it is a bound rather than a knob: an absent camera says nothing about
+        // its tracks, so without a limit one that goes away forever leaves them in the map for
+        // the life of the process.
+        ObservationGate::Options bounded = options(3);
+        bounded.max_absent_instants = 2;
+        ObservationGate gate(bounded);
+        admit(gate, {seen("cam0", 1, 200)});
+        admit(gate, {seen("cam0", 1, 200)});
+
+        admit(gate, {seen("cam1", 9, 200)});
+        check(gate.hits(TrackKey{"cam0", 1}) == 2, "carried through the first absence");
+        admit(gate, {seen("cam1", 9, 200)});
+        check(gate.hits(TrackKey{"cam0", 1}) == 2, "and the second, which is the bound");
+        admit(gate, {seen("cam1", 9, 200)});
+
+        check(gate.hits(TrackKey{"cam0", 1}) == 0, "past it the streak is dropped");
         check(gate.size() == 1, "and the map holds only the tracks in flight");
+    }
+
+    void the_absence_bound_is_refused_when_it_would_break_a_run_at_once() {
+        bool refused = false;
+        ObservationGate::Options bad = options(3);
+        bad.max_absent_instants = 0;
+        try {
+            ObservationGate gate(bad);
+        } catch (const ConfigError& error) {
+            refused =
+                std::string(error.what()).find("max_absent_instants must be at least 1") !=
+                std::string::npos;
+        }
+
+        check(refused, "0 is the behaviour this replaced, not a tighter version of it");
     }
 
     void the_height_test_is_strictly_greater_than_the_threshold() {
@@ -114,8 +175,8 @@ namespace {
         // is not admitted, which matters because 1/9 of 1080 is exactly 120.
         ObservationGate gate(options(1, 120.0 / 1080.0));
 
-        check(gate.filter({seen("cam0", 1, 120)}).empty(), "exactly at the threshold: out");
-        check(gate.filter({seen("cam0", 2, 121)}).size() == 1, "a pixel over: in");
+        check(admit(gate, {seen("cam0", 1, 120)}).empty(), "exactly at the threshold: out");
+        check(admit(gate, {seen("cam0", 2, 121)}).size() == 1, "a pixel over: in");
     }
 
     void a_frame_with_no_extent_admits_nothing_rather_than_dividing_by_zero() {
@@ -123,7 +184,7 @@ namespace {
         ClusterObservation broken = seen("cam0", 1, 200);
         broken.frame_height = 0;
 
-        check(gate.filter({broken}).empty(),
+        check(admit(gate, {broken}).empty(),
               "a frame whose extent nobody filled in is a wiring fault, and admitting every "
               "track through it is the failure this gate exists for");
         check(gate.hits(TrackKey{"cam0", 1}) == 0, "and it accrues no age either");
@@ -135,7 +196,7 @@ namespace {
         ObservationGate gate(options(1));
 
         const auto admitted =
-            gate.filter({seen("cam2", 1, 200), seen("cam0", 1, 200), seen("cam1", 1, 200)});
+            admit(gate, {seen("cam2", 1, 200), seen("cam0", 1, 200), seen("cam1", 1, 200)});
 
         check(admitted.size() == 3, "all three qualify");
         check(admitted[0].key.camera_id == "cam2" && admitted[2].key.camera_id == "cam1",
@@ -152,7 +213,7 @@ namespace {
         std::string message;
 
         try {
-            gate.filter({seen("cam0", 1, 200.0), seen("cam0", 1, 200.0)});
+            admit(gate, {seen("cam0", 1, 200.0), seen("cam0", 1, 200.0)});
         } catch (const InferenceError& error) {
             message = error.what();
         }
@@ -182,23 +243,23 @@ namespace {
         ObservationGate gate(options(3));
         const std::vector<ClusterObservation> instant = {seen("cam0", 1, 200)};
 
-        gate.filter(instant);
-        gate.filter(instant);
+        admit(gate, instant);
+        admit(gate, instant);
 
-        check(gate.filter(instant).size() == 1,
+        check(admit(gate, instant).size() == 1,
               "the third submission admits, whether or not the second was applied");
         check(gate.hits(TrackKey{"cam0", 1}) == 3, "and the run counts every submission");
     }
 
     void reset_forgets_every_run() {
         ObservationGate gate(options(3));
-        gate.filter({seen("cam0", 1, 200)});
-        gate.filter({seen("cam0", 1, 200)});
+        admit(gate, {seen("cam0", 1, 200)});
+        admit(gate, {seen("cam0", 1, 200)});
 
         gate.reset();
 
         check(gate.size() == 0, "nothing held");
-        check(gate.filter({seen("cam0", 1, 200)}).empty(), "and the run starts again from one");
+        check(admit(gate, {seen("cam0", 1, 200)}).empty(), "and the run starts again from one");
     }
 
 }  // namespace
@@ -207,7 +268,10 @@ int main() {
     the_options_are_refused_when_they_would_admit_anything();
     a_track_must_be_seen_min_hits_times_before_it_is_admitted();
     a_track_that_is_too_small_never_accrues_age();
-    a_missed_instant_restarts_the_run_and_bounds_the_map();
+    an_instant_its_camera_was_not_in_is_not_a_miss();
+    a_camera_that_reported_an_empty_view_breaks_the_run();
+    a_camera_that_goes_quiet_for_good_does_not_leak_its_streaks();
+    the_absence_bound_is_refused_when_it_would_break_a_run_at_once();
     the_height_test_is_strictly_greater_than_the_threshold();
     a_frame_with_no_extent_admits_nothing_rather_than_dividing_by_zero();
     the_admitted_keep_their_input_order();

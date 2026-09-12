@@ -38,9 +38,10 @@ namespace {
     // Enough to tell "the stage gave me this row" from "the stage gave me the wrong row".
     class ScriptedTracker : public mtmc::ClusterTracker {
       public:
-        std::map<TrackKey, int64_t> ids(
-            const std::vector<ClusterObservation>& instant) override {
+        std::map<TrackKey, int64_t> ids(const std::vector<ClusterObservation>& instant,
+                                        const std::vector<std::string>& cameras) override {
             seen = instant;
+            roster = cameras;
             std::map<TrackKey, int64_t> out;
             for (const ClusterObservation& observation : instant) {
                 out[observation.key] = observation.key.track_id * 10;
@@ -51,14 +52,17 @@ namespace {
         IdentitySizes sizes() const override { return IdentitySizes{}; }
 
         std::vector<ClusterObservation> seen;
+        //: The roster the stage handed down, so a test can assert the barrier's own entries
+        //: reach the tracker rather than a set re-derived from the observations.
+        std::vector<std::string> roster;
     };
 
     // A TRACKER THAT ANSWERS `-1`, which is what the seam does for an observation the gate
     // did not admit: "no identity yet", not an identity called -1.
     class GatingTracker : public mtmc::ClusterTracker {
       public:
-        std::map<TrackKey, int64_t> ids(
-            const std::vector<ClusterObservation>& instant) override {
+        std::map<TrackKey, int64_t> ids(const std::vector<ClusterObservation>& instant,
+                                        const std::vector<std::string>&) override {
             std::map<TrackKey, int64_t> out;
             for (const ClusterObservation& observation : instant) {
                 out[observation.key] = mtmc::kUnidentified;
@@ -73,7 +77,8 @@ namespace {
     // (camera, track) in one frame, a zero embedding, a second embedding width.
     class RefusingTracker : public mtmc::ClusterTracker {
       public:
-        std::map<TrackKey, int64_t> ids(const std::vector<ClusterObservation>&) override {
+        std::map<TrackKey, int64_t> ids(const std::vector<ClusterObservation>&,
+                                        const std::vector<std::string>&) override {
             throw InferenceError("cam0#7 appears twice in one instant");
         }
 
@@ -235,6 +240,13 @@ namespace {
         check(out != nullptr && out->empty(), "and the output name exists and is empty");
         check(barrier->instant_stats().count(mtmc::kClosedComplete) == 1,
               "the instant closed on this camera's report rather than waiting for it");
+        // AND THE TRACKER WAS TOLD IT REPORTED. An empty observation list cannot say this, so
+        // the roster travels beside it: the gate breaks a streak on a camera that was here and
+        // saw nothing, and carries one across a camera that never landed in the window. Same
+        // input, opposite answers, and only the barrier's entries tell them apart.
+        check(tracker->roster == std::vector<std::string>{"cam0"},
+              "the roster reaching the tracker is the barrier's entries, not a set re-derived "
+              "from observations that do not exist");
     }
 
     void the_answer_is_read_out_by_key_and_never_by_position() {

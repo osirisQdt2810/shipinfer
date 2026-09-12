@@ -17,12 +17,18 @@ GOLDEN = Path(__file__).resolve().parent / "golden" / "gate"
 __all__ = ["GOLDEN", "SCENARIOS", "GateScenario", "load", "render_gate"]
 
 
+class Instant(NamedTuple):
+    #: Every camera that reported, whether or not it saw anything -- the roster the gate
+    #: needs. A camera here with no track of its own reported an EMPTY VIEW.
+    cameras: list[str]
+    tracks: list[tuple[str, int, float]]
+
+
 class GateScenario(NamedTuple):
     name: str
     min_hits: int
     min_height_fraction: float
-    #: One list of ``(camera, track, box_height_px)`` per instant.
-    instants: list[list[tuple[str, int, float]]]
+    instants: list[Instant]
 
 
 def load(name: str) -> list[GateScenario]:
@@ -43,11 +49,19 @@ def load(name: str) -> list[GateScenario]:
             raise ValueError(f"{path}: unknown line {stripped!r}")
         if not scenarios:
             raise ValueError(f"{path}: an `instant` before any `scenario`")
-        instant: list[tuple[str, int, float]] = []
+        instant = Instant(cameras=[], tracks=[])
         for field in rest:
+            # A BARE CAMERA NAME is a camera that reported and saw nothing: it joins the
+            # roster and contributes no observation. The old format could not say it, and
+            # without it neither plane's harness can reach the rule that tells an empty view
+            # from an absence.
+            if "#" not in field:
+                instant.cameras.append(field)
+                continue
             key, height = field.split(":")
             camera, track = key.split("#")
-            instant.append((camera, int(track), float(height)))
+            instant.cameras.append(camera)
+            instant.tracks.append((camera, int(track), float(height)))
         scenarios[-1].instants.append(instant)
     return scenarios
 
@@ -86,7 +100,9 @@ def render_gate(scenarios: list[GateScenario]) -> str:
         )
         lines.append(f"scenario {scenario.name}")
         for instant in scenario.instants:
-            admitted = gate.filter([observation(*entry) for entry in instant])
+            admitted = gate.filter(
+                [observation(*entry) for entry in instant.tracks], cameras=instant.cameras
+            )
             names = " ".join(f"{o.key.camera_id}#{o.key.track_id}" for o in admitted)
             lines.append(f"admitted {names}".rstrip())
         lines.append(f"held {len(gate)}")

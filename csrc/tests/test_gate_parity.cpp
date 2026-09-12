@@ -35,10 +35,16 @@ namespace {
         }
     }
 
+    struct Instant {
+        //: Every camera that reported, whether or not it saw anything -- the roster.
+        std::vector<std::string> cameras;
+        std::vector<ClusterObservation> observations;
+    };
+
     struct Scenario {
         std::string name;
         ObservationGate::Options options;
-        std::vector<std::vector<ClusterObservation>> instants;
+        std::vector<Instant> instants;
     };
 
     // `<camera>#<track>:<box_height_px>` -- the scenario file's header states the format.
@@ -76,9 +82,20 @@ namespace {
             }
             if (head != "instant") throw ConfigError("unknown line '" + line + "'");
             if (scenarios.empty()) throw ConfigError("an `instant` before any `scenario`");
-            std::vector<ClusterObservation> instant;
+            Instant instant;
             std::string field;
-            while (stream >> field) instant.push_back(parse_field(field));
+            while (stream >> field) {
+                // A BARE CAMERA NAME is a camera that reported and saw nothing. It joins the
+                // roster and contributes no observation, which is the one thing the old
+                // `<camera>#<track>:<height>` format could not say.
+                if (field.find('#') == std::string::npos) {
+                    instant.cameras.push_back(field);
+                    continue;
+                }
+                const ClusterObservation observation = parse_field(field);
+                instant.cameras.push_back(observation.key.camera_id);
+                instant.observations.push_back(observation);
+            }
             scenarios.back().instants.push_back(std::move(instant));
         }
         return scenarios;
@@ -94,9 +111,10 @@ namespace {
         for (const Scenario& scenario : scenarios) {
             ObservationGate gate(scenario.options);
             written.push_back("scenario " + scenario.name);
-            for (const std::vector<ClusterObservation>& instant : scenario.instants) {
+            for (const Instant& instant : scenario.instants) {
                 std::string names;
-                for (const ClusterObservation& admitted : gate.filter(instant)) {
+                for (const ClusterObservation& admitted :
+                     gate.filter(instant.observations, instant.cameras)) {
                     if (!names.empty()) names += " ";
                     names += admitted.key.str();
                 }

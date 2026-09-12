@@ -3071,7 +3071,7 @@ hook down, for when the operator asked to see something before it is executed.
       planes, twelve open instants drained to four. Deleting the clamp turns the C++ check red
       on both of its assertions (139 checks, 2 failures) and the Python one on the bound.
 
-- [~] MTMC-GATE-COUNTS-INSTANTS-NOT-SIGHTINGS · THE UPSTREAM HALF of
+- [~] MTMC-GATE-COUNTS-INSTANTS-NOT-SIGHTINGS · (1)-(4) DONE 12 Sep, (5) OPEN. THE UPSTREAM HALF of
       `MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD`, opened as shipvision#16 on 12 Sep.
       `ObservationGate` enforced "consecutive" by REPLACING its hit map every call, so a track
       lost its streak whenever its camera was not in the instant the caller built -- fine when
@@ -3088,7 +3088,21 @@ hook down, for when the operator asked to see something before it is executed.
       `3rdparty/shipvision` in its own commit (ADR-010); (3) port the same rule to
       `csrc/shipinfer/pipeline/mtmc/gate.cpp`, which is this repository's twin and carries the
       V88 sync rule -- and it must TAKE THE ROSTER from the start rather than re-derive it,
-      which is the round-1 defect above arriving pre-solved; (4) re-emit the gate goldens (`benchmarks/parity/scenarios/gate`) and any
+      which is the round-1 defect above arriving pre-solved;
+      (1)-(4) DONE 12 Sep. shipvision#16 merged at `9c53df1`; the pin is bumped in its own
+      commit; `gate.{h,cpp}` carries the streak, the absence counter and `max_absent_instants`,
+      and `filter` REQUIRES the roster where the reference defaults it -- one production caller
+      here, so a defaulted one would be a trapdoor with nobody to justify it. The roster comes
+      from the barrier's own `InstantEntry`s in `stages.cpp`, which is the only place that
+      knows a camera reported an empty view, and `ClusterTracker::ids` carries it down.
+      THE HARNESS REACHES IT NOW, which it could not before: the shared scenario format takes
+      a bare camera name for "reported, saw nothing", so `absence_carries_the_run` and
+      `an_empty_view_restarts_the_run` are two scenarios that differ only in the roster and
+      the golden gives them opposite answers. `max_absent_instants` is the one default no
+      scenario can reach (33 instant lines for one number), so a new test compares the C++
+      constant against the reference's signature directly.
+      EVIDENCE: both probes are parity failures at the right lines -- dropping the carry
+      breaks golden lines 21-22, deriving the roster instead of taking it breaks line 27. (4) re-emit the gate goldens (`benchmarks/parity/scenarios/gate`) and any
       identity golden the change moves; (5) re-run the design load and compare admission and
       identities against 2.2% / 18-over-18. Only (5) answers whether the fix is the whole of it.
 

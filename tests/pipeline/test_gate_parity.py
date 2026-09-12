@@ -11,6 +11,8 @@ runs.
 
 from __future__ import annotations
 
+import inspect
+import re
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -88,6 +90,49 @@ class TestTheReferenceCommitsBeforeTheInstantIsApplied:
             "`csrc/shipinfer/pipeline/mtmc/gate.cpp` and update the pin in test_mtmc_gate.cpp"
         )
         assert gate.hits(key) == 3
+
+
+class TestBothPlanesDefaultToTheSameNumbers:
+    """The golden pins BEHAVIOUR at the options a scenario names, so it cannot see a default.
+
+    `max_absent_instants` is the one that matters and the one no scenario can reach: pinning it
+    in the golden would take 33 near-identical instant lines for a single number. So the
+    constants are compared directly, from the C++ header and the reference's own signature.
+    """
+
+    #: The C++ spelling of each default, and the reference keyword it has to equal.
+    CONSTANTS = {
+        "min_hits": "kDefaultMinHits",
+        "min_height_fraction": "kDefaultMinHeightFraction",
+        "max_absent_instants": "kDefaultMaxAbsentInstants",
+    }
+
+    @staticmethod
+    def _cpp_default(name: str) -> str:
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "csrc"
+            / "shipinfer"
+            / "pipeline"
+            / "mtmc"
+            / "gate.h"
+        ).read_text(encoding="utf-8")
+        found = re.search(rf"constexpr \w+ {name} = ([^;]+);", source)
+        assert found, f"{name} is not a constant in gate.h any more"
+        return found.group(1).strip()
+
+    @pytest.mark.parametrize("keyword,constant", sorted(CONSTANTS.items()))
+    def test_the_cpp_constant_is_the_references_default(
+        self, keyword: str, constant: str
+    ) -> None:
+        from shipvision.mtmc.gating import ObservationGate
+
+        reference = inspect.signature(ObservationGate.__init__).parameters[keyword].default
+
+        assert eval(self._cpp_default(constant)) == pytest.approx(reference), (
+            f"the C++ gate defaults {keyword} to {self._cpp_default(constant)} and the "
+            f"reference to {reference}; two defaults for one knob is how they drift"
+        )
 
 
 class TestTheCppGateReadsTheSameFiles:

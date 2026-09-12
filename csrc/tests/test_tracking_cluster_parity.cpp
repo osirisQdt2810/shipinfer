@@ -17,6 +17,7 @@
 
 #include "shipinfer/core/types.h"
 #include "shipinfer/pipeline/mtmc/cluster.h"
+#include "shipinfer/pipeline/mtmc/gate.h"
 #include "tests/parity_files.h"
 
 namespace {
@@ -103,7 +104,8 @@ namespace {
             written.push_back("scenario " + scenario.name);
             for (int instant = 0; instant < scenario.repeats; ++instant) {
                 std::vector<std::string> answers;
-                for (const auto& [key, global_id] : tracker->ids(scenario.instant)) {
+                for (const auto& [key, global_id] :
+                     tracker->ids(scenario.instant, mtmc::cameras_of(scenario.instant))) {
                     answers.push_back(key.str() + "=" + std::to_string(global_id));
                 }
                 // SORTED, because the golden is: the reference answers in its cluster's
@@ -171,7 +173,8 @@ namespace {
                 tracker->ids({looks("cam0", 1, {1.0f, 0.0f}),
                               looks("cam1", 1,
                                     last ? std::vector<float>{0.0f, 0.0f}
-                                         : std::vector<float>{1.0f, 0.0f})});
+                                         : std::vector<float>{1.0f, 0.0f})},
+                             {"cam0", "cam1"});
             } catch (const InferenceError& error) {
                 zero_message = error.what();
             }
@@ -187,7 +190,8 @@ namespace {
                 second->ids({looks("cam0", 1, {1.0f, 0.0f, 0.0f}),
                              looks("cam1", 1,
                                    last ? std::vector<float>{1.0f, 0.0f}
-                                        : std::vector<float>{1.0f, 0.0f, 0.0f})});
+                                        : std::vector<float>{1.0f, 0.0f, 0.0f})},
+                            {"cam0", "cam1"});
             } catch (const InferenceError& error) {
                 width_message = error.what();
             }
@@ -227,12 +231,13 @@ namespace {
 
         size_t identified_at_the_default = 0;
         for (int repeat = 0; repeat < 3; ++repeat) {
-            for (const auto& [key, global_id] : strict->ids(instant)) {
+            for (const auto& [key, global_id] :
+                 strict->ids(instant, mtmc::cameras_of(instant))) {
                 if (global_id != mtmc::kUnidentified) ++identified_at_the_default;
             }
         }
         size_t identified_as_stated = 0;
-        for (const auto& [key, global_id] : stated->ids(instant)) {
+        for (const auto& [key, global_id] : stated->ids(instant, mtmc::cameras_of(instant))) {
             if (global_id != mtmc::kUnidentified) ++identified_as_stated;
         }
 

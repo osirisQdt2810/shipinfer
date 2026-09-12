@@ -2,6 +2,12 @@
 #
 #   scenario <name> <min_hits> <min_height_fraction>
 #   instant  <camera>#<track>:<box_height_px> ...      (frames are 1920x1080 throughout)
+#   instant  <camera>                                  a camera that reported and SAW NOTHING
+#
+# A bare camera name joins the instant's roster with no observation of its own. That is the
+# one thing the format could not say before, and the difference the gate turns on: a camera
+# that was there and saw nothing breaks its tracks' streaks, one that never landed says
+# nothing about them.
 #
 # Heights are pixels of a 1080-tall frame so the fraction is readable: 200 is well over a
 # ninth, 50 is well under, and 120 is exactly 1/9 of 1080 -- which is the boundary the
@@ -27,11 +33,24 @@ instant cam0#1:200
 instant cam0#1:200
 instant cam0#1:200
 
-# One missed instant restarts the run -- which is also what bounds the map.
-scenario gap_restarts 3 0.1111111111111111
+# AN INSTANT ITS CAMERA WAS NOT IN IS NOT A MISS. At fifty cameras an instant holds about a
+# quarter of the fleet, so treating absence as a miss makes three consecutive sightings a 1.4%
+# event -- measured, and it is what collapsed admission to 2.2%. cam0 is absent for one instant
+# and its run survives, so the fourth line is its third SIGHTING and it is admitted.
+scenario absence_carries_the_run 3 0.1111111111111111
 instant cam0#1:200
 instant cam0#1:200
 instant cam1#9:200
+instant cam0#1:200
+
+# AND AN EMPTY VIEW IS NOT AN ABSENCE. cam0 reported the third instant and saw nothing, so it
+# WAS there and its track was not: the run restarts and the fourth line is only hit 1. Without
+# the roster these two scenarios are indistinguishable, which is the defect this format change
+# exists to make reachable.
+scenario an_empty_view_restarts_the_run 3 0.1111111111111111
+instant cam0#1:200
+instant cam0#1:200
+instant cam0
 instant cam0#1:200
 
 # Strictly greater than the threshold: 120 of 1080 is exactly 1/9 and is OUT.

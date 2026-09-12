@@ -66,8 +66,13 @@ namespace shipinfer::mtmc {
         // reached here is a track the caller decided to trust, so one that matches nothing
         // starts a new identity rather than being dropped -- the reference left such tracks at
         // `-1` and published them.
-        virtual std::map<TrackKey, int64_t> ids(
-            const std::vector<ClusterObservation>& instant) = 0;
+        //
+        // `cameras` is the instant's ROSTER -- every camera that reported, whether or not it
+        // saw anything. The observations cannot express an empty view, and the gate needs the
+        // difference: a camera that was there and saw nothing breaks its tracks' streaks,
+        // while one that never landed in the window says nothing about them at all.
+        virtual std::map<TrackKey, int64_t> ids(const std::vector<ClusterObservation>& instant,
+                                                const std::vector<std::string>& cameras) = 0;
 
         // How many identities and tracks are live. For the run's report, and for a test that
         // wants to see the bounds hold.

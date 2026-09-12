@@ -410,14 +410,21 @@ namespace shipinfer {
         const mtmc::Association associate =
             [this](const std::vector<mtmc::InstantEntry>& entries) -> mtmc::Results {
             std::vector<mtmc::ClusterObservation> instant;
+            // THE ROSTER COMES FROM THE ENTRIES, not from the observations. One entry per
+            // camera that reported, so a camera whose frame held no tracks is here with an
+            // empty payload -- and the gate needs it: that camera WAS in this instant, and a
+            // streak of its tracks has to break rather than be carried across.
+            std::vector<std::string> cameras;
+            cameras.reserve(entries.size());
             for (const mtmc::InstantEntry& entry : entries) {
+                cameras.push_back(entry.camera_id);
                 const auto& camera =
                     *std::static_pointer_cast<std::vector<mtmc::ClusterObservation>>(
                         entry.payload);
                 instant.insert(instant.end(), camera.begin(), camera.end());
             }
             return std::make_shared<const std::map<mtmc::TrackKey, int64_t>>(
-                tracker_->ids(instant));
+                tracker_->ids(instant, cameras));
         };
         // SECONDS FROM THE CAPTURE (WALL) STAMP, because the other plane keys the same
         // barrier on `item.context.captured_unix_ns` and two planes bucketing one clip into

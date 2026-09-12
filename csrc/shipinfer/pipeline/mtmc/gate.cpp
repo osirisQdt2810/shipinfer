@@ -17,6 +17,20 @@ namespace shipinfer::mtmc {
                 "[0, 1), got " +
                 std::to_string(options_.min_height_fraction));
         }
+        if (options_.max_absent_instants < 1) {
+            throw ConfigError(
+                "max_absent_instants must be at least 1; 0 would drop a streak the instant "
+                "its camera missed one instant, which is the behaviour this replaced, got " +
+                std::to_string(options_.max_absent_instants));
+        }
+    }
+
+    std::vector<std::string> cameras_of(const std::vector<ClusterObservation>& observations) {
+        std::set<std::string> unique;
+        for (const ClusterObservation& observation : observations) {
+            unique.insert(observation.key.camera_id);
+        }
+        return {unique.begin(), unique.end()};
     }
 
     int ObservationGate::hits(const TrackKey& key) const {
@@ -26,11 +40,14 @@ namespace shipinfer::mtmc {
 
     void ObservationGate::reset() {
         hits_.clear();
+        absent_.clear();
     }
 
     std::vector<ClusterObservation> ObservationGate::filter(
-        const std::vector<ClusterObservation>& observations) {
+        const std::vector<ClusterObservation>& observations,
+        const std::vector<std::string>& cameras) {
         std::map<TrackKey, int> hits;
+        std::map<TrackKey, int> absent;
         std::vector<ClusterObservation> admitted;
         // ONE ROW PER KEY, refused rather than deduplicated. Both copies would have advanced
         // the same run once (correct) and then both been admitted, and the caller zips
@@ -47,6 +64,20 @@ namespace shipinfer::mtmc {
                                      "track would have it contest itself");
             }
         }
+        // CARRIED, not broken: a camera this instant did not hold said nothing about its
+        // tracks. `present` is the caller's roster and not these observations, so a camera
+        // that reported an empty view is here and breaks its streaks like any other.
+        const std::set<std::string> present(cameras.begin(), cameras.end());
+        for (const auto& [key, count] : hits_) {
+            if (present.count(key.camera_id) != 0) continue;
+            const auto missed_before = absent_.find(key);
+            const int missed = (missed_before == absent_.end() ? 0 : missed_before->second) + 1;
+            if (missed <= options_.max_absent_instants) {
+                hits[key] = count;
+                absent[key] = missed;
+            }
+        }
+
         for (const ClusterObservation& observation : observations) {
             // A ZERO FRAME HEIGHT admits nothing rather than dividing by it: a frame whose
             // extent nobody filled in is a wiring fault, and letting every track through it
@@ -62,12 +93,14 @@ namespace shipinfer::mtmc {
             const auto previous = hits_.find(observation.key);
             const int count = (previous == hits_.end() ? 0 : previous->second) + 1;
             hits[observation.key] = count;
+            absent.erase(observation.key);
             if (count >= options_.min_hits) admitted.push_back(observation);
         }
-        // REPLACED, not pruned. That is what enforces "consecutive" -- a track that misses one
-        // instant starts again from one -- and what keeps the map bounded by the tracks in
-        // flight rather than by uptime.
+        // REPLACED, not pruned. That is what enforces "consecutive" -- a track whose camera
+        // WAS here and did not qualify is simply not copied across -- and what keeps the maps
+        // bounded by the tracks in flight rather than by uptime.
         hits_ = std::move(hits);
+        absent_ = std::move(absent);
         return admitted;
     }
 
