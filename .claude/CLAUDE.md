@@ -336,8 +336,11 @@ by both of the above so a C++ break blocks the PR rather than reddening main aft
 and `claude.yml` (`@claude` in comments).
 A PR auto-merges only when tests **and the C++ tiers** are green **and** the review verdict is
 APPROVE **and** the `automerge` label is present **and** the reviewed commit is still HEAD.
-Known permanent exception: a PR that edits `.github/workflows/**` cannot pass the review
-job, so those need a manual merge.
+The exception is **`pr-pipeline.yml` itself**, not `.github/workflows/**` as this file used to
+say: the App validates the *running* workflow against the default branch's copy and refuses the
+token when they differ, so a PR editing that one file cannot pass review and needs a manual
+merge (V169 permits it). Every other workflow file merges the ordinary way — #236 edited
+`cpp.yml` and its review returned APPROVE.
 
 **The review is a loop, not a handoff** (see `.claude/WORKFLOW.md` for the diagram). Push,
 then go do other work — the review takes 10-20 minutes. On APPROVE with the label on, it

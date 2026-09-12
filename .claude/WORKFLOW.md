@@ -206,8 +206,10 @@ current. The check is mechanical and CLAUDE.md already asks for it:
 list.
 
 **Keep the label on.** Removing it turns the loop into a handoff that waits for a human. The
-only reason to remove it is a PR that edits `.github/workflows/**`, which cannot pass the
-review job at all (a GitHub App restriction, not a bug) and needs a manual merge.
+one real reason is a PR that edits **`pr-pipeline.yml` itself**, which cannot pass the review
+job: the App validates the *running* workflow against the default branch's copy and refuses the
+token when they differ. Any other workflow file is fine — #236 edited `cpp.yml` and its review
+returned APPROVE — so this is narrower than the rule that used to be written here.
 
 Commit messages: imperative mood, a body explaining *why*. Add the
 `Co-Authored-By: Claude …` trailer only to large feature commits.
