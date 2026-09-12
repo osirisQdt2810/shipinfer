@@ -1188,6 +1188,19 @@ A standing rule and two questions:
 3. **Is the RAM -> VRAM -> RAM -> VRAM pattern still there?** The round trip ADR-004/V156 exist
    to remove: decode to VRAM, and everything downstream on the device.
 
+### V169 — 12 Sep. A standing grant: workflow PRs are mine to merge
+
+> từ giờ, các PR chỉnh workflow cho phép bạn tự merge pr, không cần hỏi ý kiến của tôi nữa nhé.
+> Làm trực tiếp luiôn với các PR bạn đang mở nhé, vi sdụ 236
+
+A grant, scoped to one class of PR. **A PR that edits `.github/workflows/**` may be merged by me
+without asking**, and the ones already open are covered -- #236 was named.
+
+It fits a hole CLAUDE.md already documents: the auto-merge gate requires an APPROVE from the
+review job, and a PR touching `.github/workflows/**` cannot pass that job, so those PRs were
+stranded waiting for a human. The grant closes it for that class and no other: every other PR
+still merges itself on APPROVE plus the label, and none is mine to merge by hand.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
@@ -1368,6 +1381,7 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 
 | Rule | Where |
 |---|---|
+| **A PR that edits `.github/workflows/**` is mine to merge**, without asking -- the review job cannot pass on one, so they were stranded. No other PR class changes | **V169** |
 | **Optimisation is a LOOP: benchmark, then PROFILE** to find where the pipeline is bottlenecked -- in that order, every time. Name the stages that run on the CPU and prove no RAM -> VRAM -> RAM -> VRAM round trip survives | **V168**, V156, ADR-004 |
 | **Benchmark ONLY over gstreamer RTSP from an offline video file** — no camera, no `replay`, no other route; if the video does not exist, create it | **V167** |
 | **The target is 3 000 FPS** for the whole pipeline (lowered from 4 500), and only that counts as achieved | **V167**, V165 |
