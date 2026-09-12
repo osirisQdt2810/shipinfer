@@ -3536,14 +3536,31 @@ hook down, for when the operator asked to see something before it is executed.
       `test_mtmc_stage` ran 31 checks through it). So the fix stands on being right for any
       host without `pkg-config`, not on a capability it was expected to restore.
 
-- [ ] CI-WORKFLOW-PRS-MAY-BE-REVIEWABLE · OBSERVED 12 Sep on #236: the Claude review job ran to
+- [x] CI-WORKFLOW-PRS-MAY-BE-REVIEWABLE · ANSWERED 12 Sep. OBSERVED on #236: the Claude review job ran to
       completion on a PR that edits `.github/workflows/**` and returned APPROVE, which is not
       what CLAUDE.md's "known permanent exception" predicts. One observation is not a rule, and
       the wrong correction is expensive in both directions -- deleting the exception when it is
       real strands PRs, keeping it when it is dead makes every workflow PR a manual merge.
-      THE CHECK: open the next workflow-touching PR WITH the `automerge` label and see whether
-      the gate merges it. If it does, rewrite the exception in CLAUDE.md and in
-      `.claude/WORKFLOW.md`; if it does not, record which job refused and why.
+      THE CHECK WAS: open the next workflow-touching PR WITH the `automerge` label and see
+      whether the gate merges it. The PR that removes the claim IS that PR -- it edits
+      `pr-pipeline.yml` and carries the label, so it either merges itself and proves the point
+      or fails and names the job that refused.
+      AND THE EXPERIMENT ANSWERED AGAINST MY FIRST READING, which is why it was worth running
+      rather than reasoning about. #253 edits `pr-pipeline.yml` and carries the label; its
+      review job failed three token exchanges with
+        401 Unauthorized - Workflow validation failed. The workflow file must exist and have
+        identical content to the version on the repository's default branch.
+      So the App validates the WORKFLOW THAT IS RUNNING against the default branch's copy of
+      it -- not the PR's diff, and not a `workflows: write` scope, which was my guess from the
+      permissions block and was wrong. #236 edited `cpp.yml`, which left `pr-pipeline.yml`
+      identical to main's, so its token minted and the review returned APPROVE.
+      THE RULE, measured: a PR editing `pr-pipeline.yml` cannot pass review and needs a manual
+      merge (V169 permits it). A PR editing any OTHER workflow file goes the ordinary
+      review-and-automerge way. That is narrower than what the three files said and broader
+      than what I first wrote; both are corrected.
+      THE LESSON worth keeping: the permissions block was consistent with my wrong theory and
+      with the right one, so reading it proved nothing. The run's own error message is what
+      settled it.
 
 - [x] CPP-LANE-JOB-GLOBS-ONE-PREFIX · DONE 11 Sep, NEEDS A MANUAL MERGE. `.github/workflows/cpp.yml`'s lane job collected
       binaries with `for candidate in csrc/build/test_tracking_*`, so a lane binary named
