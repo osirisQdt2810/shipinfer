@@ -3459,7 +3459,7 @@ hook down, for when the operator asked to see something before it is executed.
       is left as the review left it -- defensible as written, because the build step refuses
       outright when the submodule is absent, so the count is not what proves the lane compiled.
 
-- [ ] CSRC-BUILD-CRASHES-WITHOUT-PKG-CONFIG · FOUND 12 Sep while trying to run the GPU-tier
+- [x] CSRC-BUILD-CRASHES-WITHOUT-PKG-CONFIG · FIXED 12 Sep. FOUND while trying to run the GPU-tier
       C++ tests in the container for #249. `python scripts/build_csrc.py` (no `--offline`)
       probes each external lane with `subprocess.run(["pkg-config", ...])` and catches only
       `SystemExit`, so on a machine with no `pkg-config` BINARY the probe raises
@@ -3472,8 +3472,19 @@ hook down, for when the operator asked to see something before it is executed.
       THE FIX is four lines in `pkg_config_flags`: catch `FileNotFoundError` and raise the same
       `SystemExit` the unresolvable-package path raises, naming the missing tool rather than
       the missing package. A test can pin it by putting an empty directory first on `PATH`.
-      WORTH CHECKING IN THE SAME PASS whether the image should simply have `pkg-config`; the
-      answer is probably both, because the crash is wrong on any host and not only this one.
+      DONE: the probe is wrapped and a missing tool raises the same `SystemExit` an
+      unresolvable package does, naming the TOOL rather than the package -- a reader told
+      `opencv4` cannot be resolved goes and installs a `-dev` package they already have. Two
+      tests: the refusal, and the lane loop that has to survive it, because a `SystemExit`
+      alone does not prove the warn-and-continue branch is reached. Both go red with the catch
+      removed. In the container the build now reaches the next real obstacle (TensorRT headers)
+      instead of dying at the first lane.
+      AND THE MOTIVATION ON THE ORIGINAL LINE WAS WRONG, which is worth leaving visible: this
+      does NOT unblock building the C++ plane in the container, because that image has no
+      compiler either. `deploy/rootless/cpp.sh` documents the real arrangement -- host-built
+      binary, executed inside the container -- and that path works today (#249's
+      `test_mtmc_stage` ran 31 checks through it). So the fix stands on being right for any
+      host without `pkg-config`, not on a capability it was expected to restore.
 
 - [ ] CI-WORKFLOW-PRS-MAY-BE-REVIEWABLE · OBSERVED 12 Sep on #236: the Claude review job ran to
       completion on a PR that edits `.github/workflows/**` and returned APPROVE, which is not
