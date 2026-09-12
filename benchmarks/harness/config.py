@@ -64,6 +64,11 @@ TOPOLOGIES = ("single", "fleet", "service")
 #: select nothing. ``BENCH-PRECISION-SELECTS-NO-PLAN`` is what earns it back.
 PRECISIONS = ("fp32", "fp16")
 
+#: And the flag ``build_engines.py`` actually takes for each. A map rather than an f-string
+#: over the name: ``fp32`` is that script's default and takes no flag, and a remedy naming a
+#: flag its parser refuses is the unfixable loop these guards exist to break.
+BUILD_ENGINE_FLAGS = {"fp32": "", "fp16": " --fp16"}
+
 _RESOLUTION_FOLDERS: dict[str, tuple[str, str]] = {
     "2k": ("person_2K", "ship_2K"),
     "4k": ("person_4K", "ship_4K"),
@@ -533,19 +538,24 @@ class BenchConfig:
             flat = getattr(resolved, attribute)
             plan = repository / model / "1" / _artefact_name(repository, model)
             if flat is None or not flat.is_file():
-                # A NAMED PRECISION IS A CLAIM, and here it cannot be kept: our side loads
-                # `model.plan` whatever precision it holds, so with no flat engine to compare
-                # against, `--precision fp16` selects nothing and reports itself anyway --
-                # `BENCH-PRECISION-SELECTS-NO-PLAN`. Refused, naming both ways out.
-                if self.precision is not None and plan.is_file():
+                # A NAMED PRECISION IS A CLAIM, and here it cannot be kept: with no flat
+                # engine to compare against, the flag selects nothing and reports itself
+                # anyway. Refused either way -- a missing plan is autobuilt from ONNX after
+                # this guard, which is the same lie by the route with one fewer file in it.
+                if self.precision is not None:
+                    instead = (
+                        f"load whatever precision {plan} holds"
+                        if plan.is_file()
+                        else f"let the server autobuild {plan} from ONNX"
+                    )
                     raise RuntimeError(
                         f"{model}: --precision {self.precision} was asked for and there is no "
-                        f"{flat.name if flat else 'flat engine'} to hold {plan} to, so this "
-                        f"run would load whatever precision is installed and report "
-                        f"{self.precision}. Build the flat engines with "
-                        f"`scripts/build_engines.py --precision {self.precision}` (which also "
-                        f"installs the plan), or drop --precision and the run measures what "
-                        f"is installed and says so."
+                        f"{flat.name if flat else 'flat engine'} to check it against, so this "
+                        f"run would {instead} and report {self.precision} regardless. Build "
+                        f"the flat engines with "
+                        f"`scripts/build_engines.py{BUILD_ENGINE_FLAGS[self.precision]}` "
+                        f"(which also installs the plan), or drop --precision and the run "
+                        f"measures what is installed and says so."
                     )
                 # OUT LOUD rather than skipped in silence: with no precision asked for, a
                 # single-system run has nothing verifying which precision the plan holds, and
