@@ -3488,16 +3488,23 @@ hook down, for when the operator asked to see something before it is executed.
       libcudart the way torch does (`torch/lib/libcudart.so.12`) or read the flag through
       torch and drop the ctypes route.
 
-- [ ] BENCH-PRECISION-SELECTS-NO-PLAN · `--precision` names the BASELINE's flat engines and
-      nothing else. Our side loads `model_repository/<name>/1/model.plan` whatever precision it
-      holds, so on a `--systems shipinfer` run the flag changes nothing except which file the
-      digest guard compares against -- and when that flat file is absent the guard now warns and
-      continues. Two ways out, and the choice is a design call: resolve the PLAN path by
-      precision (`model.plan` becomes `model.<precision>.plan`, which the repository's
-      `engine_file` parameter can already express), or have the bench install the precision's
-      plan before a run the way `build_engines.py --install` does. Until then `int8` cannot come
-      back to the bench's `--precision` choices, because it would be a knob that lies. Found
-      while fixing `BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE`, and named by #216's review round 2.
+- [~] BENCH-PRECISION-SELECTS-NO-PLAN · HALF DONE 12 Sep: the knob no longer LIES, and it
+      still does not SELECT. `--precision` names the BASELINE's flat engines; our side loads
+      `model_repository/<name>/1/model.plan` whatever precision it holds, so on a
+      `--systems shipinfer` run the flag changed nothing except which file the digest guard
+      compared against -- and when that flat file was absent the guard warned and continued,
+      while `summary.json` reported the precision anyway.
+      DONE: naming a precision is a CLAIM now, and one the run has to be able to keep.
+      `--precision` defaults to `None` ("nobody asked") rather than to `fp32`, and
+      `require_same_engines` REFUSES when a precision was named and there is no flat engine to
+      hold the plan to -- naming both ways out (build and install them, or drop the flag and
+      measure what is installed). An unnamed precision keeps today's behaviour and its warning,
+      which is what every chain run here takes.
+      WHAT REMAINS is the selection, and it is still the design call this item was filed for:
+      resolve the PLAN path by precision (`model.<precision>.plan`, which the repository's
+      `engine_file` parameter can already express) or have the bench install the precision's
+      plan before a run the way `build_engines.py --install` does. `int8` comes back to the
+      choices on the day one of those lands.
 
 - [x] BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE · **MERGED as #218 (squash `1054479`, 10 Sep),
       APPROVE on round 3 after two BLOCKING rounds.** Round 2's five findings, and the first is a

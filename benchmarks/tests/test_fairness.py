@@ -329,6 +329,41 @@ class TestBothSidesLoadTheSameEngine:
 
         assert "person_embedder" in capsys.readouterr().err
 
+    def test_a_named_precision_with_nothing_to_check_it_against_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """`BENCH-PRECISION-SELECTS-NO-PLAN`: our side loads `model.plan` whatever precision
+        it holds, so with no flat engine to hold it to, `--precision fp16` selects nothing and
+        reports itself in `summary.json` anyway. A knob that lies is worse than an absent one,
+        so the claim is refused -- and the refusal names both ways out."""
+        config = replace(
+            self._config(tmp_path, b"PLAN-A", b"PLAN-A"),
+            emb_engine=tmp_path / "absent_reid.engine",
+            precision="fp16",
+        )
+
+        with pytest.raises(RuntimeError) as raised:
+            config.require_same_engines()
+
+        message = str(raised.value)
+        assert "--precision fp16" in message, "the claim that cannot be kept"
+        assert "build_engines.py --precision fp16" in message, "one way out"
+        assert "drop --precision" in message, "and the other"
+
+    def test_an_unnamed_precision_over_the_same_tree_still_only_warns(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The other half, and the one every chain run here takes: nobody claimed a precision,
+        so the run measures what is installed and says so rather than refusing."""
+        config = replace(
+            self._config(tmp_path, b"PLAN-A", b"PLAN-A"),
+            emb_engine=tmp_path / "absent_reid.engine",
+        )
+
+        config.require_same_engines()
+
+        assert "whatever is installed" in capsys.readouterr().err
+
     def test_a_missing_plan_is_refused_rather_than_skipped(self, tmp_path: Path) -> None:
         """Skipping an absent plan made the guard useless in the case it exists for.
 
