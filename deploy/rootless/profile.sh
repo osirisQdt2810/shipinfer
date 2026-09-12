@@ -58,7 +58,11 @@ mkdir -p "$OUT"
 # bitten by a per-frame `cudaMalloc` on the dispatch path.
 NSYS_ARGS=(
   "$NSYS_DIR/bin/nsys" profile
-  --trace=cuda,nvtx,osrt
+  # NARROWABLE, because the tracer is a suspect: the C++ bench segfaults under this profiler
+  # (exit 139) at twelve cameras and at fifty while the same binary runs clean without it, and
+  # finding which tracer takes it down means running them one at a time
+  # (`PROFILE-DIES-AT-THE-DESIGN-LOAD`).
+  "--trace=${SHIPINFER_NSYS_TRACE:-cuda,nvtx,osrt}"
   --sample=none
   --cuda-memory-usage=true
   --force-overwrite=true
@@ -106,7 +110,7 @@ exec docker run --rm --pid=host "${GPU_DEVICES[@]}" \
   -e PYTHONPATH=/work/src:/work \
   -e SHIPINFER_IN_CONTAINER=1 \
   -e SHIPINFER_CUDA_GRAPHS="${SHIPINFER_CUDA_GRAPHS:-off}" \
-  -e SHIPINFER_CPP_BINARY -e SHIPINFER_CUDA_BLOCKING_SYNC \
+  -e SHIPINFER_CPP_BINARY -e SHIPINFER_CUDA_BLOCKING_SYNC -e SHIPINFER_DEVICE_FOLD \
   -e SHIPINFER_RTSP_PERSON_DATA -e SHIPINFER_RTSP_SHIP_DATA -e SHIPINFER_RTSP_PORT \
   -v "$REPO:/work" \
   -v "$TRT_DIR:/tensorrt:ro" \
