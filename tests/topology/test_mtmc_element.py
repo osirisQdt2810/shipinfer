@@ -828,7 +828,7 @@ class TestTwoMtmcSlotsCannotParkEveryWorkerBetweenThem:
         assert first.waiter_budget.permits == 4, "workers - 1, so one always drains its lane"
 
 
-# -- the instant bound ----------------------------------------------------------------------------
+# -- how late a frame arrived ----------------------------------------------------------------------
 
 
 @needs_shipvision
@@ -913,6 +913,10 @@ class TestHowLateAFrameArrivedReachesTheBarrier:
             element.close()
 
 
+# -- the instant bound ----------------------------------------------------------------------------
+
+
+@needs_shipvision
 class TestTheInstantBoundReachesTheBarrier:
     def test_an_unnamed_bound_follows_the_group(self) -> None:
         """The element must pass the absence through rather than resolve it to the floor: the
