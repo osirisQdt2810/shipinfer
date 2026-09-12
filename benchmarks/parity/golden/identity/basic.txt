@@ -6,6 +6,14 @@ issued 1
 scenario same_camera_twice
 result cam0#1=0 cam0#2=1
 issued 2
+scenario contested_camera_slot
+result cam0#1=0 cam1#1=0 cam2#1=0
+result cam0#1=2 cam0#2=0 cam0#3=1 cam1#1=0 cam2#1=0
+issued 3
+scenario contested_camera_slot_reordered
+result cam0#1=0 cam1#1=0 cam2#1=0
+result cam0#1=1 cam0#2=2 cam0#3=0 cam1#1=0 cam2#1=0
+issued 3
 scenario largest_first
 result cam0#1=1 cam1#1=0 cam2#1=0
 issued 2

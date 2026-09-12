@@ -2755,7 +2755,7 @@ hook down, for when the operator asked to see something before it is executed.
 > `test/the-contested-cluster-tripwire` (the reference defect becomes a gate rather than a
 > comment). Open them in that order; both rebase cleanly as of 767b2a2.
 
-- [ ] MTMC-ONE-CAMERA-TWICE-IN-A-CONTESTED-CLUSTER · A REFERENCE DEFECT, found by #219's
+- [x] MTMC-ONE-CAMERA-TWICE-IN-A-CONTESTED-CLUSTER · FIXED 12 Sep on both planes. A REFERENCE DEFECT, found by #219's
       review in the port and confirmed to be in BOTH planes. `_assign_group`'s per-camera
       contest re-reads the incumbent from `members_` on every iteration, a winner is added by
       `_place`, and the loser leaves only in the deferred loop -- so a second challenger from
@@ -2790,6 +2790,23 @@ hook down, for when the operator asked to see something before it is executed.
       plausible -- `member_from_camera` returns whichever member came first, forever -- so one
       global id carries two tracks from one camera and the second is a ghost no instant can
       displace.
+      DONE, and the ORDER above was followed exactly. shipvision#17 merged at `d247d5f`; the
+      pin is bumped in its own commit; `member_from_camera` takes the tracks already displaced
+      this cluster and skips them, on both planes, so the contest is against the CURRENT
+      holder. The deferred eviction is unchanged and so is the evidence a contest is scored
+      against -- `overlap_features` is still computed before the loop.
+      THE GOLDEN COULD NOT SEE IT, which is the part worth remembering: re-emitting against the
+      fixed reference changed NOTHING, because no committed scenario had a contested camera
+      slot -- the same shape as the gate's harness gap an hour earlier. Two scenarios were
+      added (`contested_camera_slot` and `..._reordered`, the challengers swapped so the answer
+      says WHICH one holds the slot and not merely how many), and the golden now separates
+      them. The tripwire `TestTheReferenceStillAdoptsTwoTracksFromOneCamera` is inverted rather
+      than deleted: it is `TestAContestedCameraSlotHasOneHolder` and asserts the rule, because
+      `validate()` is still the half no golden can carry.
+      EVIDENCE: removing the skip makes the C++ parity binary REFUSE -- `global id 0 holds two
+      tracks from one camera (cam0)` -- and aborts `test_mtmc_identity` with the same sentence.
+      59 checks / 0 failures with it, 4 parity checks / 0 failures against the re-emitted
+      golden.
 
 - [ ] PIPELINE-WORKERS-NEED-CAMERA-AFFINITY · MEASURED 11 Sep and it is the chain's real
       ceiling: one shared worker pool reorders a camera's frames, the per-camera tracker

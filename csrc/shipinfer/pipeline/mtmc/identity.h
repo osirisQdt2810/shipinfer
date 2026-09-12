@@ -18,12 +18,10 @@
 // two representations of one fact can disagree, and when they do the output stays PLAUSIBLE --
 // an identity quietly holding two tracks from one camera, an id nothing can be found under.
 //
-// AND THE SECOND HALF OF THAT INVARIANT IS NOT SAFE TO RELY ON YET. A contested cluster can
-// reach it -- the algorithm's flaw, shared with the reference, reproduced on both planes and
-// pinned by `two_challengers_from_one_camera_BOTH_land_and_the_reference_does_the_same`. In
-// production `validate_every_step` is off, so it is silent. See
-// `MTMC-ONE-CAMERA-TWICE-IN-A-CONTESTED-CLUSTER`; a caller that must not see two tracks from
-// one camera has to check, not assume.
+// BOTH HALVES HOLD THROUGH A CONTESTED CLUSTER NOW. They did not: a winner was placed at once
+// and the loser left in the deferred pass, so a second challenger from that camera contested a
+// track that had already lost and was adopted alongside the first. The contest is against the
+// CURRENT holder, upstream and here (`MTMC-ONE-CAMERA-TWICE-IN-A-CONTESTED-CLUSTER`).
 //
 // NOT THREAD-SAFE, deliberately. The stage that owns it takes the barrier's lock for the whole
 // association, which is the level where one instant is one atomic step.
@@ -167,8 +165,11 @@ namespace shipinfer::mtmc {
         //: This identity's existing track on `camera_id`, or absent. One identity holds at
         //: most one track per camera: it is one object, and a camera that sees it twice at one
         //: instant has a single-camera failure, not a cross-camera one.
-        const TrackKey* member_from_camera(int64_t global_id,
-                                           const std::string& camera_id) const;
+        //: `ignoring` is the tracks already displaced this cluster. They are still in
+        //: `members_` -- losers leave in a deferred pass -- and skipping them is what makes
+        //: this the CURRENT holder rather than one that has already lost.
+        const TrackKey* member_from_camera(int64_t global_id, const std::string& camera_id,
+                                           const std::vector<TrackKey>& ignoring = {}) const;
         //: Cosine similarity against several, reduced by mean or max. Zero when there is
         //: nothing to compare against -- not an error and not a one: it makes appearance
         //: silent and lets the caller's other rules decide.
