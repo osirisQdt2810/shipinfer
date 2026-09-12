@@ -112,8 +112,8 @@ namespace shipinfer {
             }
             dag.add(std::make_unique<MtmcStage>(
                 spec.slot, spec.output, spec.track_source, spec.embedding_sources,
-                barrier->second,
-                mtmc::create_cluster_tracker(spec.impl, spec.slot, spec.gate)));
+                barrier->second, mtmc::create_cluster_tracker(spec.impl, spec.slot, spec.gate),
+                spec.cameras));
         }
         return dag;
     }

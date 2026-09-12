@@ -12,6 +12,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -185,7 +186,8 @@ namespace shipinfer {
         MtmcStage(std::string name, std::string output, std::string track_source,
                   std::vector<std::string> embedding_sources,
                   std::shared_ptr<mtmc::InstantBarrier> barrier,
-                  std::shared_ptr<mtmc::ClusterTracker> tracker);
+                  std::shared_ptr<mtmc::ClusterTracker> tracker,
+                  std::vector<std::string> roster = {});
 
       protected:
         size_t do_run(FrameState& state) override;
@@ -200,6 +202,20 @@ namespace shipinfer {
         std::vector<std::string> embedding_sources_;
         std::shared_ptr<mtmc::InstantBarrier> barrier_;
         std::shared_ptr<mtmc::ClusterTracker> tracker_;
+        // doc: long which cameras this group takes, and what an ungrouped camera gets
+        //: THE CAMERAS THIS GROUP CLAIMS, from the chain's `cameras:`. A frame from any other
+        //: camera is published with a null global id rather than forced into this group --
+        //: two groups on one shard would otherwise both take every camera the shard sees and
+        //: issue contradictory ids for the same objects.
+        //:
+        //: EMPTY MEANS EVERY CAMERA, which is the behaviour of every chain written before
+        //: rosters existed and the only reading that keeps them running: a chain that names
+        //: no cameras is not claiming none of them.
+        //:
+        //: A CAMERA IN NO ROSTER IS A CONFIGURATION FACT, not a fault. It is published with a
+        //: null id, the same as a row the gate did not admit, because refusing the frame
+        //: would make one unlisted camera fail a fleet that is otherwise correct.
+        std::set<std::string> roster_;
     };
 
     class ObjectStage : public ModelStage {

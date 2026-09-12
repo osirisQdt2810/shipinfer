@@ -327,7 +327,8 @@ namespace shipinfer {
     MtmcStage::MtmcStage(std::string name, std::string output, std::string track_source,
                          std::vector<std::string> embedding_sources,
                          std::shared_ptr<mtmc::InstantBarrier> barrier,
-                         std::shared_ptr<mtmc::ClusterTracker> tracker)
+                         std::shared_ptr<mtmc::ClusterTracker> tracker,
+                         std::vector<std::string> roster)
         // CONSUMES the track ids and does NOT need them, for the reason `TrackStage` does not
         // need the detections: a camera with nothing to report still has to REPORT, or the
         // instant it belongs to waits for it until the window runs out and every other camera
@@ -337,6 +338,7 @@ namespace shipinfer {
           track_source_(std::move(track_source)),
           embedding_sources_(std::move(embedding_sources)),
           barrier_(std::move(barrier)),
+          roster_(roster.begin(), roster.end()),
           tracker_(std::move(tracker)) {}
 
     namespace {
@@ -362,6 +364,16 @@ namespace shipinfer {
     }  // namespace
 
     size_t MtmcStage::do_run(FrameState& state) {
+        // NOT THIS GROUP'S CAMERA. Published with a null global id and never submitted: this
+        // group's barrier must not wait on it, and its identity space must not hold it. An
+        // empty batch under this stage's own name is the same answer a row the gate refused
+        // gets, so a reader that joins on the name still finds one.
+        if (!roster_.empty() && roster_.count(state.tag().camera_id) == 0) {
+            ObjectBatch skipped;
+            skipped.name = output_;
+            state.attach(std::move(skipped));
+            return 0;
+        }
         // WHAT THIS CAMERA CAN CONTRIBUTE: a row needs a TRACK id (identity is keyed by
         // (camera, track), so an untracked row has nothing to hold on to) and an EMBEDDING
         // (cross-camera identity is decided on appearance). A row missing either is passed

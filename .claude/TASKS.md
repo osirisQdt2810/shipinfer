@@ -3313,7 +3313,7 @@ hook down, for when the operator asked to see something before it is executed.
       monotonic clock. That belongs with `launch/`'s control plane and needs the proto to carry
       it; until then (a) makes a step visible on any box rather than silent on all of them.
 
-- [ ] CSRC-MTMC-TWO-GROUPS-PER-SHARD · #222 carried the chain's `group:`/`cameras:` roster onto
+- [x] CSRC-MTMC-TWO-GROUPS-PER-SHARD · DONE 12 Sep. #222 carried the chain's `group:`/`cameras:` roster onto
       the plan and announces it to the barrier, so the refusal of a SECOND `mtmc` slot no
       longer rests on "no chain states which cameras belong to which" -- the chain does. What
       is missing is the ROUTING: `MtmcStage` hands its camera's rows to the one barrier it was
@@ -3329,6 +3329,24 @@ hook down, for when the operator asked to see something before it is executed.
       `cameras:` do not match the running fleet makes the barrier wait for cameras that never
       report (`complete 0, advanced 428`), while a roster matching the fleet closes the most
       instants on evidence of any configuration measured (`complete 366` of 662).
+      DONE: `MtmcStage` takes its `cameras:` roster and passes over a frame from any other
+      camera -- published with a NULL global id, never submitted, so this group's barrier does
+      not wait on it and its identity space does not hold it. `from_plan` hands the roster
+      down; the blanket refusal in `plan_stages` is gone.
+      THE REFUSAL IS NARROWER NOW, not absent, which is the part worth reading: one camera in
+      TWO rosters is refused (two identity spaces would each give its objects an id and the
+      last stage to run would win, silently), and a second slot that names NO cameras is
+      refused (an empty roster means every camera, which is exactly the old failure). One slot
+      with no roster still means every camera -- that is every chain written before rosters
+      existed, `ship_person_cpu.yaml` among them, and a rule that refused it would be wrong.
+      AND THE OLD REFUSAL HAD NO TEST, which is why nothing went red when it was deleted. The
+      four cases above have them now: two disjoint rosters build (71 checks in
+      `test_plan_stages`, was 65), a shared camera is refused, an unrostered SECOND slot is
+      refused, and one slot with no roster still means every camera.
+      EVIDENCE: the stage ignoring its roster turns `test_mtmc_stage` red on "nor did its
+      barrier, which must not wait on a camera that is not its own" (35 checks, 1 failure, on
+      real GPUs), and allowing one camera in two groups turns `test_plan_stages` red on its
+      own refusal.
 
 - [x] CSRC-MTMC-GATE-OPTIONS · THE GATE'S THRESHOLDS ARE NOT SETTABLE FROM THE CHAIN, and
       MEASURED 11 Sep that is what makes the chain issue zero global ids: at 12 cameras x 20 fps

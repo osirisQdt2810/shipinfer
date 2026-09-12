@@ -377,6 +377,55 @@ namespace {
               "and it is a ConfigError, not an uncaught std::invalid_argument");
     }
 
+    void two_groups_with_disjoint_rosters_both_run() {
+        // This used to be refused outright, because nothing routed a camera to its group and
+        // two slots would both take every camera the shard saw. `MtmcStage` takes its roster
+        // now, which is what the other plane has always done.
+        const PlanStages built = plan_stages(
+            plan_of(kDetect + kTrack +
+                    "node quay mtmc plan-test\nscope global\ngroup north\ncamera cam0\n"
+                    "camera cam1\n"
+                    "node berth mtmc plan-test\nscope global\ngroup south\ncamera cam2\n"),
+            kLoaded);
+
+        check(built.mtmcs.size() == 2, "both slots are built");
+        if (built.mtmcs.size() != 2) return;
+        check(built.mtmcs[0].cameras.size() == 2 && built.mtmcs[0].cameras[0] == "cam0",
+              "and each carries its OWN roster down to the stage");
+        check(built.mtmcs[1].cameras.size() == 1 && built.mtmcs[1].cameras[0] == "cam2",
+              "the second one too, which is what makes the routing possible");
+    }
+
+    void one_camera_in_two_groups_is_refused() {
+        // The contradiction the blanket refusal was really about, kept as the narrow rule:
+        // two identity spaces would each give that camera's objects an id and the last stage
+        // to run would win, silently.
+        check(refused(kDetect + kTrack +
+                      "node quay mtmc plan-test\nscope global\ncamera cam0\ncamera cam1\n"
+                      "node berth mtmc plan-test\nscope global\ncamera cam1\n"),
+              "one camera cannot belong to two groups");
+    }
+
+    void a_second_group_that_names_no_cameras_is_refused() {
+        // An empty roster means EVERY camera -- which is right for the single-group chains
+        // written before rosters existed, and is exactly the old failure when there are two.
+        check(refused(kDetect + kTrack +
+                      "node quay mtmc plan-test\nscope global\ncamera cam0\n"
+                      "node berth mtmc plan-test\nscope global\n"),
+              "an unrostered second group would take the first group's cameras too");
+    }
+
+    void one_group_may_still_name_no_cameras() {
+        // The compatibility half, and it has to be asserted beside the refusal above or the
+        // rule reads as "every mtmc slot must list its cameras" -- which would refuse
+        // `ship_person_cpu.yaml` as it stood before rosters, and every chain like it.
+        const PlanStages built = plan_stages(
+            plan_of(kDetect + kTrack + "node mtmc mtmc plan-test\nscope global\n"), kLoaded);
+
+        check(built.mtmcs.size() == 1 && built.mtmcs[0].cameras.empty(),
+              "one group with no roster is every camera, as it always was");
+    }
+
     void an_mtmc_slot_reads_the_chains_barrier_knobs() {
         // The reason they are on the plan at all: `ship_person_cpu.yaml` has stated
         // `sync_window_ms: 60` all along and this plane ran its own default, so the two
@@ -446,6 +495,10 @@ int main() {
         a_negative_frame_count_is_refused();
         a_word_where_a_frame_count_belongs_names_the_line();
         an_mtmc_slot_reads_the_chains_barrier_knobs();
+        two_groups_with_disjoint_rosters_both_run();
+        one_camera_in_two_groups_is_refused();
+        a_second_group_that_names_no_cameras_is_refused();
+        one_group_may_still_name_no_cameras();
         an_unstated_window_stays_absent_rather_than_becoming_a_number_here();
         two_mtmc_slots_are_refused_because_no_chain_states_their_groups();
         an_mtmc_slot_with_no_tracker_is_refused();
