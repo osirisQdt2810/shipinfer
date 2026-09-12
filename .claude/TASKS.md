@@ -2899,7 +2899,7 @@ hook down, for when the operator asked to see something before it is executed.
       backend-contract change, so it needs the Python plane's `TensorRTBackend` in the same
       PR (V88) and a parity test that a device-resident output reads the same numbers.
 
-- [ ] PROFILE-DIES-AT-THE-DESIGN-LOAD · FOUND 12 Sep while trying to price
+- [~] PROFILE-DIES-AT-THE-DESIGN-LOAD · FOUND 12 Sep while trying to price
       `EXECUTE-BLOCKS-THE-INSTANCE-THREAD` properly. `deploy/rootless/profile.sh --cpp` at 50
       cameras over nvdec prints `loading engines...`, ends 1.6 s later with an empty
       `threads: {}` in its own host-cpu line, and writes a report holding only the driver's
