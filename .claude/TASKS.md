@@ -2995,6 +2995,12 @@ hook down, for when the operator asked to see something before it is executed.
       broken by a stream the queue decimates (23% refused at this load -- see
       `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY`), or the clusterer's thresholds are wrong for a
       50-camera instant, or both.
+      AND ONE THING THE DERIVED BOUND DOES NOT HAVE (#238's review): a ceiling. It is
+      `|announced union seen|`, and `seen` only shrinks on `drop_camera`, so a source that
+      mints a fresh camera id per reconnect grows the bound, `recent_limit` (4x) and the open
+      bucket map without limit -- the failure mode inverts from "evicts too eagerly" to "never
+      evicts, grows". Camera ids are roster-stable today, which is why this is a note; the fix
+      when it is needed is a cap, and the number for it is a memory budget rather than a guess.
       WHAT TO MEASURE FIRST, in this order: (a) the admitted observations PER CAMERA per
       instant -- if a typical instant holds two cameras rather than fifty, no cross-camera
       cluster can form and the barrier's `window` share says why; (b) `min_hits` at 1 against

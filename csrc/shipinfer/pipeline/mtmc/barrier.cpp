@@ -95,8 +95,11 @@ namespace shipinfer::mtmc {
                               "rest of its group as late");
         }
         if (max_instants_ < 1) {
+            // `max_instants_`, not the optional: the two are the same number whenever this
+            // branch is reachable, and a future floor of 0 would make the dereference a crash
+            // inside an error path.
             throw ConfigError("max_instants must be at least 1, got " +
-                              std::to_string(*configured_max_instants_) +
+                              std::to_string(max_instants_) +
                               "; zero open instants means every frame evicts itself");
         }
     }

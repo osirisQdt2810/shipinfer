@@ -828,7 +828,7 @@ class TestTwoMtmcSlotsCannotParkEveryWorkerBetweenThem:
         assert first.waiter_budget.permits == 4, "workers - 1, so one always drains its lane"
 
 
-# -- the camera lifecycle ---------------------------------------------------------------------------
+# -- the instant bound ----------------------------------------------------------------------------
 
 
 @needs_shipvision
@@ -858,6 +858,10 @@ class TestTheInstantBoundReachesTheBarrier:
             element.close()
 
 
+# -- the camera lifecycle --------------------------------------------------------------------------
+
+
+@needs_shipvision
 class TestTheCameraLifecycle:
     def test_an_added_camera_is_waited_for(self, element) -> None:
         element.camera_added("cam-a")
