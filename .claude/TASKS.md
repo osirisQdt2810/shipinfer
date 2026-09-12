@@ -3327,7 +3327,7 @@ hook down, for when the operator asked to see something before it is executed.
       monotonic clock. That belongs with `launch/`'s control plane and needs the proto to carry
       it; until then (a) makes a step visible on any box rather than silent on all of them.
 
-- [ ] CSRC-MTMC-TWO-GROUPS-PER-SHARD · #222 carried the chain's `group:`/`cameras:` roster onto
+- [x] CSRC-MTMC-TWO-GROUPS-PER-SHARD · DONE 12 Sep. #222 carried the chain's `group:`/`cameras:` roster onto
       the plan and announces it to the barrier, so the refusal of a SECOND `mtmc` slot no
       longer rests on "no chain states which cameras belong to which" -- the chain does. What
       is missing is the ROUTING: `MtmcStage` hands its camera's rows to the one barrier it was
@@ -3343,6 +3343,75 @@ hook down, for when the operator asked to see something before it is executed.
       `cameras:` do not match the running fleet makes the barrier wait for cameras that never
       report (`complete 0, advanced 428`), while a roster matching the fleet closes the most
       instants on evidence of any configuration measured (`complete 366` of 662).
+      DONE: `MtmcStage` takes its `cameras:` roster and passes over a frame from any other
+      camera -- published with a NULL global id, never submitted, so this group's barrier does
+      not wait on it and its identity space does not hold it. `from_plan` hands the roster
+      down; the blanket refusal in `plan_stages` is gone.
+      THE REFUSAL IS NARROWER NOW, not absent, which is the part worth reading: one camera in
+      TWO rosters is refused (two identity spaces would each give its objects an id and the
+      last stage to run would win, silently), and a second slot that names NO cameras is
+      refused (an empty roster means every camera, which is exactly the old failure). One slot
+      with no roster still means every camera -- that is every chain written before rosters
+      existed, `ship_person_cpu.yaml` among them, and a rule that refused it would be wrong.
+      AND THE OLD REFUSAL HAD NO TEST, which is why nothing went red when it was deleted. The
+      four cases above have them now: two disjoint rosters build (71 checks in
+      `test_plan_stages`, was 65), a shared camera is refused, an unrostered SECOND slot is
+      refused, and one slot with no roster still means every camera.
+      EVIDENCE: the stage ignoring its roster turns `test_mtmc_stage` red on "nor did its
+      barrier, which must not wait on a camera that is not its own" (35 checks, 1 failure, on
+      real GPUs), and allowing one camera in two groups turns `test_plan_stages` red on its
+      own refusal.
+      ROUND 1 OF #258's REVIEW CORRECTED THE CENTRAL DECISION, and it is worth reading because
+      the "DONE" above states the WRONG one. Passing over a frame from any other camera fired
+      whenever the roster was non-empty -- the single-group case too, which is every chain
+      here. `ship_person_cpu.yaml` declares `cam-01..cam-04` and every bench fleet is
+      `cam00..cam11`, so not one frame would have been submitted: no instant, a null
+      `global_id` on every object, and not one counter moving to say so. The measurement three
+      lines above (`complete 0, advanced 428`) is that same mismatch, and it is what the
+      re-run should have caught.
+      A ROSTER IS THE FLEET'S PLACEMENT HINT: `runners/fleet.py::_camera_groups` reads it to
+      decide which SHARD a camera goes to, and the element associates every camera it is handed
+      (`elements/mtmc.py::camera_added` warns and carries on). So the filter applies only when
+      the plan built more than one group, and when it fires the pass-over is counted as
+      `not_mine` with the camera NAMED -- `silent_cameras()` answers the opposite question and
+      named the four declared cameras rather than the twelve dropped.
+      MEASURED, which is what the review asked for and what would have caught this: the same
+      chain, 12 cameras x 20 fps over GStreamer RTSP, 4 GPUs, 70 s, one variable.
+        with the fix:  1 418 instants (9.76 cameras each, largest 12), 53 712 of 59 942
+                       observations admitted, `mtmc_identities 19 102`, no `not_mine` at all
+        as pushed:     `mtmc_frames not_mine 14107` -- EVERY frame -- `instant_cameras 0
+                       largest 0 over 0`, observations 0, `mtmc_identities 0 0`
+      Both arms accepted ~14 000 frames with `queue_rejected 0` and `frames_dropped 0`, so the
+      difference is the roster and nothing else. Note the `not_mine` counter is itself part of
+      this fix: as pushed there was no counter, so the second arm would have read as a healthy
+      run that simply issued no ids -- which is the shape the review objected to.
+      AND `silent_cameras` NAMES THE MISMATCH in both arms (`cam-01..cam-04` declared against
+      `cam00..cam11` running), which is the diagnostic that survives and the reason the chain's
+      own roster should be fixed or dropped -- a separate question from this PR.
+
+- [ ] MTMC-PYTHON-ROUTES-BY-SHARD-ONLY · the C++ plane routes two groups on one shard and the
+      Python plane cannot. Opened by #258, which landed the C++ half: with more than one `mtmc`
+      slot `MtmcStage` routes by roster, while `MtmcElement._do_process` has no roster test at
+      all and `camera_added` warns-and-associates. That is right for Python TODAY because its
+      fleet puts each group on its own shard (`_camera_groups` places them), so no Python
+      process ever holds two groups -- but the `inprocess` runner does not shard, and two mtmc
+      slots there would have both elements take every camera and issue two contradictory sets
+      of ids, which is the bug the C++ refusal used to prevent.
+      Registered as `mtmc_group_routing` in `benchmarks/parity/known.py`, reproduced by
+      `test_python_mtmc_has_no_roster_routing`. THE FIX is one of two, and the choice is the
+      item: give `MtmcElement` the same route-when-more-than-one-group test, or refuse two
+      mtmc slots in the `inprocess` runner and say the fleet is the only way to have two.
+
+- [ ] MTMC-TWO-GROUPS-SHARE-AN-ID-SPACE-DOWNSTREAM · group north's global id 7 and group
+      south's id 7 are the same number and a reader cannot tell them apart. Each group gets its
+      own `IdentityMap` with its own `counter_++` (`mtmc/identity.h`), which is correct -- two
+      groups are two identity spaces -- but `ObjectRecord` carries no group or slot, so the
+      event stream flattens them. Pre-existing on both planes; #258 is what makes it reachable,
+      since before it a second group was refused outright. Found by #258's review.
+      THE FIX is a field, and the question is which: the mtmc slot name on the record (cheap,
+      and the reader joins it), or ids minted from a per-group base so they never collide
+      (no schema change, but it spends id space and hides the group). The first is the shape
+      every other per-slot fact here takes.
 
 - [x] CSRC-MTMC-GATE-OPTIONS · THE GATE'S THRESHOLDS ARE NOT SETTABLE FROM THE CHAIN, and
       MEASURED 11 Sep that is what makes the chain issue zero global ids: at 12 cameras x 20 fps
