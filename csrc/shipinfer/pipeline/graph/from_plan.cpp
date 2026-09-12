@@ -61,8 +61,15 @@ namespace shipinfer {
         for (const ObjectStageSpec& object : planned.objects) {
             ObjectCombine combine;
             if (object.fold) {
+                // ALREADY FOLDED IS NOT FOLDED AGAIN: when the model's engine carries the
+                // device fold (`graph/mask_area_device.h`), the area arrives as an ordinary
+                // named output and the prototype bank never came home -- so there is nothing
+                // here to fold and `mask_area` would refuse for a missing output. Asked per
+                // response rather than per stage because the fold is the ENGINE's property
+                // and a non-TensorRT backend for the same slot still folds on the host.
                 combine = [spec = *object.fold](const InferenceResponse& response) {
-                    return mask_area(response, spec);
+                    const OutputTensor* folded = response.named(spec.name);
+                    return folded != nullptr ? *folded : mask_area(response, spec);
                 };
             }
             dag.add(std::make_unique<ObjectStage>(object.slot, *models.at(object.model),

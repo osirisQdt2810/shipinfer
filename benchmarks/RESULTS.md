@@ -534,6 +534,40 @@ at the design load**, where every run at the default bound resolved none. The se
 caveat, and it is the same one the sweep carries — identity is erratic at this load (0 to 25
 across nine runs above the knee, and the arm that admitted the MOST observations resolved none),
 so what the bound fixed is *eviction*, deterministically, and identity is downstream of that.
+## The mask fold, moved to where the batch already is
+
+`ship_segmenter` answers 300x38 detection rows **and** a `(32, 160, 160)` prototype bank per
+crop. The bank exists only to be reduced to one number — the mask's area — and until now that
+reduction ran on the host, after both outputs had been copied home: 3.1 MB down the bus and
+1.44 ms of CPU per crop, which the profile above names as **81.3% of all device-to-host memory
+time** at this load. The kernel for it landed earlier (10.0 us a crop, pinned against the
+readable fold); this is the run with it wired into the engine, where it can read the network's
+output before anything comes home.
+
+One binary, one plan, one switch (`SHIPINFER_DEVICE_FOLD`), two arms twice each — 50 cameras ×
+20 fps over gstreamer RTSP from the pan fixture, GPUs 0/2/5/6, 92 workers, 40 s:
+
+| the fold runs | frames accepted | host CPU | **ms of host CPU a frame** | segmenter busy |
+|---|---|---|---|---|
+| **on the device** | 35 839 | 733.9 s | **20.48** | 116–118% |
+| **on the device** | 35 693 | 728.9 s | **20.42** | 111–117% |
+| on the host | 31 801 | 751.8 s | 23.64 | 82–94% |
+| on the host | 31 519 | 741.8 s | 23.53 | 85–91% |
+
+**+13.0% frames retired and −13.3% host CPU a frame**, and unlike the instant-bound sweep the
+two arms' ranges do not overlap on either number: 35 693–35 839 against 31 519–31 801, and
+20.42–20.48 ms against 23.53–23.64. The instance threads' own CPU is unchanged per frame
+(15.1–15.3 ms against 15.3–15.4), which is what says the saving is the copy and the fold rather
+than the scheduling: the same work per frame, minus a 3.1 MB trip home and a 1.44 ms reduction.
+
+**What goes up is the segmenter's occupancy**, from ~87% to ~116%, and that is the trade being
+made: `execute()`'s wall time now contains the fold kernel, so work that was the host's is the
+GPU's. At this load the host was the wall — the profile said so — which is why the trade pays.
+
+**The numbers are the same numbers.** `test_fold_wiring` runs one batch through two adapters,
+one folding on the device and one not, and compares the areas against `graph/mask_area.cpp`'s
+answer on the unfolded outputs — at two mask thresholds, because a fold that never read the
+bank would agree at one.
 
 ## The verdict, and the one open question
 
