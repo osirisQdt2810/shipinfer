@@ -888,12 +888,39 @@ plane a resolved configuration"; ADR-017 §4 makes `Topology.from_spec` the one 
 second loader is a second door whose failure is one plane accepting a chain the other refuses
 at deploy time; and vLLM does this (`VllmConfig` resolved in Python, handed to the engine-core
 process), which CLAUDE.md makes the default shape. Choosing *where* a chain runs is control
-plane too, and this plane's one execution loop is its binary's composition root under
-`csrc/shipinfer/cli/`, which `cli` already mirrors.
+plane too, and this plane's execution loop is its binary's composition root under `cli/`.
 
-**Line-oriented, not JSON:** `csrc` has a JSON writer only, the convention is already lines
-(`parity_files.h`), and a plan is a flat list, not a tree. `score` uses `json_number`, because
-`std::to_string(0.25)` is `0.250000` and the gate is a byte compare. What crosses *is* the
-golden, so both halves can be automatic: `tests/topology/test_plan.py` holds the emitter to
-the committed goldens, and the C++ gate re-serialises them. The shared refusal table earned
-itself while the reader was being written -- C++ refused `crop 0 128` and Python did not.
+**Line-oriented, not JSON:** `csrc` has a JSON writer only, the convention is already lines,
+and a plan is a flat list. `score` uses `json_number` because `std::to_string(0.25)` is
+`0.250000` and the gate is a byte compare. What crosses *is* the golden, so both halves are
+automatic -- which is how C++ came to refuse `crop 0 128` while Python did not.
+
+---
+
+## ADR-021 — A group waits for the roster it declares, on both planes
+
+**Status:** Accepted · 2026-09-12 · answers `MTMC-THE-TWO-PLANES-DISAGREE-ABOUT-THE-ROSTER`
+
+**Context.** `graph/from_plan.cpp` announces every camera a chain's `mtmc` slot declares before
+any worker starts (#222), so an instant waits for the declared group. Its comment said the
+Python element did the same — it did not, and one chain file gave **two instant memberships**,
+which is what the V88 sync rule exists to prevent.
+
+**Decision.** The **declared roster is the group**, on both planes: `ShipvisionMtmc.open()`
+announces it. A chain that declares none keeps the degenerate behaviour both planes had, where
+the live set is what has been seen.
+
+**Why not the other way.** Closing on evidence is more forgiving and was refused for three
+reasons. A group is an **atomic unit of placement** (`docs/arch.md` §4), so its membership is
+configuration rather than observation. Ids that change as cameras join are worse than ids that
+are late. And the fault the alternative avoids is no longer silent: `silent_cameras()` names a
+declared camera that never sent, on both planes (#233).
+
+**What it costs, measured.** A camera that never connects makes `complete` unreachable, so that
+group's instants pay their full window: at twelve cameras, not one instant closed `complete` in
+six runs against 421 of 905 once the roster named the run's own cameras. At fifty cameras
+`complete` is unreachable either way, so this is a small-fleet cost the diagnostic carries.
+
+**Consequences.** The bench chain's roster names no camera any run has, and both planes report
+that now. Barrier unit tests on both planes carry the property; the parity harness has no
+barrier scenario family, so it does not — that stays on the ledger item.

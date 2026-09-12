@@ -932,6 +932,36 @@ class TestTheCameraLifecycle:
 
 
 @needs_shipvision
+class TestTheDeclaredGroupIsWhatAnInstantWaitsFor:
+    """`MTMC-THE-TWO-PLANES-DISAGREE-ABOUT-THE-ROSTER`, settled in favour of the plane that was
+    already doing it. `graph/from_plan.cpp` announces every declared camera to its barrier
+    before any worker starts, and its comment claimed this element did the same — it did not,
+    so one chain file gave two instant memberships, which is the V88 sync rule's subject.
+
+    A group is an atomic unit of placement (`docs/arch.md` §4), so the group an instant waits
+    for is the DECLARED one. A declared camera that never connects is a configuration fault and
+    is reported rather than silent — `silent_cameras` names it, and the element warns.
+    """
+
+    def test_a_declared_camera_is_waited_for_before_it_has_ever_sent(self) -> None:
+        element = opened({"group": "quay", "cameras": ["cam-a", "cam-b"]})
+        try:
+            assert element.barrier.live == frozenset({"cam-a", "cam-b"})
+            assert element.barrier.silent_cameras == frozenset({"cam-a", "cam-b"})
+        finally:
+            element.close()
+
+    def test_a_chain_with_no_roster_still_learns_its_group_from_traffic(self) -> None:
+        """The degenerate case stays degenerate: no roster means the live set is what has been
+        seen, which is what a runner that never drives the lifecycle hooks gets."""
+        element = opened()
+        try:
+            assert element.barrier.live == frozenset()
+        finally:
+            element.close()
+
+
+@needs_shipvision
 class TestARosterNobodyAnswersIsSaidOutLoud:
     """`MTMC-ROSTER-NAMES-NO-CAMERA-A-RUN-HAS`: a declared camera is waited for whether it
     exists or not, so a roster naming cameras this fleet does not have makes a complete instant
@@ -1096,8 +1126,14 @@ class TestAGroupItsWorkersCannotCoverIsSaidOutLoud:
     ) -> None:
         """Two lines in a process lifetime, and deliberately two: the first says the declared
         configuration cannot work, the second says it has started happening and with how many
-        cameras. The ramp from an empty shard always passes through a covered count, so a
-        latch set at ``open()`` would be cleared by the ramp anyway."""
+        cameras.
+
+        The second says **8**, not the 5 a ramp would cross at: a chain that declares a roster
+        has it announced at ``open()`` (`_announce_roster`), so the group an instant waits for
+        is the declared one from the first frame — which is what the other plane has always
+        done. A shard that is handed cameras it was never told about still crosses on the way
+        up, which is the case the live count is for.
+        """
         roster = [f"cam-{index}" for index in range(8)]
         with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
             built = opened({"group": "quay", "cameras": roster}, workers=4)
@@ -1110,7 +1146,7 @@ class TestAGroupItsWorkersCannotCoverIsSaidOutLoud:
         warned = self._warnings(caplog)
         assert len(warned) == 2, warned
         assert "8 cameras (its declared roster)" in warned[0]
-        assert "5 cameras (live on this shard)" in warned[1], "the crossing, once"
+        assert "8 cameras (live on this shard)" in warned[1], "the declared group, once"
 
     def test_a_group_the_workers_do_cover_says_nothing(self, caplog) -> None:
         roster = [f"cam-{index}" for index in range(8)]

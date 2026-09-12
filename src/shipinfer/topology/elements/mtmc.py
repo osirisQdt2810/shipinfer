@@ -514,6 +514,18 @@ class ShipvisionMtmc(Element):
             )
         if self._roster:
             self._warn_if_workers_cannot_cover(len(self._roster), "its declared roster")
+            self._announce_roster()
+
+    def _announce_roster(self) -> None:
+        """Tell the barrier the group it waits for, before any frame arrives (ADR-021).
+
+        What `graph/from_plan.cpp` does on the other plane, and what its comment already
+        claimed this one did — it did not, so one chain file gave two instant memberships. A
+        declared camera that never connects is a configuration fault and no longer a silent
+        one: :attr:`~shipinfer.topology.barrier.InstantBarrier.silent_cameras` names it.
+        """
+        for camera in self._roster:
+            self._barrier.camera_added(camera)
 
     def _ground_plane(self, mtmc: Any) -> Any:
         """The group's homographies, or ``None`` for an appearance-only deployment.

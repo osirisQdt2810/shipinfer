@@ -3184,23 +3184,16 @@ hook down, for when the operator asked to see something before it is executed.
       problem; the INPUT was ten unrelated photographs replayed at 20 fps, so no track survived
       one frame, let alone three consecutive instants. Nothing in the port changes.
 
-- [ ] MTMC-ROSTER-NAMES-NO-CAMERA-A-RUN-HAS · `topology/ship_person_cpu.yaml` declares
-      `cameras: [cam-01, cam-02, cam-03, cam-04]` and every bench fleet is `cam00 ... cam11`, so
-      the barrier waits for four cameras that never connect. MEASURED 11 Sep: not ONE instant
-      closed `complete` in six runs (they close on `advanced` or `window`); with the roster
-      naming the run's own cameras, 421 of 905 closed complete. The chain file is the
-      deployment's, so the fix is not to rename it to suit the bench: either the bench chain is
-      a variant whose roster is its fleet, or a mismatch is REFUSED at open() -- the barrier
-      knows both lists, and a group that never completes is a silent configuration fault today.
-      NO LONGER SILENT, 11 Sep (#233): both barriers answer `silent_cameras()` -- announced
-      minus seen -- the bench prints `mtmc_cameras_silent <slot> cam-a,cam-b` when the set is
-      non-empty, and the Python element warns once, naming the cameras, once 100 windows have
-      closed with one of them still never having sent. The grace period is the review's
-      finding: judging at the FIRST close both maligned a camera that was merely starting and
-      left the check running per frame forever on a healthy fleet, because `CLOSED_WINDOW` is
-      routine (`window 265` beside `complete 16` in this PR's own run). WHAT IS STILL OPEN is
-      which roster a group waits for, and it is now a stated divergence rather than a guess:
-      `MTMC-THE-TWO-PLANES-DISAGREE-ABOUT-THE-ROSTER`.
+- [x] MTMC-ROSTER-NAMES-NO-CAMERA-A-RUN-HAS · CLOSED 12 Sep with ADR-021, which answers the
+      question this item was really asking. `topology/ship_person_cpu.yaml` declares
+      `cam-01 ... cam-04` and every bench fleet is `cam00 ...`, so the barrier waits for four
+      cameras that never connect -- and that is now a configuration fault BOTH planes report
+      (`mtmc_cameras_silent`, and the element's warning) rather than a divergence that hid it.
+      The chain file is the deployment's, so it keeps its roster: a bench run that wants
+      complete instants names its own fleet, which is what the measured arms here did.
+      MEASURED at both scales: at twelve cameras a matching roster is worth 421 complete
+      instants of 905 against zero; at fifty, `complete` is unreachable with either roster, so
+      the mismatch costs nothing at the design load. Numbers on `benchmarks/RESULTS.md`.
 
 - [x] PYTHON-COLLECTOR-HAS-NO-UNCONDITIONAL-STAGE · DONE 11 Sep. FOUND by #234's review, and it was the hole
       that PR's own reasoning closes on the other plane. `pipeline/runner.py:489` calls
@@ -3225,33 +3218,23 @@ hook down, for when the operator asked to see something before it is executed.
       same frame with one expected stage as Incomplete naming it, and the runner opening with
       the graph's own entry stage. A probe that restores `open(state)` turns the last one red.
 
-- [ ] MTMC-THE-TWO-PLANES-DISAGREE-ABOUT-THE-ROSTER · FOUND 11 Sep while making the fault
-      above visible, and it is a V88 divergence with a comment claiming the opposite.
-      `graph/from_plan.cpp:43` announces EVERY declared camera to the barrier before any worker
-      starts (#222), and its comment says "the Python element does the same, per member, in
-      `mtmc.py`" -- it does not. `elements/mtmc.py` announces only what the runner hands it
-      through `camera_added`, and uses `params: cameras:` for a placement warning and a
-      worker-coverage warning. So one chain file gives two instant memberships: the C++ plane
-      waits for a phantom camera forever (measured: not one complete instant in six runs), the
-      Python plane closes on evidence and never notices.
-      THE DECISION, and it belongs with `docs/arch.md` §4's placement rule rather than with a
-      diagnostic: (a) the declared roster IS the group on both planes -- correct for a group
-      that is an atomic unit of placement, and it makes a broken camera cost a full window per
-      instant until `camera_removed` fires, forever if it never connected; or (b) both close on
-      evidence and the roster stays a placement check -- forgiving, and a group of four that
-      associates three-camera instants issues ids that CHANGE when the fourth connects.
-      Whichever wins, the loser's comment comes out and the parity harness gets a scenario
-      where a declared camera never sends. Note (a) needs a way to stop waiting for a camera
-      that has never appeared -- a health timeout, or the operator removing it from the roster,
-      which is what the new warning tells them to do.
-      Note the announce path already exists (`mtmc_runtime` calls `camera_added` for every
-      declared camera before any worker starts), so the check costs one comparison.
-      AND THE PRECEDENCE IS A THIRD OPTION, which #226's review found: that announce loop
-      landed in #222 (`git log -L 40,50:csrc/shipinfer/pipeline/graph/from_plan.cpp`), and
-      declared cameras WIN over merely-seen ones (`barrier.h`) -- so before it the barrier fell
-      back to what it saw and an older run recorded `complete 282` on this same 4-camera
-      roster. The fault is therefore recent and its cause is the precedence, so "declared wins
-      over seen" is itself a candidate alongside a bench-specific chain and a refusal at open().
+- [x] MTMC-THE-TWO-PLANES-DISAGREE-ABOUT-THE-ROSTER · DECIDED AND CLOSED 12 Sep by ADR-021:
+      the declared roster IS the group, on both planes. `ShipvisionMtmc.open()` announces it
+      (`_announce_roster`), which is what `graph/from_plan.cpp` has done since #222 and what
+      its comment already claimed this element did. The comment now says what is true.
+      WHY (a) AND NOT (b): a group is an atomic unit of placement, so its membership is
+      configuration rather than observation; ids that change as cameras join are worse than ids
+      that are late; and the fault (b) avoids is no longer silent -- `silent_cameras` names a
+      declared camera that never sent, on both planes (#233).
+      MEASURED COST, and it is a small-fleet one: a camera that never connects makes `complete`
+      unreachable, so that group's instants pay their full window -- at twelve cameras, not one
+      complete instant in six runs against 421 of 905 with a matching roster. At FIFTY cameras
+      `complete` is unreachable either way (no run closed one with either roster), so the
+      decision costs nothing at the design load and the diagnostic carries it below that.
+      WHAT IT DID NOT BUY: the parity harness has no barrier scenario family -- its families are
+      cluster, identity, gate, masks, records, queues and plans -- so the property is carried by
+      barrier unit tests on both planes instead. A barrier family is worth having the day a
+      second behaviour needs it; one test is not a family.
 
 - [x] MTMC-OFFERS-A-THIRD-OF-A-FRAMES-ROWS · ANSWERED 11 Sep. MEASURED: 3 480 observations from 9 538
       frames is 0.36 per frame, while the same run's embedders processed 77 777 person crops
