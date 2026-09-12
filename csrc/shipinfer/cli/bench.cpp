@@ -943,6 +943,11 @@ int main(int argc, char** argv) {
             // ids, and without this the run reports `mtmc_identities 0 0` with no way to tell
             // "nothing to associate" from "every instant missed its window".
             for (const auto& [slot, barrier] : cross_camera.barriers) {
+                // THE BOUND IN FORCE, because it is no longer a constant a reader can look
+                // up: unset in the chain, it follows the live set. A run whose `evicted`
+                // count is non-zero is read against this number.
+                std::cout << "mtmc_max_instants " << slot << " " << barrier->max_instants()
+                          << "\n";
                 for (const auto& [reason, count] : barrier->instant_stats()) {
                     std::cout << "mtmc_instants " << slot << " " << reason << " " << count
                               << "\n";

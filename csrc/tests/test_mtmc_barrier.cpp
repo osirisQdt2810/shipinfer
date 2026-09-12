@@ -81,6 +81,14 @@ namespace {
         return built;
     }
 
+    // The chain names no bound, which is the DEFAULT path and the one a deployment takes.
+    InstantBarrier::Options unbounded(double window_s, int workers) {
+        InstantBarrier::Options built;
+        built.sync_window_s = window_s;
+        built.workers = workers;
+        return built;
+    }
+
     // ---------------------------------------------------------------- construction
 
     void a_zero_window_is_refused() {
@@ -399,6 +407,80 @@ namespace {
         check(barrier.instant_stats()[mtmc::kDroppedEvicted] >= 1,
               "and the eviction is counted where an operator reads clock skew");
         check(instants.front() != instants.back(), "each capture opened its own instant");
+    }
+
+    void an_unnamed_bound_follows_the_fleet() {
+        InstantBarrier barrier(unbounded(0.06, 1));
+
+        check(barrier.max_instants() == mtmc::kDefaultMaxInstants,
+              "a barrier with no cameras yet is the floor");
+        for (int camera = 0; camera < 20; ++camera) {
+            barrier.camera_added("cam" + std::to_string(camera));
+        }
+
+        check(barrier.max_instants() == 20, "and the live set is the bound once it is larger");
+        barrier.drop_camera("cam19");
+        check(barrier.max_instants() == 19, "it follows the fleet down as well as up");
+    }
+
+    void a_roster_smaller_than_the_traffic_does_not_shrink_the_bound() {
+        // THE SHIPPED CASE, and the reason the bound is not `live_`: `ship_person_cpu.yaml`
+        // declares four cameras and every bench fleet is fifty. The live set answers who must
+        // report for an instant to be COMPLETE, which is that roster's business; the bound
+        // answers how many instants can legitimately be open, which is the traffic's.
+        Clock clock;
+        InstantBarrier barrier(unbounded(0.06, 1), nullptr, clock.fn());
+        for (int camera = 0; camera < 4; ++camera) {
+            barrier.camera_added("declared" + std::to_string(camera));
+        }
+        for (int camera = 0; camera < 20; ++camera) {
+            barrier.submit("cam" + std::to_string(camera), 100.0 + camera, payload_of("x"),
+                           kJoin);
+        }
+
+        check(barrier.live().size() == 4, "the live set is still the roster");
+        check(barrier.max_instants() == 24, "and the bound is every camera either set holds");
+        check(barrier.instant_stats().count(mtmc::kDroppedEvicted) == 0,
+              "so a stale roster cannot bring eviction back");
+    }
+
+    void a_fleet_larger_than_the_floor_evicts_nothing_it_is_still_filling() {
+        // THE FAILURE THIS FIXES, in miniature: twelve cameras, each with a frame in flight
+        // and none of them complete, is twelve instants the group is still filling. Under a
+        // constant bound of eight, four of them are evicted -- and the measurement at the
+        // design load is the same shape (`benchmarks/RESULTS.md`).
+        Clock clock;
+        InstantBarrier barrier(unbounded(0.06, 1), nullptr, clock.fn());
+        barrier.camera_added("cam-absent");
+        for (int camera = 0; camera < 12; ++camera) {
+            barrier.camera_added("cam" + std::to_string(camera));
+        }
+        for (int camera = 0; camera < 12; ++camera) {
+            // A capture of its own, a second apart, so no two cameras share an instant and
+            // none can complete: the map holds one per camera.
+            barrier.submit("cam" + std::to_string(camera), 100.0 + camera, payload_of("x"),
+                           kJoin);
+        }
+
+        check(barrier.open_instants() == 12, "every camera's instant is still open");
+        check(barrier.instant_stats().count(mtmc::kDroppedEvicted) == 0,
+              "and nothing was evicted: eviction is for a stale clock, not for a fleet");
+    }
+
+    void a_bound_the_chain_names_is_exact() {
+        // Both directions, because a floor that silently raised an operator's number would
+        // make the knob untestable -- including for the sweep that chose the default.
+        Clock clock;
+        InstantBarrier small(options(0.06, 1, /*max_instants=*/3), nullptr, clock.fn());
+        for (int camera = 0; camera < 12; ++camera) {
+            small.camera_added("cam" + std::to_string(camera));
+        }
+
+        check(small.max_instants() == 3, "a named bound below the fleet stays what was named");
+        InstantBarrier large(options(0.06, 1, /*max_instants=*/64), nullptr, clock.fn());
+        large.camera_added("cam0");
+
+        check(large.max_instants() == 64, "and a named bound above it is not lowered");
     }
 
     void an_evicted_instant_releases_the_frames_waiting_on_it() {
@@ -955,6 +1037,10 @@ int main() {
     a_late_frame_does_not_re_open_its_instant();
     the_oldest_instant_is_evicted_and_counted();
     an_evicted_instant_releases_the_frames_waiting_on_it();
+    an_unnamed_bound_follows_the_fleet();
+    a_fleet_larger_than_the_floor_evicts_nothing_it_is_still_filling();
+    a_roster_smaller_than_the_traffic_does_not_shrink_the_bound();
+    a_bound_the_chain_names_is_exact();
     at_most_workers_minus_one_ever_wait();
     a_starved_frame_still_contributes_its_payload_to_the_instant();
     a_barrier_nobody_announced_learns_its_group_from_traffic();
