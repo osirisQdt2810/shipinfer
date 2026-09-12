@@ -2970,10 +2970,15 @@ hook down, for when the operator asked to see something before it is executed.
       without nsys. It is engine deserialisation under nsys's injection, with the image's nsys
       2025.1.3 against the host TensorRT mounted at `/tensorrt`.
       THE NEXT PROBE is `trtexec --loadEngine` under nsys, which decides whether anything of
-      ours is involved at all. NOTE `scripts/hooks/require_container.py` refuses that command by
-      TEXT even inside `deploy/rootless/run.sh`, which is the advisory-deny-list limitation
-      CLAUDE.md describes -- put the invocation in a script file under `scripts/` and run THAT
-      through `run.sh` rather than reaching for `SHIPINFER_ALLOW_HOST_RUN`.
+      ours is involved at all.
+      AND THE NOTE THIS LINE USED TO CARRY WAS WRONG, which cost a review round: it said the
+      hook "refuses that command by TEXT even inside `deploy/rootless/run.sh`". It does not --
+      `_is_containerised` matches the segment's own executable and exempts the whole segment,
+      so `run.sh trtexec ...` was always allowed. Measured with the hook's own `verdict()`.
+      WHAT IS TRUE is the opposite hazard: putting `trtexec` in a shell file HIDES it from a
+      deny-list over command text, which is how #257 briefly shipped a host-GPU entry point
+      the hook could not see. `probe_nsys_trtexec.sh` is in `BLOCKED_SCRIPTS` now AND calls
+      `containment.require_container` itself -- the gate that cannot be spelled around.
       IT IS nsys x TensorRT, AND IT IS ONE VERSION. `scripts/probe_nsys_trtexec.sh` runs
       NVIDIA's OWN `trtexec --loadEngine` -- none of our code -- under each nsys on this box,
       same container, same plan, same flags: 2024.5.1 exit 0, 2024.6.2 exit 0, **2025.1.3 exit
