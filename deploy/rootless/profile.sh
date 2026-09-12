@@ -33,7 +33,31 @@ IMAGE="${SHIPINFER_BENCH_IMAGE:-shipinfer-gst:jammy}"
 TRT_DIR="${SHIPINFER_TENSORRT_DIR:-/usr/local/TensorRT}"
 WHEELS="${SHIPINFER_WHEELS:-/tmp/wheels-py311}"
 LIBS="$REPO/benchmarks/build/baseline-libs"
-NSYS_DIR="${SHIPINFER_NSYS_DIR:-$(ls -d /opt/nvidia/nsight-systems/* 2>/dev/null | sort -V | tail -1)}"
+# NOT SIMPLY THE NEWEST, which is how this picked the broken one for a week. MEASURED
+# 12 Sep with `scripts/probe_nsys_trtexec.sh`: NVIDIA's OWN `trtexec --loadEngine` segfaults
+# (exit 139) under nsys 2025.1.3 and exits 0 under 2024.5.1 and 2024.6.2 -- same container,
+# same plan, same flags -- so nothing of ours is involved and the profiler is the variable.
+# `PROFILE-DIES-AT-THE-DESIGN-LOAD` has the table.
+#
+# A LIST OF ONE, and it is a recorded measurement rather than a guess: re-run that probe when
+# a new Nsight lands, and delete the entry when the version it names is gone from the box.
+NSYS_BROKEN_VERSIONS="${SHIPINFER_NSYS_BROKEN:-2025.1.3}"
+pick_nsys() {
+  local newest="" candidate
+  for candidate in $(ls -d /opt/nvidia/nsight-systems/* 2>/dev/null | sort -V); do
+    [ -x "$candidate/bin/nsys" ] || continue
+    case " $NSYS_BROKEN_VERSIONS " in
+      *" $(basename "$candidate") "*)
+        echo "nsys $(basename "$candidate") skipped: it segfaults on TensorRT engine load" \
+             "(scripts/probe_nsys_trtexec.sh). Set SHIPINFER_NSYS_DIR to use it anyway." >&2
+        continue
+        ;;
+    esac
+    newest="$candidate"
+  done
+  printf '%s' "$newest"
+}
+NSYS_DIR="${SHIPINFER_NSYS_DIR:-$(pick_nsys)}"
 OUT="${SHIPINFER_PROFILE_OUT:-$REPO/.artifacts/profile}"
 
 TARGET="python"

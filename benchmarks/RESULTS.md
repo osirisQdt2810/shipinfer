@@ -667,6 +667,56 @@ over GStreamer RTSP from the pan fixture, 4 GPUs, 70 s with the analysis's 10 s 
 binary built inside `shipinfer-gst:jammy-nvdec` because that image is the one with both the
 compiler and the GStreamer headers.
 
+## The profiler was the bug, and what it says once it runs
+
+`deploy/rootless/profile.sh --cpp` printed `loading engines...`, died ~1.2 s later with an empty
+`threads: {}`, and wrote a report holding only the driver's context calls. Eight probes had
+narrowed it to one sentence — *a binary that loads a TensorRT plan segfaults under this Nsight
+Systems; a binary that only uses CUDA does not* — and every one of them was a binary of ours, so
+"something of ours is involved" was still open.
+
+**`trtexec` settles it.** NVIDIA's own loader, none of our code, same container, same plan, same
+flags (`scripts/probe_nsys_trtexec.sh`):
+
+| Nsight Systems | `trtexec --loadEngine` |
+|---|---|
+| 2024.5.1 | **exit 0** |
+| 2024.6.2 | **exit 0** |
+| **2025.1.3** | **exit 139 (SIGSEGV)** |
+
+Nothing of ours is involved and the profiler is the variable. `profile.sh` picked
+`ls -d /opt/nvidia/nsight-systems/* | sort -V | tail -1` — the newest — which is exactly how it
+selected the broken one and kept selecting it. It now skips a version measured to segfault on
+engine load, says so on stderr, and `SHIPINFER_NSYS_DIR` still overrides.
+
+With 2024.6.2 the design load profiles: 50 cameras × 20 fps over GStreamer RTSP, 4 GPUs, 40 s,
+37 572 frames read and 32 445 accepted, a 584 MB report.
+
+### And the sync it was blocking
+
+`EXECUTE-BLOCKS-THE-INSTANCE-THREAD` asked for one number before anything is built: the sync's
+share of an **instance thread's wall time**, not of CUDA API time. The plan runs 7 instances a
+GPU (detector 2, segmenter 2, person embedder 2, ship embedder 1) on 4 GPUs — 28 instance
+threads.
+
+| | 12 cameras × 20 fps | 50 × 20 (design load) |
+|---|---|---|
+| `cudaStreamSynchronize` total | 21.31 s | **304.29 s** |
+| calls | 23 880 | 150 629 |
+| average | 0.89 ms | **2.02 ms** |
+| share of CUDA API time | 44.2% | 47.1% |
+| **share of 28 threads' wall** | **3.2%** | **~14%** |
+
+**The load is the variable, which is what the item suspected and could not show.** The re-pricing
+had estimated "under 2%" from the 12-camera profile; the 12-camera number is 3.2% and the design
+load is about four times that. The denominator is stated rather than implied: 304.29 s against
+28 threads over ~77 s of the process's 80.85 s. Over the 40 s measurement window alone it is
+25%, and that is the wrong denominator — the threads are alive for the startup and the drain too.
+
+So the item has the justification it said it lacked. Whether ~14% is worth ~1 GB of VRAM and the
+buffer-ring restructuring is a judgement for whoever builds it; what is no longer true is that
+the number is unknown, or that it is 2%.
+
 ## The verdict, and the one open question
 
 The ≥5× target needs a ratio to be against, and the four above give opposite answers. Absent
