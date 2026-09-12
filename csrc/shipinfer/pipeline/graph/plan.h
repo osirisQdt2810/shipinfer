@@ -59,6 +59,15 @@ namespace shipinfer {
         // plan carries them: an omission agrees by luck today and diverges the moment a chain
         // file states one. `fold_mask` is strictly inside (0, 1) -- the cut is
         // `log(m / (1 - m))`, which is -inf at 0 and a division by zero at 1.
+        //: WHAT THE CHAIN SAID ABOUT A TRACKER. Absent means the chain did not say, and the
+        //: lane's own default stands -- these are not numbers this file chooses. Carried
+        //: because the other plane reads them and this one could not: a chain stating
+        //: `options: {max_age: 90}` and `regression_reset: 0` loaded on both, reported
+        //: `track` as having run on both, and emitted DIFFERENT ids (`CSRC-TRACKER-OPTIONS`).
+        //: Values stay strings: the LANE owns its key table, and a reader that converted here
+        //: could only drop a key it did not know.
+        std::optional<int64_t> regression_reset;
+        std::map<std::string, std::string> tracker_options;
         std::optional<double> fold_score;
         std::optional<double> fold_mask;
         // Which of the engine's outputs the fold reads. Which slot a YOLO-seg export puts its

@@ -47,23 +47,26 @@ class KnownDivergence:
 #: One entry, documentary (``explains=None``): the difference is in what each plane READS
 #: from a chain, so it reaches no trace field -- it reaches two different ``track_id``
 #: streams for one chain file, which no golden here holds yet. P6-D1/D2/D3 were closed by
-#: converging the planes, and this one is open work with the same intent.
+#: converging the planes; #259 narrowed this one from four knobs to two and it stays open.
 KNOWN: Mapping[str, KnownDivergence] = {
     "tracker_options": KnownDivergence(
         id="tracker_options",
         seam="track.track_id",
         python=(
-            "src/shipinfer/topology/elements/track.py:526-541 reads params `algorithm`, "
-            "`options`, `regression_reset` and `attribution_iou`, and TrackerShard refuses an "
-            "unknown option key at open()"
+            "src/shipinfer/topology/elements/track.py reads params `algorithm` (any name in "
+            "shipvision.mot.TRACKERS: sort, bytetrack, ocsort, botsort, deepsortv2) and "
+            "`attribution_iou` (which drops a detection row whose IoU with every published "
+            "track is below it, so the row serialises with a null track_id)"
         ),
         cpp=(
-            "csrc/shipinfer/pipeline/tracking/bytetrack.cpp holds a default-constructed "
-            "TrackerShard, and PlanNode carries no options, algorithm or regression_reset, so "
-            "a chain that states them runs the defaults with nothing saying so"
+            "csrc/shipinfer/pipeline/tracking/bytetrack.cpp is the lane's only tracker, so a "
+            "chain naming another algorithm silently runs ByteTrack; and TrackerShard::update "
+            "returns an id per detection with no attribution step, so no row is ever dropped "
+            "for a poor overlap. `options` and `regression_reset` no longer diverge -- they "
+            "cross on the plan as `tracker_option <key> <value>` and `regression_reset N`"
         ),
-        decided_in="PR #215 review round 3, finding 2",
-        ledger="[ ] CSRC-TRACKER-OPTIONS carry the tracker's params on the plan",
-        case="test_the_cpp_plane_reads_no_tracker_params",
+        decided_in="PR #215 review round 3, finding 2; narrowed in #259",
+        ledger="[ ] CSRC-TRACKER-ALGORITHM the lane has one tracker and the plan says nothing",
+        case="test_the_cpp_plane_has_one_tracker_and_no_attribution_step",
     )
 }

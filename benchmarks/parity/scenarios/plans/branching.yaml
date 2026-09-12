@@ -18,7 +18,14 @@ elements:
     params: {classes: [ship], crop: {size: [512, 512]}}
   embed_ship: {impl: pool, model: ship_embedder, params: {classes: [ship]}, after: segment}
   embed_person: {impl: pool, model: person_embedder, params: {classes: [person]}, after: detect}
-  track: {impl: shipvision, per: camera, after: [embed_ship, embed_person]}
+  # The tracker's own two, carried for the reason the gate's are: this plane read neither,
+  # so one chain ran two different trackers. `regression_reset: 0` is the interesting value --
+  # it refuses every stream restart, which no default can express.
+  track:
+    impl: shipvision
+    per: camera
+    after: [embed_ship, embed_person]
+    params: {regression_reset: 0, options: {max_age: 90, track_threshold: 0.4}}
   mtmc:
     impl: shipvision
     scope: global

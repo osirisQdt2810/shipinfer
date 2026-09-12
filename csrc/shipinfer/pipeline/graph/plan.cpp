@@ -228,6 +228,27 @@ namespace shipinfer {
                                       "admits nothing at all rather than thresholding");
                 }
                 node.min_height_fraction = fraction;
+            } else if (verb == "regression_reset") {
+                want(args, 1, where, "regression_reset <frames>");
+                // ZERO IS THE INTERESTING VALUE -- "never recover from a stream restart", an
+                // operator's explicit choice -- so it passes. NEGATIVE does not: the other
+                // plane's element refuses it, so no chain can produce this line.
+                const int frames = as_int(args[0], where);
+                if (frames < 0) {
+                    throw ConfigError(where + ": regression_reset is " + args[0] +
+                                      "; a frame count cannot be negative, and 0 already "
+                                      "refuses every regression");
+                }
+                node.regression_reset = static_cast<int64_t>(frames);
+            } else if (verb == "tracker_option") {
+                want(args, 2, where, "tracker_option <key> <value>");
+                // REFUSED, not last-wins: a key stated twice is a chain that cannot be read
+                // one way, and the lane would silently take whichever line came second.
+                if (node.tracker_options.count(args[0]) != 0) {
+                    throw ConfigError(where + ": tracker option '" + args[0] +
+                                      "' is stated twice; one key has one value");
+                }
+                node.tracker_options.emplace(args[0], args[1]);
             } else if (verb == "group") {
                 want(args, 1, where, "group <name>");
                 node.group = args[0];
@@ -578,6 +599,14 @@ namespace shipinfer {
             }
             if (node.max_instants) {
                 out += "max_instants " + std::to_string(*node.max_instants) + "\n";
+            }
+            if (node.regression_reset) {
+                out += "regression_reset " + std::to_string(*node.regression_reset) + "\n";
+            }
+            // A `std::map`, so this is the key order the other writer's `sorted(options)`
+            // emits -- which is what entitles the golden gate to a byte compare.
+            for (const auto& [key, value] : node.tracker_options) {
+                out += "tracker_option " + key + " " + value + "\n";
             }
         }
         out += "\n";

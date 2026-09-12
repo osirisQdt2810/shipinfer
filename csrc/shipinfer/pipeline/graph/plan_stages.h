@@ -22,6 +22,7 @@
 #include "shipinfer/pipeline/graph/mask_area.h"
 #include "shipinfer/pipeline/graph/plan.h"
 #include "shipinfer/pipeline/mtmc/cluster.h"
+#include "shipinfer/pipeline/tracking/associator.h"
 
 namespace shipinfer {
 
@@ -108,6 +109,9 @@ namespace shipinfer {
         //: does AND different ids for the rows they share -- association and the per-camera
         //: counter would have seen boxes the other tracker never got.
         int class_id = CropSpec::kAnyClass;
+        //: What the chain said about this tracker, carried to `create_associator` untouched.
+        //: The lane converts and refuses a key it does not have.
+        tracking::TrackerOptions options;
     };
 
     struct PlanStages {
