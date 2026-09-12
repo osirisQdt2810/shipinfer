@@ -218,12 +218,23 @@ def pkg_config_flags(lane: str) -> list[str]:
                 )
             _PKG_CONFIG_CACHE[lane] = [f"-I{root}", *(str(ROOT / s) for s in spec.sources)]
             return _PKG_CONFIG_CACHE[lane]
-        probe = subprocess.run(
-            ["pkg-config", "--cflags", "--libs", *spec.packages],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            probe = subprocess.run(
+                ["pkg-config", "--cflags", "--libs", *spec.packages],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            # THE TOOL IS MISSING, not the package, and `subprocess.run` RAISES for that rather
+            # than returning non-zero -- so this escaped the `SystemExit` every caller handles
+            # and killed the whole build. The bench image has no `pkg-config`, which is why a
+            # full build has never run inside the container the container rule sends them to.
+            raise SystemExit(
+                f"pkg-config is not installed, so the '{lane}' external lane "
+                f"({', '.join(spec.packages)}, needed by {', '.join(spec.units)}) cannot be "
+                f"resolved. Install pkg-config, or build with --offline, which probes no lane."
+            ) from None
         if probe.returncode != 0:
             raise SystemExit(
                 f"pkg-config could not resolve {', '.join(spec.packages)}, needed by "
