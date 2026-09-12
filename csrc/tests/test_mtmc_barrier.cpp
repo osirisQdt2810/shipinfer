@@ -752,6 +752,95 @@ namespace {
         check(barrier.instant_stats()[mtmc::kDroppedFailed] == 1, "counted once, per instant");
     }
 
+    void a_capture_clock_that_steps_back_is_refused_and_counted() {
+        // NTP can step CLOCK_REALTIME backwards at any moment, and #222 converged both planes
+        // onto the capture (wall) stamp deliberately -- two clocks would be two sets of global
+        // ids for one clip. A stepped frame matches no open bucket and no resolved span, so it
+        // would open an instant in the PAST and hold a whole window for cameras whose clocks
+        // did not step. Per CAMERA, so a camera merely sitting behind the group never trips it.
+        // Zero permits so nothing parks, and a camera that never reports so the first
+        // instant STAYS open -- otherwise the group is complete on its own first frame and
+        // "no bucket was opened" would be true of a barrier that opened none either way.
+        InstantBarrier barrier(options(0.06, 1));
+        barrier.camera_added("cam0");
+        barrier.camera_added("cam-absent");
+
+        barrier.submit("cam0", 100.0, payload_of("a"), kJoin);
+        const InstantOutcome stepped =
+            barrier.submit("cam0", 99.5, payload_of("b"), kJoin);  // 500 ms back, window 60 ms
+
+        check(stepped.reason == mtmc::kMissedBackward,
+              std::string("a step past the window is refused, got: ") + stepped.reason);
+        check(!stepped.associated, "and the frame carries a gap rather than a wrong instant");
+        check(barrier.frame_stats()[mtmc::kMissedBackward] == 1, "counted once");
+        // BEFORE ANY BUCKET IS TOUCHED, which is the property the guard is about: the open
+        // instant is still the one `cam0` opened at 100.0, and no second one was anchored in
+        // the past for a frame that was refused.
+        check(barrier.open_instants() == 1, "no instant was opened for the refused frame");
+
+        const InstantOutcome inside =
+            barrier.submit("cam0", 99.98, payload_of("c"), kJoin);  // 20 ms back, inside it
+        check(
+            inside.reason != mtmc::kMissedBackward,
+            std::string("a stamp INSIDE the window is ordinary jitter, got: ") + inside.reason);
+
+        // A second camera whose clock sits behind the group is not a step: its own stamps are
+        // monotonic, so it joins instants as it always did.
+        const InstantOutcome behind = barrier.submit("cam1", 99.0, payload_of("d"), kJoin);
+        check(behind.reason != mtmc::kMissedBackward,
+              std::string("an offset camera is not a stepped one, got: ") + behind.reason);
+    }
+
+    void a_step_is_adopted_rather_than_refused_for_its_whole_length() {
+        // THE CASE THAT DECIDES THE DESIGN. `ingest/frame/tag.py` stamps `time.time_ns()` in
+        // the shard process, so every camera shares one CLOCK_REALTIME and an NTP step moves
+        // the whole fleet at once. A reference that could not be adopted would refuse every
+        // frame of every camera until wall time climbed back -- a total outage in place of the
+        // one re-anchoring an anchored instant already absorbs.
+        //
+        // Zero permits (`workers` 1) so nothing parks: each submit returns at once and the
+        // LAST camera of the group is the one that closes the instant on evidence.
+        InstantBarrier barrier(options(0.06, 1));
+        const std::vector<std::string> cameras{"cam0", "cam1", "cam2"};
+        for (const std::string& camera : cameras) barrier.camera_added(camera);
+        for (const std::string& camera : cameras) {
+            barrier.submit(camera, 100.0, payload_of("a"), kJoin);
+        }
+
+        for (const std::string& camera : cameras) {
+            const InstantOutcome refused = barrier.submit(camera, 99.0, payload_of("b"), kJoin);
+            check(
+                refused.reason == mtmc::kMissedBackward,
+                std::string("the first frame of the step is refused, got: ") + refused.reason);
+        }
+        InstantOutcome closed;
+        for (const std::string& camera : cameras) {
+            closed = barrier.submit(camera, 99.05, payload_of("c"), kJoin);
+        }
+
+        check(barrier.frame_stats()[mtmc::kMissedBackward] == 3, "one frame a camera, no more");
+        check(closed.reason == mtmc::kClosedComplete,
+              std::string("the group re-anchored on the new time base, got: ") + closed.reason);
+    }
+
+    void a_single_future_stamp_does_not_wedge_a_camera() {
+        // The DeepStream path takes the camera's OWN RTCP sender-report clock, where one stamp
+        // an hour ahead is a camera reboot. A high-water reference with no way down would
+        // refuse that camera for the life of the process -- and worse than silently: it stays
+        // in the live set, so every instant of the whole group would then wait its full window.
+        InstantBarrier barrier(options(0.06, 4));
+        barrier.submit("cam0", 100.0, payload_of("a"), kJoin);
+        barrier.submit("cam0", 3700.0, payload_of("b"), kJoin);  // an hour ahead, then fine
+
+        const InstantOutcome refused = barrier.submit("cam0", 100.1, payload_of("c"), kJoin);
+        const InstantOutcome recovered = barrier.submit("cam0", 100.15, payload_of("d"), kJoin);
+
+        check(refused.reason == mtmc::kMissedBackward, "one frame pays for the bogus stamp");
+        check(recovered.reason != mtmc::kMissedBackward,
+              std::string("and the camera comes back on its own, got: ") + recovered.reason);
+        check(barrier.frame_stats()[mtmc::kMissedBackward] == 1, "exactly one");
+    }
+
     void a_declared_camera_that_never_sends_is_named() {
         // The fault this exists to make visible: an announced camera is waited for whether it
         // exists or not, so a roster naming cameras the fleet does not have makes `complete`
@@ -882,6 +971,9 @@ int main() {
     a_submit_after_close_all_is_refused_rather_than_parked();
     a_failed_association_releases_the_waiters_and_the_closer_gets_the_exception();
     a_declared_camera_that_never_sends_is_named();
+    a_capture_clock_that_steps_back_is_refused_and_counted();
+    a_step_is_adopted_rather_than_refused_for_its_whole_length();
+    a_single_future_stamp_does_not_wedge_a_camera();
     one_event_per_instant_and_not_one_per_frame();
     every_frame_of_a_group_gets_the_same_answer_or_an_honest_gap();
     std::printf("%d checks, %d failure(s)\n", checks, failures);

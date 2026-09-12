@@ -116,10 +116,10 @@ _SILENT_AFTER_WINDOW_CLOSES = 100
 #
 # The barrier owns the rest of it: what happened to an *instant* (`complete`, `window`,
 # `advanced`, `evicted`, `expired`, `shutdown`, `failed`) and what happened to a *frame* that
-# missed one (`late`, `duplicate`, `would_starve`). Those live in `topology/barrier.py` and
-# four of them are re-exported here because they are the `reason=` labels this element's
-# metrics carry. The two below are the element's own, because only an element that knows what
-# a track is can produce them.
+# missed one (`late`, `duplicate`, `backward`, `would_starve`). Those live in
+# `topology/barrier.py` and four of them are re-exported here because they are the `reason=`
+# labels this element's metrics carry. The two below are the element's own, because only an
+# element that knows what a track is can produce them.
 
 #: ``meta["tracks"]`` was absent -- the ``track`` element never answered for this frame.
 MISSING_TRACKS = "no_tracks"
@@ -217,8 +217,9 @@ class _MtmcMetrics:
             "Frames emitted with `mtmc` in `missing_stages`, by reason. Every one of these "
             "carries its boxes, vectors and per-camera track ids and lacks only the global "
             "id, which is worth far more than a dropped frame. The reasons mix two "
-            "vocabularies on purpose: `late`, `duplicate` and `would_starve` are what "
-            "happened to this frame, while `evicted`, `expired`, `failed` and `unassignable` "
+            "vocabularies on purpose: `late`, `duplicate`, `backward` and `would_starve` "
+            "are what happened to this frame, while `evicted`, `expired`, `failed` and "
+            "`unassignable` "
             "are what happened to the *instant* it was in -- one such instant produces one "
             "of these per camera in it, so read this against "
             "`shipinfer_mtmc_instants_total` rather than as a count of instants.",

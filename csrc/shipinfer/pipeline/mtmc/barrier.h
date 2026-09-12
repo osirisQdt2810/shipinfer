@@ -79,6 +79,27 @@ namespace shipinfer::mtmc {
     //: make the group's same-camera exclusion mask leak. A LATER capture from a camera already
     //: in the bucket is not this -- it is the next instant, and it closes the open one.
     inline constexpr const char* kMissedDuplicate = "duplicate";
+    //: This camera's CAPTURE clock went backwards by more than an instant is wide. Measured
+    //: against that camera's own newest stamp, so a camera whose clock merely sits behind the
+    //: rest of the group never trips it -- what this catches is a STEP, which NTP can deliver
+    //: at any moment and which would otherwise open an instant in the past that no other
+    //: camera will ever join. Counted and refused rather than mis-bucketed silently
+    //: (`MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK`). ONE FRAME PER STEP -- see
+    //: `kBackwardRefusalsBeforeAdopting`.
+    inline constexpr const char* kMissedBackward = "backward";
+    // doc: long why a step is adopted rather than refused for its whole length
+    //: How many frames a camera is refused before its offered stamp BECOMES the reference.
+    //:
+    //: A step is a new, persistent time base and not a transient anomaly. Every camera on a
+    //: shard shares one `CLOCK_REALTIME` (`ingest/frame/tag.py` stamps `time.time_ns()` at
+    //: decode), so an NTP step moves the whole fleet at once: a reference that could not be
+    //: adopted would refuse EVERY frame of EVERY camera for the length of the step -- a total
+    //: outage in place of the single re-anchoring an anchored instant already absorbs. One
+    //: refusal is what the counter needs to make the step visible, and it is what stops one
+    //: stray past stamp from opening an instant nobody joins. The same rule recovers a camera
+    //: whose stamp jumped into the FUTURE, which is a camera reboot on the DeepStream path
+    //: where the stamp is the camera's own RTCP clock rather than this box's.
+    inline constexpr int kBackwardRefusalsBeforeAdopting = 1;
     //: Waiting would have parked the last worker. The frame's payload is already in its bucket
     //: when the guard fires, so its tracks still take part in the association -- only the
     //: ANSWER is not delivered to this frame. Dropping the entry instead would degrade the
@@ -301,6 +322,10 @@ namespace shipinfer::mtmc {
         //: Resolved instants' capture spans, so a frame inside one is late rather than new.
         std::map<int64_t, std::pair<double, double>> recent_;
         size_t recent_limit_;
+        //: Each camera's newest capture stamp, and how many frames in a row it has refused
+        //: against it. Both bounded by the fleet and erased with the camera.
+        std::map<std::string, double> newest_capture_;
+        std::map<std::string, int> backward_run_;
         std::set<std::string> announced_;
         std::set<std::string> seen_;
         bool hooked_ = false;

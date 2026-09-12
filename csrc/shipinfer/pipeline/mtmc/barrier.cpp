@@ -155,6 +155,8 @@ namespace shipinfer::mtmc {
         std::lock_guard<std::mutex> guard(lock_);
         announced_.erase(camera_id);
         seen_.erase(camera_id);
+        newest_capture_.erase(camera_id);
+        backward_run_.erase(camera_id);
         refresh_live();
         // doc: long why a bucket with NO waiters is left alone here
         // SEALED, NOT CLOSED, and by the lifecycle thread: dropping the last missing camera
@@ -358,6 +360,23 @@ namespace shipinfer::mtmc {
         retire(now);
         if (seen_.insert(camera_id).second) refresh_live();
 
+        // BEFORE ANY BUCKET IS TOUCHED, and against this camera's OWN newest stamp: a step
+        // backwards past the window matches no open bucket and no resolved span, so it would
+        // open an instant in the past and wait out a whole window for cameras whose clocks did
+        // not step. Refused and counted instead.
+        bool adopted = false;
+        const auto newest = newest_capture_.find(camera_id);
+        if (newest != newest_capture_.end() && capture_s < newest->second - window_s_) {
+            int& run = backward_run_[camera_id];
+            if (run < kBackwardRefusalsBeforeAdopting) {
+                ++run;
+                return missed(kMissedBackward, 0);
+            }
+            // The camera is on a new time base. Adopt it, and do not let the `max` below drag
+            // the reference back to the one it abandoned.
+            adopted = true;
+        }
+
         std::shared_ptr<Bucket> bucket = match(capture_s);
         if (!bucket) {
             const int64_t late = late_instant(capture_s);
@@ -377,6 +396,9 @@ namespace shipinfer::mtmc {
             }
         }
 
+        backward_run_.erase(camera_id);
+        double& newest_for_camera = newest_capture_[camera_id];
+        newest_for_camera = adopted ? capture_s : std::max(newest_for_camera, capture_s);
         bucket->reported[camera_id] = capture_s;
         bucket->entries.push_back(InstantEntry{camera_id, std::move(payload)});
         bucket->first = std::min(bucket->first, capture_s);
