@@ -141,7 +141,8 @@ namespace {
     void a_tracked_and_embedded_row_gets_its_groups_id() {
         auto barrier = std::make_shared<InstantBarrier>(options());
         auto tracker = std::make_shared<ScriptedTracker>();
-        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {}, false);
+        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {},
+                        false);
         auto state = frame_with("cam0", 1, {box(0, 0, 0)});
         attach(*state, "track_out", 1, {0}, {7.0f});
         attach(*state, "embed_out", 2, {0}, {1.0f, 0.0f});
@@ -162,7 +163,8 @@ namespace {
         // tracker as `cam0#7`, not `cam0#0`.
         auto barrier = std::make_shared<InstantBarrier>(options());
         auto tracker = std::make_shared<ScriptedTracker>();
-        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {}, false);
+        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {},
+                        false);
         auto state = frame_with("cam0", 1, {box(0, 0, 0)});
         attach(*state, "track_out", 1, {0}, {7.0f});
         attach(*state, "embed_out", 2, {0}, {1.0f, 0.0f});
@@ -179,7 +181,8 @@ namespace {
     void an_untracked_row_is_passed_over_rather_than_given_somebody_elses_id() {
         auto barrier = std::make_shared<InstantBarrier>(options());
         auto tracker = std::make_shared<ScriptedTracker>();
-        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {}, false);
+        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {},
+                        false);
         auto state = frame_with("cam0", 1, {box(0, 0, 0), box(100, 0, 1)});
         // Only row 0 was tracked; row 1 has an embedding but no track id.
         attach(*state, "track_out", 1, {0}, {7.0f});
@@ -198,7 +201,8 @@ namespace {
         // cannot take part. `records.cpp` leaves its global id null.
         auto barrier = std::make_shared<InstantBarrier>(options());
         auto tracker = std::make_shared<ScriptedTracker>();
-        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {}, false);
+        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {},
+                        false);
         auto state = frame_with("cam0", 1, {box(0, 0, 0), box(100, 8, 1)});
         attach(*state, "track_out", 1, {0, 1}, {7.0f, 8.0f});
         attach(*state, "embed_out", 2, {1}, {0.0f, 1.0f});  // only row 1 embedded
@@ -323,15 +327,17 @@ namespace {
         auto tracker = std::make_shared<ScriptedTracker>();
         MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker,
                         {"cam-01", "cam-02"}, false);
+        // A row that CAN be associated -- tracked and embedded -- so "not associated" can only
+        // mean the roster turned it away. The pass-over case below uses the same row.
         auto state = frame_with("cam09", 1, {box(0, 0, 0)});
-        attach(*state, "track_out", 1, {7}, {});
-        attach(*state, "embed_out", 2, {}, {1.0f, 0.0f});
+        attach(*state, "track_out", 1, {0}, {7.0f});
+        attach(*state, "embed_out", 2, {0}, {1.0f, 0.0f});
 
         const StageOutcome outcome = stage.run(*state);
 
-        check(outcome.ran(), "the stage ran");
-        check(!tracker->seen.empty(),
-              "and the unlisted camera WAS associated, which is what the other plane does");
+        check(outcome.ran() && outcome.rows == 1,
+              "the unlisted camera's row WAS associated, which is what the other plane does");
+        check(!tracker->seen.empty(), "and its tracker saw it");
         check(barrier->frame_stats().count(mtmc::kMissedNotMine) == 0,
               "nothing was routed away: there is no other group to route to");
     }
@@ -345,11 +351,15 @@ namespace {
         auto tracker = std::make_shared<ScriptedTracker>();
         MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker,
                         {"cam-north"}, true);
+        // THE SAME ROW the case above associates, so the only difference is the routing.
         auto state = frame_with("cam-south", 1, {box(0, 0, 0)});
-        attach(*state, "track_out", 1, {7}, {});
-        attach(*state, "embed_out", 2, {}, {1.0f, 0.0f});
+        attach(*state, "track_out", 1, {0}, {7.0f});
+        attach(*state, "embed_out", 2, {0}, {1.0f, 0.0f});
 
-        stage.run(*state);
+        const StageOutcome outcome = stage.run(*state);
+
+        check(outcome.ran() && outcome.rows == 0, "the stage ran and published no ids");
+        check(tracker->seen.empty(), "the other group's tracker never saw this camera");
 
         const std::map<std::string, uint64_t> stats = barrier->frame_stats();
         check(stats.count(mtmc::kMissedNotMine) == 1 && stats.at(mtmc::kMissedNotMine) == 1,
@@ -363,7 +373,8 @@ namespace {
         // every other camera in the group is answered late. `needs` is empty for that reason.
         auto barrier = std::make_shared<InstantBarrier>(options());
         auto tracker = std::make_shared<ScriptedTracker>();
-        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {}, false);
+        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {},
+                        false);
         auto state = frame_with("cam0", 1, {box(0, 0, 0)});
         attach(*state, "track_out", 1, {}, {});  // present and EMPTY
         attach(*state, "embed_out", 2, {}, {});
@@ -390,7 +401,8 @@ namespace {
         // key it chose. A positional read would hand cam0 cam1's id, plausibly.
         auto barrier = std::make_shared<InstantBarrier>(options());
         auto tracker = std::make_shared<ScriptedTracker>();
-        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {}, false);
+        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {},
+                        false);
         // Track id 3 on detection row 1: if the scatter used the row or the position, the id
         // would be 0 or 70 rather than 30.
         auto state = frame_with("cam0", 1, {box(0, 0, 0), box(100, 0, 1)});
@@ -415,7 +427,8 @@ namespace {
         // on both planes).
         auto barrier = std::make_shared<InstantBarrier>(options());
         auto tracker = std::make_shared<ScriptedTracker>();
-        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {}, false);
+        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {},
+                        false);
         FrameTag tag;
         tag.camera_id = "cam0";
         tag.frame_id = 1;
@@ -447,7 +460,8 @@ namespace {
         // observation comes back unidentified (`CSRC-MTMC-GATE-OPTIONS`).
         auto barrier = std::make_shared<InstantBarrier>(options());
         auto tracker = std::make_shared<GatingTracker>();
-        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {}, false);
+        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {},
+                        false);
         auto state = frame_with("cam0", 1, {box(0, 0, 0)});
         attach(*state, "track_out", 1, {0}, {7.0f});
         attach(*state, "embed_out", 2, {0}, {1.0f, 0.0f});
@@ -473,7 +487,8 @@ namespace {
         // on the tracker, because one tracker serves every worker on a slot.
         auto barrier = std::make_shared<InstantBarrier>(options());
         auto tracker = std::make_shared<RefusingTracker>();
-        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {}, false);
+        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {},
+                        false);
         auto state = frame_with("cam0", 1, {box(0, 0, 0)});
         attach(*state, "track_out", 1, {0}, {7.0f});
         attach(*state, "embed_out", 2, {0}, {1.0f, 0.0f});
@@ -498,7 +513,8 @@ namespace {
         auto tracker = std::make_shared<ScriptedTracker>();
         barrier->camera_added("cam0");
         barrier->camera_added("cam-absent");
-        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {}, false);
+        MtmcStage stage("mtmc", "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {},
+                        false);
         auto state = frame_with("cam0", 1, {box(0, 0, 0)});
         attach(*state, "track_out", 1, {0}, {7.0f});
         attach(*state, "embed_out", 2, {0}, {1.0f, 0.0f});

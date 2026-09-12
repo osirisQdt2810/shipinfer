@@ -429,8 +429,8 @@ namespace {
         // (`plan.cpp`: "is listed twice in this group") -- so this branch is reachable only
         // the way `a_plan_built_in_code_is_still_checked` reaches its own, and the message
         // still has to be right for whoever gets there.
-        ResolvedPlan plan = plan_of(kDetect + kTrack +
-                                    "node quay mtmc plan-test\nscope global\ncamera cam0\n");
+        ResolvedPlan plan =
+            plan_of(kDetect + kTrack + "node quay mtmc plan-test\nscope global\ncamera cam0\n");
         for (PlanNode& node : plan.nodes) {
             if (node.kind == "mtmc") node.cameras.push_back("cam0");
         }
