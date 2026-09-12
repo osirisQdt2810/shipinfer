@@ -2983,6 +2983,18 @@ hook down, for when the operator asked to see something before it is executed.
       clusterer then does with a 50-camera instant is the next question and is not this item's.
       FILED AS `MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD` below.
 
+- [ ] MTMC-A-DRAIN-CAN-EVICT-WHAT-THE-SURVIVORS-ARE-FILLING · FOUND by #238's review, and it
+      is the other side of the derived bound. `drop_camera` recomputes the bound DOWNWARD, so
+      tearing a 50-camera group down to 8 drops it to 8 while up to 50 buckets are open -- the
+      next `open()` then evicts down to 7 in one `while` pass and marks `evicted` on buckets
+      the surviving cameras are still filling.
+      SELF-LIMITING, which is why it is a note and not a defect: those buckets retire on their
+      own deadlines one window later, so the burst needs the drop and the submit inside the
+      same 60 ms. It has never been seen -- no run here shrinks a fleet mid-flight.
+      THE FIX WHEN IT IS NEEDED is to let the bound fall only as fast as buckets retire (or
+      not at all within a window of a drop), which is a small change and an easy test; what is
+      missing is a reason to make it, i.e. a deployment that drains a group while it runs.
+
 - [ ] MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD · FOUND 11 Sep while closing
       `MTMC-EIGHT-OPEN-INSTANTS-IS-A-SMALL-GROUP'S-BOUND`, and it is what that item uncovered
       rather than caused. With eviction gone, the design load (50 cameras x 20 fps, pan

@@ -923,6 +923,46 @@ namespace {
         check(barrier.frame_stats()[mtmc::kMissedBackward] == 1, "exactly one");
     }
 
+    void an_adoption_on_the_late_path_is_still_recorded() {
+        // `late` and `duplicate` return before the record at the end of `submit`, so an
+        // adoption decided on a frame that takes one of those paths used to be forgotten and
+        // the camera re-measured against the reference it had already abandoned. The visible
+        // cost is the counter: a second, genuine step is then adopted SILENTLY instead of
+        // being refused once, which is the one thing this guard exists to do.
+        InstantBarrier barrier(options(0.06, 1));
+        barrier.submit("cam0", 99.50, payload_of("a"), kJoin);  // resolves; span [99.50, 99.50]
+        barrier.submit("cam0", 100.0, payload_of("b"), kJoin);  // resolves; reference 100.0
+
+        const InstantOutcome stepped = barrier.submit("cam0", 99.49, payload_of("c"), kJoin);
+        const InstantOutcome late = barrier.submit("cam0", 99.50, payload_of("d"), kJoin);
+        const InstantOutcome second = barrier.submit("cam0", 98.0, payload_of("e"), kJoin);
+
+        check(stepped.reason == mtmc::kMissedBackward, "one frame pays for the step");
+        check(late.reason == mtmc::kMissedLate,
+              std::string("the adopted frame lands on a resolved span, got: ") + late.reason);
+        check(second.reason == mtmc::kMissedBackward,
+              std::string("and the second step is refused against the ADOPTED reference, "
+                          "got: ") +
+                  second.reason);
+        check(barrier.frame_stats()[mtmc::kMissedBackward] == 2, "counted twice, not once");
+    }
+
+    void a_first_stamp_is_recorded_as_itself() {
+        // `newest_capture_[camera]` default-constructs to 0.0 and `std::max` then keeps it, so
+        // a camera whose FIRST stamp is negative recorded 0.0 here and the real value on the
+        // Python plane -- the mirror image of the falsy-zero that plane's comment warns about.
+        // A unix capture stamp cannot be negative in production; an injected clock can, and
+        // `test_barrier.py` already submits at -0.4.
+        InstantBarrier barrier(options(0.06, 1));
+        barrier.submit("cam0", -0.4, payload_of("a"), kJoin);
+
+        const InstantOutcome next = barrier.submit("cam0", -0.3, payload_of("b"), kJoin);
+
+        check(next.reason != mtmc::kMissedBackward,
+              std::string("a stamp AFTER the first one is not a step backwards, got: ") +
+                  next.reason);
+    }
+
     void a_declared_camera_that_never_sends_is_named() {
         // The fault this exists to make visible: an announced camera is waited for whether it
         // exists or not, so a roster naming cameras the fleet does not have makes `complete`
@@ -1060,6 +1100,8 @@ int main() {
     a_capture_clock_that_steps_back_is_refused_and_counted();
     a_step_is_adopted_rather_than_refused_for_its_whole_length();
     a_single_future_stamp_does_not_wedge_a_camera();
+    an_adoption_on_the_late_path_is_still_recorded();
+    a_first_stamp_is_recorded_as_itself();
     one_event_per_instant_and_not_one_per_frame();
     every_frame_of_a_group_gets_the_same_answer_or_an_honest_gap();
     std::printf("%d checks, %d failure(s)\n", checks, failures);
