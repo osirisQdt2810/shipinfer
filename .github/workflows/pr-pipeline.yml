@@ -18,9 +18,20 @@
 #   - add the CLAUDE_CODE_OAUTH_TOKEN actions secret (`claude setup-token`),
 #   - create the `automerge` label.
 #
-# Known limitation (by design): a PR that MODIFIES any .github/workflows file cannot pass
-# the review job — the GitHub App refuses to mint a token when workflow content differs
-# from the default branch. Such PRs always need a manual merge.
+# THE REVIEW JOB CANNOT RUN ON A PR THAT EDITS **THIS FILE**, and that is narrower than the
+# rule this comment used to state. It said any PR touching .github/workflows could never pass
+# review. Measured, twice, because it had never been tested (`CI-WORKFLOW-PRS-MAY-BE-REVIEWABLE`):
+#
+#   * #236 edited cpp.yml. The review ran for 4m4s and returned APPROVE. Only the missing
+#     `automerge` label held it open.
+#   * #253 edited THIS file. The token exchange failed three times with
+#     "401 Unauthorized - Workflow validation failed. The workflow file must exist and have
+#     identical content to the version on the repository's default branch."
+#
+# So the App validates the workflow that is RUNNING against the default branch's copy of it,
+# not the PR's diff. Editing cpp.yml leaves this file identical to main's and the token mints;
+# editing this file does not. A PR that changes this one needs a manual merge (V169 permits it),
+# and every other workflow PR goes through the ordinary review-and-automerge path.
 
 name: PR Pipeline
 
