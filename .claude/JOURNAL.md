@@ -1,5 +1,47 @@
 # Journal
 
+
+## 12 Sep — the optimisation loop, twice round, and what the gate was really doing
+
+V168 asked for a loop: benchmark, then profile, then fix what the profile names. Two turns
+landed and a third measured.
+
+**The instant bound (#238).** The design load resolved no identities at all and the barrier's
+own counters said a fifth to a quarter of every instant opened was being EVICTED. `max_instants`
+defaulted to 8 -- a four-camera group's arithmetic. Swept 8/16/32/64/128 with one plan line
+different, three runs an arm: at 8 it evicts 20-28% and admits 97-545; from 16 up it evicts
+nothing and admits 527-2 258. The bound follows the fleet now (seen union announced, not the
+live set -- deriving it from the roster would have reproduced the bug on the shipped chain), and
+the chain this repository ships resolves 25 identities over 68 tracks where it resolved none.
+NOT a throughput knob: the first pair of runs read as +18% and three runs an arm said variance.
+
+**The mask fold (#239).** The profile's largest host item: 1.44 ms of CPU and 3.1 MB copied home
+per crop, 81.3% of all device-to-host memory time. #232's kernel now runs on the instance's own
+stream before anything comes home -- not on the stage, whose `combine` runs after the instance is
+free and its buffers are being overwritten. One binary, one switch, two arms twice each:
+**+13.0% frames retired and -13.3% host CPU a frame**, ranges non-overlapping on both.
+
+**And the third turn, which refuted my own hypothesis twice.** A new counter says how much of
+the fleet an instant held: 11.8 cameras of fifty (24%), 10.5 of twelve (88%). The arithmetic
+that fits -- `min_hits` counts CONSECUTIVE instants and a camera is in a quarter of them --
+predicted the 2.2% vs 74.7% admission exactly. Then the window sweep refuted it as the whole
+story (60/120/250 ms moves identities 18/42/50 while cameras-per-instant barely moves), and
+`min_hits 3 -> 1` settled it: admission 2.2% -> 99.9%, identities 18 over 18 TRACKS -> 23 over
+190. **At the shipped defaults every identity holds exactly one track**, which is not
+cross-camera association at all. The fix is upstream (shipvision#16): an instant a camera was
+not in is not a miss for its tracks.
+
+Also merged: the fixture follows the chain (#235), a stepped capture clock is counted and
+adopted after one frame (#237, #240), the Python collector expects the stage every frame reaches
+(#241), the contested-cluster defect is a gate (#242). ADR-021 settles which roster a group waits
+for, on both planes (#244).
+
+Three reviews caught things worth keeping: a decorator stolen from a neighbouring class for the
+second time (ast, and a run with the submodule blocked, are the only checks that see it); a
+ledger that had grown three copies of two items, one of them a superseded draft telling the next
+session to re-run three GPU arms; and a ratchet that counted the separator between two sections
+as part of the earlier one, so adding an ADR reddened its predecessor.
+
 ## 2026-09-11 — the gate that closed, and the diagnosis that was wrong
 
 **The chain can set the mtmc gate now (#225), and the first thing it bought was a retraction.**
