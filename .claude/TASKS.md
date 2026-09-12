@@ -2953,25 +2953,60 @@ hook down, for when the operator asked to see something before it is executed.
       parking it rather than spending an afternoon on it while #222 waits. Say if you want it
       chased now; otherwise the next person to touch `api/streams.py` owns it.
 
-- [~] MTMC-EIGHT-OPEN-INSTANTS-IS-A-SMALL-GROUP'S-BOUND · MEASURING 11 Sep at the design load
-      (50 cameras x 20 fps, pan fixture, GPUs 0/2/5/6, 92 workers, 40 s). `kDefaultMaxInstants
-      = 8` is documented as "half a second at the default window: enough to absorb a camera a
-      few frames behind" -- which is a four-camera group's arithmetic. At fifty cameras the
-      arrival spread is not a few frames: two runs at the default evicted 1007 and 720 instants
-      (26% and 19% of all instants opened), admitted 170 and 97 observations, and produced
-      ZERO global ids. Three runs with `max_instants: 64` on the identical plan (the verb #225
-      made chain-settable; the plans differ in that one line) evicted NOTHING, admitted 2154 /
-      1359 / 527, and produced 10-19 ids.
-      WHAT IT IS NOT: throughput. frames_accepted was 29 565 / 31 760 at 8 against 34 908 /
-      32 292 / 31 729 at 64 -- overlapping ranges, so the first pair's +18% was run-to-run
-      variance and is not claimable. `late` rises with the bound (11.9k/12.6k -> 13.7k/14.9k/
-      16.0k), which is the expected trade: an instant that survives is still open when a
-      straggler arrives, where an evicted one was simply gone.
-      SWEEPING 8/16/32/64/128 before proposing a number, because "bigger helped" is not a
-      default. The open question the sweep answers: is there a knee, or does admission track
-      the bound until memory does -- in which case the fix is a bound DERIVED from the roster
-      (one instant per camera-period of spread) rather than a constant, and the docstring's
-      "half a second" is the thing to keep true rather than the 8.
+- [x] MTMC-EIGHT-OPEN-INSTANTS-IS-A-SMALL-GROUP'S-BOUND · MEASURED, FIXED AND PROVED 11 Sep.
+      SWEPT at the design load (50 cameras x 20 fps, pan fixture, GPUs 0/2/5/6, 92 workers,
+      40 s, one plan line different): at the default 8 the run evicted 20.2-28.4% of every
+      instant it opened (three runs), admitted 97-545 observations and resolved ZERO global
+      ids; from 16 up it evicts exactly nothing, admits 527-2 258, and resolves ids in five of
+      six runs. The knee is 16 and 32/64/128 buy nothing over it -- eviction is a step, not a
+      slope. Table on `benchmarks/RESULTS.md`.
+      NOT A THROUGHPUT KNOB, and the first pair said otherwise: 29 565/31 760/30 725 frames
+      accepted at 8 against 31 729-34 908 above it, overlapping ranges. One pair would have
+      read as +18%; three runs an arm is what refused it.
+      THE FIX, both planes: the bound follows the FLEET when the chain names none --
+      `max(kDefaultMaxInstants, cameras seen or announced)`, recomputed in `refresh_live` /
+      `_refresh_live` as cameras arrive and leave. Seen UNION announced, not `live_`: the live
+      set is a roster decision, and `ship_person_cpu.yaml` declares four cameras against a
+      fifty-camera fleet, so a roster-derived bound would have been 8 again on the shipped
+      configuration. PROVED on that configuration, unchanged: bound 54, nothing evicted, 1 683
+      observations admitted and **25 global identities over 68 tracks** where the default bound
+      resolved none in three runs. Every camera holds one instant open and
+      seals more as it advances, so the number legitimately open scales with the fleet; a
+      constant below it spends eviction on buckets the group is still filling rather than on
+      the stale clock eviction is for. A named number stays exact in BOTH directions, which
+      keeps eviction testable and lets an operator who measured their own spread say so.
+      `mtmc_max_instants` is now a bench counter, because the bound is no longer a constant a
+      reader can look up.
+      WHAT IT DOES NOT ANSWER: identity is erratic at this load -- 0 to 25 ids across the nine
+      runs above the knee, and the arm that admitted the MOST observations (2 180, the
+      fifty-camera roster) resolved NONE. The bound fixed eviction, deterministically; what the
+      clusterer then does with a 50-camera instant is the next question and is not this item's.
+      FILED AS `MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD` below.
+
+- [ ] MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD · FOUND 11 Sep while closing
+      `MTMC-EIGHT-OPEN-INSTANTS-IS-A-SMALL-GROUP'S-BOUND`, and it is what that item uncovered
+      rather than caused. With eviction gone, the design load (50 cameras x 20 fps, pan
+      fixture, 92 workers, four A5000s, 40 s) admits 527-2 258 observations per run and
+      resolves anywhere from 0 to 25 global identities across nine runs at the SAME settings --
+      including one arm that admitted the most of any run (2 180, the fifty-camera roster) and
+      resolved NONE, and one that admitted 1 683 and resolved 25 over 68 tracks.
+      WHY IT IS NOT NOISE TO SHRUG AT: a deployment cannot be handed "identity works about
+      two thirds of the time". Either the gate's `min_hits` over CONSECUTIVE instants is being
+      broken by a stream the queue decimates (23% refused at this load -- see
+      `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY`), or the clusterer's thresholds are wrong for a
+      50-camera instant, or both.
+      AND ONE THING THE DERIVED BOUND DOES NOT HAVE (#238's review): a ceiling. It is
+      `|announced union seen|`, and `seen` only shrinks on `drop_camera`, so a source that
+      mints a fresh camera id per reconnect grows the bound, `recent_limit` (4x) and the open
+      bucket map without limit -- the failure mode inverts from "evicts too eagerly" to "never
+      evicts, grows". Camera ids are roster-stable today, which is why this is a note; the fix
+      when it is needed is a cap, and the number for it is a memory budget rather than a guess.
+      WHAT TO MEASURE FIRST, in this order: (a) the admitted observations PER CAMERA per
+      instant -- if a typical instant holds two cameras rather than fifty, no cross-camera
+      cluster can form and the barrier's `window` share says why; (b) `min_hits` at 1 against
+      the production 3, which separates "the gate never accumulates" from "the appearance
+      distance never matches"; (c) the same run at 12 cameras, where the queue refuses nothing,
+      to tell the rate apart from the fleet size.
 
 - [ ] MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK · (a) DONE 11 Sep, (b) STILL OPEN. #222 converged the two planes onto the
       CAPTURE (wall) stamp, because keying instants on different clocks is two sets of global

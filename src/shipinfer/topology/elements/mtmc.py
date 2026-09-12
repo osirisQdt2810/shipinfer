@@ -306,7 +306,8 @@ class ShipvisionMtmc(Element):
       reads through :meth:`camera_group` to keep the group on one shard, and what lets this
       element warn when a camera it was never told about turns up.
     * ``sync_window_ms`` — default :data:`DEFAULT_SYNC_WINDOW_MS`.
-    * ``max_instants`` — default :data:`DEFAULT_MAX_INSTANTS`.
+    * ``max_instants`` — unset follows the fleet (:data:`DEFAULT_MAX_INSTANTS` or the live
+      set, whichever is larger); a number is exact.
     * ``calibration`` — ``{camera_id: {matrix: [[...]], camera_width: ..., ...}}``. **Absent
       is a supported deployment, not a failure**: ``gated`` degrades to appearance-only
       without homographies, which is what a site that has not been surveyed yet gets. It is
@@ -358,7 +359,13 @@ class ShipvisionMtmc(Element):
         self._group = group or name
         self._roster = roster
         self._window_s = self._positive("sync_window_ms", DEFAULT_SYNC_WINDOW_MS) / 1e3
-        self._max_instants = int(self._positive("max_instants", DEFAULT_MAX_INSTANTS))
+        # UNSET STAYS UNSET, so the barrier can size the bound to the fleet rather than to a
+        # constant. Validated here anyway: a refusal at open() names the element and the key.
+        self._max_instants: int | None = (
+            None
+            if self.params.get("max_instants") is None
+            else int(self._positive("max_instants", DEFAULT_MAX_INSTANTS))
+        )
         options = self.params.get("options")
         options = {} if options is None else options
         if not isinstance(options, Mapping):

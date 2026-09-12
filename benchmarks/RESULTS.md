@@ -474,6 +474,67 @@ Four items came out of this profile and are filed with their numbers:
 `MASK-FOLD-BELONGS-ON-THE-DEVICE`, `ENGINE-COPIES-EVERY-OUTPUT-HOME`,
 `EXECUTE-BLOCKS-THE-INSTANCE-THREAD` and `THE-BUILD-NEVER-VECTORISES`.
 
+## Eight open instants is a four-camera group's arithmetic
+
+The design load associates nothing, and the cause is a constant. `max_instants` bounds how many
+instants the barrier keeps open and evicts the oldest past it; the default is 8, documented as
+"half a second at the default window". Every camera holds one instant open — the one its last
+frame landed in — and seals more as it moves on, so the number legitimately open scales with the
+**fleet**. At fifty cameras a bound of eight spends every eviction on a bucket the group is
+still filling.
+
+Same rig, same plan, one line different (`max_instants` in the chain): 50 cameras × 20 fps over
+gstreamer RTSP from the pan fixture, GPUs 0/2/5/6, 92 workers, 40 s.
+
+| bound | instants opened | evicted | offered | admitted | ids / tracks | frames accepted |
+|---|---|---|---|---|---|---|
+| **8** (the default) | 3 866 | **1 007 (26.0%)** | 56 050 | **170** | 0 / 0 | 29 565 |
+| **8** | 3 570 | **720 (20.2%)** | 67 749 | **97** | 0 / 0 | 31 760 |
+| **8** | 3 788 | **1 075 (28.4%)** | 53 637 | **545** | 0 / 0 | 30 725 |
+| 16 | 1 828 | **0** | 77 305 | 2 140 | 14 / 19 | 34 729 |
+| 32 | 1 817 | **0** | 74 820 | 2 258 | 0 / 0 | 34 095 |
+| 64 | 1 912 | **0** | 84 407 | 2 154 | 10 / 10 | 34 908 |
+| 64 | 1 838 | **0** | 68 482 | 1 359 | 12 / 19 | 32 292 |
+| 64 | 1 729 | **0** | 60 721 | 527 | 10 / 19 | 31 729 |
+| 128 | 1 964 | **0** | 79 781 | 782 | 9 / 18 | 34 598 |
+
+**The knee is 16 and nothing above it buys anything.** Eviction is a step, not a slope: at 8 it
+takes a fifth to a quarter of every instant opened, and from 16 up it is exactly zero in six
+runs. Admission rises about tenfold across that step (97–545 → 527–2 258) and then stops rising,
+so the fix is "large enough", not "larger".
+
+**What the run does with the extra evidence is noisier than the eviction count.** Global ids are
+0 / 0 in all three runs at 8 and non-zero in five of the six above it — the 32 arm admitted the
+most observations of any run here and still resolved none. So the honest claim is that the bound
+was **preventing** association and no longer is; what the clusterer then does with a 50-camera
+instant is the next question, not this one's answer.
+
+**It is not a throughput knob.** Frames accepted are 29 565 / 31 760 / 30 725 at 8 against
+31 729 – 34 908 above it: the means differ by ~10% but the ranges overlap, and a single pair
+(the first 8-arm against the first 64-arm) would have read as +18%. Three runs an arm is what
+says otherwise.
+
+**The fix is that the default follows the fleet** — `max(8, cameras seen or announced)`,
+recomputed as cameras arrive, on both planes. A chain that names `max_instants` still gets
+exactly that number, in both directions: an operator who has measured their own arrival spread
+can say so, and eviction stays testable.
+
+Seen *union* announced, and not the live set, because the live set is a roster decision. The
+chain this repository ships declares four cameras and every fleet here is fifty, so a bound
+derived from the roster would have been 8 again — the bug, on the shipped configuration. Both
+arms, same build, same load:
+
+| chain | announced | bound in force | evicted | admitted | ids / tracks |
+|---|---|---|---|---|---|
+| `ship_person_cpu.yaml`, **unchanged** | 4 | **54** | 0 | 1 683 | **25 / 68** |
+| the same with a fifty-camera roster | 50 | **50** | 0 | 2 180 | 0 / 0 |
+
+The first row is the headline: **the chain this repository ships resolves 25 global identities
+at the design load**, where every run at the default bound resolved none. The second row is the
+caveat, and it is the same one the sweep carries — identity is erratic at this load (0 to 25
+across nine runs above the knee, and the arm that admitted the MOST observations resolved none),
+so what the bound fixed is *eviction*, deterministically, and identity is downstream of that.
+
 ## The verdict, and the one open question
 
 The ≥5× target needs a ratio to be against, and the four above give opposite answers. Absent
