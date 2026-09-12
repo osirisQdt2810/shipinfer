@@ -2899,29 +2899,35 @@ hook down, for when the operator asked to see something before it is executed.
       backend-contract change, so it needs the Python plane's `TensorRTBackend` in the same
       PR (V88) and a parity test that a device-resident output reads the same numbers.
 
-- [~] PROFILE-DIES-AT-THE-DESIGN-LOAD · FOUND 12 Sep while trying to price
-      `EXECUTE-BLOCKS-THE-INSTANCE-THREAD` properly. `deploy/rootless/profile.sh --cpp` at 50
-      cameras over nvdec prints `loading engines...`, ends 1.6 s later with an empty
-      `threads: {}` in its own host-cpu line, and writes a report holding only the driver's
-      context calls (`cuCtxCreate` 60%, 400 `cuStreamSynchronize`) -- no runtime API, no
-      kernels, no pipeline. No error text: the bench is gone before it loads the first engine.
-      The same recipe at TWELVE cameras profiled fine on 11 Sep, which is where every number in
-      `benchmarks/RESULTS.md`'s profile section comes from.
-      WHY IT MATTERS: V168 makes optimisation a LOOP -- benchmark, then profile -- and the loop
-      is broken at the design load, which is the only load whose numbers decide anything. The
-      item it was blocking needs the sync's share of an instance thread's wall time AT FIFTY
-      cameras, and an estimate from a twelve-camera profile is what that item is currently
-      priced on.
-      TWO CANDIDATES ELIMINATED, 12 Sep. It is NOT the camera count: twelve cameras segfault
-      the same way (`PROFILE=139`, which is SIGSEGV), and the SAME binary at the SAME twelve-
-      camera load exits 0 with 2 341 frames without nsys -- so the binary is fine and the
-      profiler is what breaks it. It is NOT nsys's device-side CUDA event trace either:
-      `--cuda-event-trace=false` (the thing nsys warns about on every run) changes nothing.
-      WHERE TO LOOK NEXT: `--trace` narrowed one at a time (`cuda` alone, then `osrt` alone) to
-      find which tracer takes it down; then whether it is CUPTI against 28 instance threads
-      each holding a TensorRT context, which would point at `--cuda-graph-trace` or at the
-      per-thread buffers. A core file would answer it in one run: the container would need
-      `ulimit -c` and a writable `/tmp`.
+- [~] PROFILE-DIES-AT-THE-DESIGN-LOAD · NARROWED 12 Sep to one sentence: **a binary that loads
+      a TensorRT plan segfaults under this Nsight Systems; a binary that only uses CUDA does
+      not.** `deploy/rootless/profile.sh --cpp` prints `loading engines...`, ends ~1.2 s later
+      with an empty `threads: {}`, and writes a report holding only the driver's context calls.
+      THE PROBES, each in the container, each one variable:
+
+      | under nsys | loads a plan | exit |
+      |---|---|---|
+      | `test_mask_area_kernel` (CUDA kernels) | no | **0**, 11 checks |
+      | `test_dataplane` (CUDA, no engine) | no | **0**, 53 checks |
+      | `test_fold_wiring` (one plan) | yes | **139** (SIGSEGV) |
+      | `bench`, 12 cameras | yes | 139 |
+      | `bench`, 50 cameras | yes | 139 |
+      | `bench`, `SHIPINFER_DEVICE_FOLD=0` | yes | 139 |
+      | `bench`, `--trace=cuda` / `osrt` / `nvtx` alone | yes | 139 / 1 / 1, all dead at load |
+      | `bench`, `--cuda-event-trace=false` | yes | 139 |
+
+      SO IT IS NOT: the fleet size, the mask fold (#239), the tracer, nsys's device-side event
+      trace, or the bench -- and the SAME binary at the same load exits 0 with 2 341 frames
+      without nsys. It is engine deserialisation under nsys's injection, with the image's nsys
+      2025.1.3 against the host TensorRT mounted at `/tensorrt`.
+      THE NEXT PROBE is `trtexec --loadEngine` under nsys, which decides whether anything of
+      ours is involved at all. NOTE `scripts/hooks/require_container.py` refuses that command by
+      TEXT even inside `deploy/rootless/run.sh`, which is the advisory-deny-list limitation
+      CLAUDE.md describes -- put the invocation in a script file under `scripts/` and run THAT
+      through `run.sh` rather than reaching for `SHIPINFER_ALLOW_HOST_RUN`.
+      IF IT IS nsys x TensorRT: the profile leg of V168's loop needs either a different nsys
+      (the image's, or a newer one mounted like TensorRT is) or `--trace=none` plus NVTX ranges
+      the code emits itself, which is the shape that does not depend on CUPTI at all.
 
 - [ ] EXECUTE-BLOCKS-THE-INSTANCE-THREAD · PROFILED 11 Sep: `cudaStreamSynchronize` is **32.2%
       of all CUDA API time** -- 9.64 s over 5 564 calls, 1.73 ms average -- because
@@ -3488,16 +3494,23 @@ hook down, for when the operator asked to see something before it is executed.
       libcudart the way torch does (`torch/lib/libcudart.so.12`) or read the flag through
       torch and drop the ctypes route.
 
-- [ ] BENCH-PRECISION-SELECTS-NO-PLAN · `--precision` names the BASELINE's flat engines and
-      nothing else. Our side loads `model_repository/<name>/1/model.plan` whatever precision it
-      holds, so on a `--systems shipinfer` run the flag changes nothing except which file the
-      digest guard compares against -- and when that flat file is absent the guard now warns and
-      continues. Two ways out, and the choice is a design call: resolve the PLAN path by
-      precision (`model.plan` becomes `model.<precision>.plan`, which the repository's
-      `engine_file` parameter can already express), or have the bench install the precision's
-      plan before a run the way `build_engines.py --install` does. Until then `int8` cannot come
-      back to the bench's `--precision` choices, because it would be a knob that lies. Found
-      while fixing `BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE`, and named by #216's review round 2.
+- [~] BENCH-PRECISION-SELECTS-NO-PLAN · HALF DONE 12 Sep: the knob no longer LIES, and it
+      still does not SELECT. `--precision` names the BASELINE's flat engines; our side loads
+      `model_repository/<name>/1/model.plan` whatever precision it holds, so on a
+      `--systems shipinfer` run the flag changed nothing except which file the digest guard
+      compared against -- and when that flat file was absent the guard warned and continued,
+      while `summary.json` reported the precision anyway.
+      DONE: naming a precision is a CLAIM now, and one the run has to be able to keep.
+      `--precision` defaults to `None` ("nobody asked") rather than to `fp32`, and
+      `require_same_engines` REFUSES when a precision was named and there is no flat engine to
+      hold the plan to -- naming both ways out (build and install them, or drop the flag and
+      measure what is installed). An unnamed precision keeps today's behaviour and its warning,
+      which is what every chain run here takes.
+      WHAT REMAINS is the selection, and it is still the design call this item was filed for:
+      resolve the PLAN path by precision (`model.<precision>.plan`, which the repository's
+      `engine_file` parameter can already express) or have the bench install the precision's
+      plan before a run the way `build_engines.py --install` does. `int8` comes back to the
+      choices on the day one of those lands.
 
 - [x] BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE · **MERGED as #218 (squash `1054479`, 10 Sep),
       APPROVE on round 3 after two BLOCKING rounds.** Round 2's five findings, and the first is a

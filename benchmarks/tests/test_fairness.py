@@ -8,13 +8,39 @@ speed-up produced by the architecture.
 
 from __future__ import annotations
 
+import importlib.util
+import re
+import sys
 from dataclasses import replace
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 import yaml
 
-from benchmarks.harness.config import MODULE_MODELS, BenchConfig, read_instances_per_gpu
+from benchmarks.harness.config import (
+    MODULE_MODELS,
+    PRECISIONS,
+    BenchConfig,
+    read_instances_per_gpu,
+)
+
+BUILD_ENGINES = Path(__file__).resolve().parents[2] / "scripts" / "build_engines.py"
+
+
+@pytest.fixture(scope="module")
+def build_engines() -> ModuleType:
+    """The real script, by path -- ``scripts/`` is not a package on ``sys.path``.
+
+    Loaded so a remedy this file prints can be handed to the parser that has to accept it,
+    rather than compared against a copy of its flags that drifts.
+    """
+    spec = importlib.util.spec_from_file_location("scripts.build_engines", BUILD_ENGINES)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["scripts.build_engines"] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 class TestTheConcurrencyComesFromTheRepositoryAndNotFromAHandKeptTable:
@@ -328,6 +354,89 @@ class TestBothSidesLoadTheSameEngine:
         config.require_same_engines()
 
         assert "person_embedder" in capsys.readouterr().err
+
+    def test_a_named_precision_with_nothing_to_check_it_against_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """`BENCH-PRECISION-SELECTS-NO-PLAN`: our side loads `model.plan` whatever precision
+        it holds, so with no flat engine to hold it to, `--precision fp16` selects nothing and
+        reports itself in `summary.json` anyway. A knob that lies is worse than an absent one,
+        so the claim is refused -- and the refusal names both ways out."""
+        config = replace(
+            self._config(tmp_path, b"PLAN-A", b"PLAN-A"),
+            emb_engine=tmp_path / "absent_reid.engine",
+            precision="fp16",
+        )
+
+        with pytest.raises(RuntimeError) as raised:
+            config.require_same_engines()
+
+        message = str(raised.value)
+        assert "--precision fp16" in message, "the claim that cannot be kept"
+        assert "drop --precision" in message, "and the other"
+
+    def test_a_named_precision_is_refused_when_there_is_no_plan_either(
+        self, tmp_path: Path
+    ) -> None:
+        """The branch that used to fall through in silence, gated on the plan existing. With
+        neither a flat engine nor a plan the server autobuilds that model from ONNX *after*
+        this guard has passed, and `summary.json` records a precision nobody could check --
+        the same lie, by the route with one fewer file in it."""
+        config = replace(
+            self._config(tmp_path, b"PLAN-A", b"PLAN-A"),
+            emb_engine=tmp_path / "absent_reid.engine",
+            precision="fp16",
+        )
+        assert config.model_repository is not None
+        (config.model_repository / "person_embedder" / "1" / "model.plan").unlink()
+
+        with pytest.raises(RuntimeError, match="autobuild"):
+            config.require_same_engines()
+
+    @pytest.mark.parametrize("precision", PRECISIONS)
+    def test_the_refusals_remedy_is_a_command_build_engines_accepts(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        build_engines: ModuleType,
+        precision: str,
+    ) -> None:
+        """And builds the precision it promises. The remedy used to read
+        `build_engines.py --precision fp16`, a flag that script has never had: the operator
+        runs it, argparse exits 2, nothing is built, and the refusal repeats. A substring
+        assertion is what let that ship, so the command is handed to the real parser."""
+        config = replace(
+            self._config(tmp_path, b"PLAN-A", b"PLAN-A"),
+            emb_engine=tmp_path / "absent_reid.engine",
+            precision=precision,
+        )
+        with pytest.raises(RuntimeError) as raised:
+            config.require_same_engines()
+
+        quoted = re.search(r"`(scripts/build_engines\.py[^`]*)`", str(raised.value))
+        assert quoted, "the refusal has to name a command at all"
+        built: list[str] = []
+        monkeypatch.setattr(build_engines, "report", lambda asked: built.append(asked) or 0)
+
+        assert build_engines.main([*quoted.group(1).split()[1:], "--check"]) == 0
+        assert built == [precision], "the remedy builds the precision the message claims"
+
+    def test_the_default_claims_nothing_so_the_same_tree_only_warns(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The DEFAULT is the thing under test, and it is what every chain run here takes:
+        `precision` is `None` rather than `"fp32"`, so nobody claimed anything and an unpaired
+        plan warns instead of refusing. Asserted on the field, not just on the warning, because
+        a default that drifted back to `"fp32"` would turn every such run into a refusal."""
+        config = replace(
+            self._config(tmp_path, b"PLAN-A", b"PLAN-A"),
+            emb_engine=tmp_path / "absent_reid.engine",
+        )
+        assert config.precision is None, "the default claims no precision"
+
+        config.require_same_engines()
+
+        assert "whatever is installed" in capsys.readouterr().err
 
     def test_a_missing_plan_is_refused_rather_than_skipped(self, tmp_path: Path) -> None:
         """Skipping an absent plan made the guard useless in the case it exists for.

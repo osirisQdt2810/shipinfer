@@ -64,6 +64,11 @@ TOPOLOGIES = ("single", "fleet", "service")
 #: select nothing. ``BENCH-PRECISION-SELECTS-NO-PLAN`` is what earns it back.
 PRECISIONS = ("fp32", "fp16")
 
+#: And the flag ``build_engines.py`` actually takes for each. A map rather than an f-string
+#: over the name: ``fp32`` is that script's default and takes no flag, and a remedy naming a
+#: flag its parser refuses is the unfixable loop these guards exist to break.
+BUILD_ENGINE_FLAGS = {"fp32": "", "fp16": " --fp16"}
+
 _RESOLUTION_FOLDERS: dict[str, tuple[str, str]] = {
     "2k": ("person_2K", "ship_2K"),
     "4k": ("person_4K", "ship_4K"),
@@ -257,10 +262,17 @@ class BenchConfig:
     #: of the invocations: the chain runs ~7.8 person embeddings per image against 1.0
     #: detections, and their plans were outside every check.
     emb_engine: Path | None = None
+    # doc: long what `None` means here, and why it is not the same as "fp32"
     #: Which precision BOTH sides load when neither engine is named. `require_same_engines`
     #: below is what makes this a knob rather than a hazard: point it at fp16 without
     #: installing fp16 plans and the run is REFUSED, which is what that guard exists for.
-    precision: str = "fp32"
+    #:
+    #: ``None`` is "nobody asked", and it is not the same claim as ``"fp32"``. Our side loads
+    #: `model_repository/<name>/1/model.plan` whatever precision it holds, so on a run with no
+    #: flat engine to compare it against, a NAMED precision is a claim the run cannot keep --
+    #: it is refused (`require_same_engines`) rather than reported. Unnamed measures whatever
+    #: is installed and says so, which is what every chain run here does.
+    precision: str | None = None
     model_repository: Path | None = None
     #: Where JSONL logs, console captures and ``summary.json`` land.
     out_dir: Path = field(default_factory=lambda: _repo_root() / ".artifacts" / "bench")
@@ -295,7 +307,7 @@ class BenchConfig:
         # CHECKED HERE and not only by argparse: a config built in process -- a shard child,
         # a test, a sweep -- would otherwise carry a precision the engine names cannot be
         # resolved for and fail late as a missing file rather than early with the reason.
-        if self.precision not in PRECISIONS:
+        if self.precision is not None and self.precision not in PRECISIONS:
             raise ValueError(
                 f"precision must be one of {sorted(PRECISIONS)}, got {self.precision!r}"
             )
@@ -418,14 +430,17 @@ class BenchConfig:
             resolved_instances = read_instances_per_gpu(repository)
         except Exception:
             resolved_instances = {}
+        named = self.precision or "fp32"
         return replace(
             self,
             person_frames=self.person_frames or data / person_dir,
             ship_frames=self.ship_frames or data / ship_dir,
-            det_engine=self.det_engine or root / "models" / f"yolo26n_{self.precision}.engine",
-            seg_engine=self.seg_engine
-            or root / "models" / f"yolo26n-seg_{self.precision}.engine",
-            emb_engine=self.emb_engine or root / "models" / f"reid_r50_{self.precision}.engine",
+            # `fp32` where nobody named one: the flat files are what the BASELINE loads and
+            # it has to load something. What an unnamed precision changes is the CLAIM, not
+            # the path -- see `require_same_engines`.
+            det_engine=self.det_engine or root / "models" / f"yolo26n_{named}.engine",
+            seg_engine=self.seg_engine or root / "models" / f"yolo26n-seg_{named}.engine",
+            emb_engine=self.emb_engine or root / "models" / f"reid_r50_{named}.engine",
             model_repository=repository,
             instances_per_gpu=self.instances_per_gpu or resolved_instances,
         )
@@ -523,10 +538,29 @@ class BenchConfig:
             flat = getattr(resolved, attribute)
             plan = repository / model / "1" / _artefact_name(repository, model)
             if flat is None or not flat.is_file():
-                # OUT LOUD rather than skipped in silence: a single-system run may have no
-                # flat engine to compare against, and then nothing verifies which precision
-                # the plan holds. A run whose numbers are not attributable to a precision is
-                # a run somebody will attribute anyway.
+                # A NAMED PRECISION IS A CLAIM, and here it cannot be kept: with no flat
+                # engine to compare against, the flag selects nothing and reports itself
+                # anyway. Refused either way -- a missing plan is autobuilt from ONNX after
+                # this guard, which is the same lie by the route with one fewer file in it.
+                if self.precision is not None:
+                    instead = (
+                        f"load whatever precision {plan} holds"
+                        if plan.is_file()
+                        else f"let the server autobuild {plan} from ONNX"
+                    )
+                    raise RuntimeError(
+                        f"{model}: --precision {self.precision} was asked for and there is no "
+                        f"{flat.name if flat else 'flat engine'} to check it against, so this "
+                        f"run would {instead} and report {self.precision} regardless. Build "
+                        f"the flat engines with "
+                        f"`scripts/build_engines.py{BUILD_ENGINE_FLAGS[self.precision]}` "
+                        f"(which also installs the plan), or drop --precision and the run "
+                        f"measures what is installed and says so."
+                    )
+                # OUT LOUD rather than skipped in silence: with no precision asked for, a
+                # single-system run has nothing verifying which precision the plan holds, and
+                # a run whose numbers are not attributable to one is a run somebody will
+                # attribute anyway.
                 if plan.is_file():
                     print(
                         f"WARNING: {model}: no {flat.name if flat else 'flat engine'} to "

@@ -757,15 +757,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--seconds", type=float, default=70.0)
     p.add_argument(
         "--precision",
-        # doc: long why int8 is on the builder and NOT here
-        # NO `int8` HERE, and the reason is no longer the one the engine checks used to give.
-        # Those now follow the chain, so a shipinfer-only run at int8 would START -- and it
-        # would measure whatever plan is installed, because our side loads
-        # `model_repository/<name>/1/model.plan` whatever precision it holds and this flag
-        # names the FLAT file. A knob that selects nothing is worse than an absent one, so it
-        # comes back with `BENCH-PRECISION-SELECTS-NO-PLAN` and not before.
+        # doc: long why int8 is on the builder and NOT here, and what naming one now means
+        # NO `int8` HERE. Our side loads `model_repository/<name>/1/model.plan` whatever
+        # precision it holds and this flag names the FLAT file, so naming a precision is a
+        # CLAIM about what is installed rather than a selection. The claim is now checked:
+        # `require_same_engines` refuses a run that cannot hold the plan to the named flat
+        # engine, so the knob no longer lies -- but it still does not SELECT, which is why
+        # int8 waits for the day it can (`BENCH-PRECISION-SELECTS-NO-PLAN`).
         choices=("fp32", "fp16"),
-        default="fp32",
+        # DEFAULT None, not "fp32", so the config can tell "the operator asked for this
+        # precision" from "nobody said". The first is a claim the run has to be able to keep;
+        # the second is today's behaviour, which is to measure whatever plan is installed.
+        default=None,
         help="which engines the BASELINE loads, and which digest `require_same_engines` then "
         "holds our side to -- all four models, the embedders as a precision-attribution check "
         "rather than a cross-system one. `build_engines.py --fp16` installs them, and a "
