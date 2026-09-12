@@ -2986,7 +2986,7 @@ hook down, for when the operator asked to see something before it is executed.
       this batch is noise and at a permissive cut every mask fills its crop, so one cut would
       agree with a fold that never read the bank.
 
-- [ ] ENGINE-COPIES-EVERY-OUTPUT-HOME · `backends/tensorrt/engine.cpp` ends every `execute`
+- [~] ENGINE-COPIES-EVERY-OUTPUT-HOME · `backends/tensorrt/engine.cpp` ends every `execute`
       with one `gpuMemcpyAsync(host_outputs_[i], output_buffers_[i], ..., DeviceToHost)` per
       output, unconditionally, and then a blocking sync. The prototype bank above is the
       expensive case and `MASK-FOLD-BELONGS-ON-THE-DEVICE` removes that one; the SHAPE is the
@@ -2996,6 +2996,42 @@ hook down, for when the operator asked to see something before it is executed.
       wants host or device memory, defaulting to host so nothing changes silently. It is a
       backend-contract change, so it needs the Python plane's `TensorRTBackend` in the same
       PR (V88) and a parity test that a device-resident output reads the same numbers.
+      DESIGNED 12 Sep, and the mechanism ALREADY EXISTS in the single case: `kept_on_device_`
+      (`backends/tensorrt/engine.h`) is one index the fold owns, set by `set_fold(fold, i)`
+      and skipped in the copy loop. The work is generalising ONE index into a SET, not
+      inventing a path.
+      NOT PER REQUEST, which is the design call and the item's phrasing invites the other
+      answer: `InferenceRequest` has no "outputs I want" list, and adding one would spend
+      per-FRAME bytes and a lookup on a decision that is per-MODEL -- the chain declares once
+      which outputs a stage consumes on the device. So the choice is made where `set_fold`
+      makes it, when the instance is built, and the fold becomes ONE CALLER of the general
+      thing rather than the only one.
+      THE SHAPE, four pieces: (1) `keep_on_device(name)` on the instance, resolving the name
+      through `engine_->outputs()` and refusing one the artefact does not have -- by NAME
+      because which position an output occupies is the export's choice, the same argument
+      `named()` already carries; (2) the copy loop skips any index in the set, with the fold's
+      index simply added to it; (3) `OutputTensor` gains a device pointer, null when
+      host-resident, so `named()` hands a device consumer something to read rather than an
+      empty `data` -- today a skipped output is INVISIBLE, which is fine for the fold (nothing
+      reads the bank) and wrong for the general case; (4) the Python `TensorRTBackend` takes
+      the same declaration and leaves that output as a device tensor.
+      THE PARITY TEST is the one the item names and it is the point: run the same engine with
+      an output host-resident and device-resident, and assert the numbers match -- which needs
+      the device side copied home BY THE TEST, so it is testing the skip rather than the copy.
+      PIECES (1) AND (3) ARE BUILT on `feat/an-output-may-stay-on-the-device`, 12 Sep, and the
+      whole CUDA tier is green with them (36 binaries, 0 failures, in the container):
+      `kept_on_device_` is a `std::set<size_t>`, `keep_on_device(name)` resolves through the
+      artefact's own output names and refuses an unknown one WITH THE LIST, `set_fold` inserts
+      into the set instead of owning the slot, and `OutputTensor` carries `device_data` + its
+      `Device` with `data` left EMPTY when it is set -- so a consumer that does not know about
+      this reads exactly what it read before.
+      WHAT REMAINS is (2)'s other half and (4): `adapter.cpp`'s `visible_` currently HIDES a
+      kept output entirely, which is right for the fold (nothing above reads the bank) and
+      wrong for the general case -- a device consumer needs it visible and device-resident, so
+      the adapter needs to distinguish "hidden because folded" from "kept for a reader".
+      `instance.cpp:250` then fills `device_data` rather than `data` for those. Then the Python
+      `TensorRTBackend` mirror and the parity test. NOT PUSHED AS A PR yet: #256 is still in
+      review and the house rule is one at a time.
 
 - [x] PROFILE-DIES-AT-THE-DESIGN-LOAD · FIXED 12 Sep: it is nsys 2025.1.3. NARROWED to one sentence: **a binary that loads
       a TensorRT plan segfaults under this Nsight Systems; a binary that only uses CUDA does

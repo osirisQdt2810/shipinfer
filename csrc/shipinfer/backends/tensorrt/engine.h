@@ -24,6 +24,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -116,6 +117,19 @@ namespace shipinfer {
         // bank, 3.1 MB a crop, which is the whole point. `output(leave_on_device)` is not
         // readable afterwards, which is why the adapter above stops advertising it.
         void set_fold(DeviceFold fold, size_t leave_on_device);
+
+        // Leave one output where the network wrote it, for a consumer that reads it on the
+        // device. Call before `start`, like `set_fold`, because this is a per-MODEL decision:
+        // a chain declares once which outputs a stage consumes on the device, and asking per
+        // REQUEST would spend per-frame bytes on an answer that never changes.
+        //
+        // BY NAME, because which position an output occupies is the export's choice and not
+        // the chain's -- the same argument `InferenceResponse::named` already carries. Refused
+        // when the artefact has no such output, rather than silently keeping nothing.
+        //
+        // `set_fold` is one caller of this: the bank it reduces is an output nothing above
+        // reads, which is the same fact stated for one output rather than any.
+        void keep_on_device(const std::string& output_name);
         bool folds() const { return static_cast<bool>(fold_); }
         // The fold's answer on the host: `rows` floats, valid until the next `execute`.
         const float* fold_result() const { return fold_host_.as<float>(); }
@@ -169,8 +183,11 @@ namespace shipinfer {
         std::vector<PinnedBuffer> host_outputs_;
         DeviceBuffer scratch_;
         DeviceFold fold_;
-        //: The output the fold replaces, left where the network wrote it. `npos` means none.
-        size_t kept_on_device_ = static_cast<size_t>(-1);
+        //: Outputs whose host copy is never made -- the fold's bank, and anything a consumer
+        //: asked for on the device. A SET rather than the one index this began as: the fold
+        //: was the first case, not the only one, and two callers would have overwritten each
+        //: other's single slot in silence.
+        std::set<size_t> kept_on_device_;
         DeviceBuffer fold_device_;
         PinnedBuffer fold_host_;
         uint64_t executed_ = 0;

@@ -76,6 +76,18 @@ namespace shipinfer {
         // width cannot be un-flattened: a segmentation engine's `(300, 38)` rows and
         // `(32, 160, 160)` prototypes are two shapes the fold needs and one product hides.
         std::vector<int64_t> dims;
+        // WHERE THE NETWORK LEFT IT, for an output the model was asked to keep on the device
+        // (`TrtInstance::keep_on_device`). Null for every ordinary output, and then `data`
+        // holds the answer as it always has -- so a consumer that does not know about this
+        // reads exactly what it read before.
+        //
+        // NOT AN ALTERNATIVE SPELLING OF `data`: when this is set `data` is EMPTY, because the
+        // whole point is that the copy home never happened. A consumer that wants floats from
+        // a device-resident output copies them itself, on a stream it owns.
+        const float* device_data = nullptr;
+        //: Which device `device_data` points into. Meaningless while it is null.
+        Device device = Device::cpu();
+        bool on_device() const { return device_data != nullptr; }
         const float* row(size_t index) const { return data.data() + index * row_elems; }
     };
 
