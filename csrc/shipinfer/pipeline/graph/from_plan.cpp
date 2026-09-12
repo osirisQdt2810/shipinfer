@@ -92,7 +92,7 @@ namespace shipinfer {
             // have each slot refuse the other's frames as out of order, forever.
             dag.add(std::make_unique<TrackStage>(
                 track.slot, track.output, track.class_id,
-                tracking::create_associator(track.impl, track.slot)));
+                tracking::create_associator(track.impl, track.slot, track.options)));
         }
         // LAST, after the trackers whose ids it consumes and the embedders whose vectors
         // decide it -- the order the chain declares for itself (`after: [track]`).

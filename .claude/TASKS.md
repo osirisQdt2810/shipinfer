@@ -4390,9 +4390,10 @@ hook down, for when the operator asked to see something before it is executed.
       open item aimed at the ~4x -> 5x gap. Opening one is a decision about the target, which
       is why it waits on this question rather than the other way round.
 
-- [ ] CSRC-TRACKER-OPTIONS · carry the tracker's params on the plan. A DECIDED divergence,
+- [x] CSRC-TRACKER-OPTIONS · carry the tracker's params on the plan. A DECIDED divergence,
       registered as `tracker_options` in `benchmarks/parity/known.py` and reproduced by
-      `test_the_cpp_plane_reads_no_tracker_params`, found by #215's third review round. The
+      `test_the_cpp_plane_has_one_tracker_and_no_attribution_step` (renamed with the narrowing),
+      found by #215's third review round. The
       Python element reads `algorithm`, `options`, `regression_reset` and `attribution_iou`
       from a chain's `params:` and `TrackerShard` refuses an unknown option key at `open()`;
       `PlanNode` carries none of them, so `bytetrack.cpp` runs `ByteTrackTracker::Options{}`
@@ -4403,9 +4404,37 @@ hook down, for when the operator asked to see something before it is executed.
       lines (`regression_reset N`, `tracker_option <key> <value>`) plus a key table on the
       lane side, which is a feature and not a review fix -- and the version gate is part of
       it, since a reader that ignores an unknown line is how this got silent in the first
-      place. This line stays OPEN by design: `known.py`'s own test requires it, because the
-      register's only defence against becoming a suppression list is that each entry is
-      somebody's open work.
+      place.
+      DONE 12 Sep, #259: both knobs cross. The plan gained `regression_reset N` and
+      `tracker_option <key> <value>`; `TrackerOptions` carries them to `create_associator`,
+      which now REFUSES a second caller that disagrees about one (impl, slot) rather than
+      handing it the first caller's tracker; and `bytetrack.cpp` owns the key table, refusing
+      a key ByteTrack does not have the way `TrackerShard` does at `open()`. Six red probes,
+      each restored: the plan dropping both lines (3 checks red), a duplicate `tracker_option`
+      taken last-wins, a negative frame count accepted, a bare `stoll` that aborted the run
+      after 10 checks with `unexpected exception: stoll`, a default-constructed shard (3 red),
+      and an unknown key ignored. EVIDENCE the knob arrives rather than merely being carried:
+      the same frame-100 -> frame-0 restart is REFUSED under `regression_reset 0` and
+      RECOVERED under the default 64, in one test with both halves.
+      NOT CARRIED, and each is a decision: `attribution_iou` maps a tracker's answers back
+      onto detection rows and this plane has no such step (`TrackerShard::update` returns an
+      id per detection already), and `algorithm` needs trackers the lane does not have. Both
+      stay registered as `tracker_options` in `known.py`, narrowed from four knobs to two,
+      and `CSRC-TRACKER-ALGORITHM` below is the open line the register now cites.
+
+- [ ] CSRC-TRACKER-ALGORITHM · the lane has one tracker and the plan says nothing. The open
+      half of the `tracker_options` register entry after #259 narrowed it. Python's
+      `TrackerShard` resolves `params: algorithm:` through `shipvision.mot.TRACKERS` (`sort`,
+      `bytetrack`, `ocsort`, `botsort`, `deepsortv2`); `bytetrack.cpp` is the C++ lane's only
+      `AssociatorRegistrar`, and the plan writer emits no `algorithm` line, so a chain naming
+      `botsort` runs ByteTrack over here with nothing said. `made.impl` cannot show it either
+      -- the impl is `shipvision` on both paths, and only the algorithm inside differs.
+      THE CHEAP HALF FIRST: an `algorithm <name>` plan line that the lane REFUSES when it is
+      not `bytetrack` turns a silent divergence into a loud one without porting a tracker, and
+      is the shape `tracker_option` already uses. Porting BoT-SORT or OC-SORT is the expensive
+      half and is only worth it if a chain wants one -- `ship_person_cpu.yaml` does not.
+      The second open knob is `attribution_iou`, deliberately left with this entry rather than
+      given its own line: it is one register entry, and splitting it would need a second.
 
 - [x] **CSRC-GRAPH-HAS-NO-TRACKING · COMPLETE 11 Sep. All six PRs merged: #215 (the `track`
       stage), #217 (the instant barrier), #219 (the identity map), #220 (the seam and the

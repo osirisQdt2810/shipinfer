@@ -1154,3 +1154,104 @@ class TestSelectNothingIsNotSelectEverything:
         absent = plan_text(resolve_plan(load_topology(self._chain(tmp_path, "")), dims=dims))
 
         assert empty != absent
+
+
+class TestTheTrackerReadsTheChainsParams:
+    """`CSRC-TRACKER-OPTIONS`: a chain stating `options: {max_age: 90}` and
+    `regression_reset: 0` loaded on both planes, both reported `track` as having run, and
+    they emitted different ids -- because the plan carried neither knob, so the other plane
+    ran its own defaults and recovered from a stream restart the operator refused."""
+
+    def chain(self, track: str) -> str:
+        return (
+            "name: tracker\nelements:\n"
+            "  decode: {impl: replay}\n"
+            "  detect: {impl: pool, model: ship_detector}\n"
+            f"  track: {track}\n"
+            "  output: {impl: none}\n"
+        )
+
+    def resolved(self, track: str, dims: dict[str, tuple[int, int]]) -> str:
+        chain = Topology.from_spec(ChainSpec.from_yaml(self.chain(track)))
+        return plan_text(resolve_plan(chain, dims=dims))
+
+    def test_the_chains_tracker_options_reach_the_plan(
+        self, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        text = self.resolved(
+            "{impl: shipvision, params: {options: {max_age: 90, track_threshold: 0.4}}}", dims
+        )
+
+        assert "tracker_option max_age 90" in text
+        assert "tracker_option track_threshold 0.4" in text
+
+    def test_zero_is_carried_because_zero_is_the_operators_refusal(
+        self, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """The value the whole item is about. `0` says "never recover from a stream restart";
+        an omitted line is the other plane's own default, which is 64 frames of recovery."""
+        text = self.resolved("{impl: shipvision, params: {regression_reset: 0}}", dims)
+
+        assert "regression_reset 0" in text
+        assert parse_plan(text).node("track").regression_reset == 0
+
+    def test_an_unstated_tracker_says_nothing(self, dims: dict[str, tuple[int, int]]) -> None:
+        """Absent means "the tracker's own default", which both planes already share."""
+        text = self.resolved("{impl: shipvision}", dims)
+
+        assert "regression_reset" not in text
+        assert "tracker_option" not in text
+        assert parse_plan(text).node("track").regression_reset is None
+
+    def test_the_options_survive_the_round_trip_in_one_order(
+        self, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """Sorted, so one chain writes one plan however the YAML mapping happened to order
+        its keys -- and re-rendering a parsed plan is a fixed point."""
+        text = self.resolved(
+            "{impl: shipvision, params: {options: {min_hits: 3, max_age: 90, gate: false}}}",
+            dims,
+        )
+
+        assert plan_text(parse_plan(text)) == text
+        assert parse_plan(text).node("track").tracker_options == (
+            ("gate", "false"),
+            ("max_age", "90"),
+            ("min_hits", "3"),
+        )
+
+    def test_only_a_track_slot_carries_them(self, dims: dict[str, tuple[int, int]]) -> None:
+        """`options:` means something else on a `pool` slot, so reading it off every kind
+        would put a tracker line under a detector."""
+        text = self.resolved("{impl: shipvision}", dims)
+
+        assert parse_plan(text).node("detect").tracker_options == ()
+
+    def test_a_key_stated_twice_is_refused(self) -> None:
+        """Not last-wins: the lane would silently take whichever line came second, and the
+        chain could not be read one way."""
+        text = (
+            "plan 3 x\nnode track track shipvision\n"
+            "tracker_option max_age 90\ntracker_option max_age 30\n"
+        )
+
+        with pytest.raises(PlanSyntaxError, match="stated twice"):
+            parse_plan(text)
+
+    def test_a_negative_reset_is_refused(self) -> None:
+        """The element refuses it, so no chain produces this line -- and a reader that took
+        it would run a frame count nothing on the other plane can mean."""
+        text = "plan 3 x\nnode track track shipvision\nregression_reset -1\n"
+
+        with pytest.raises(PlanSyntaxError, match="cannot be negative"):
+            parse_plan(text)
+
+    def test_a_word_where_a_frame_count_belongs_is_refused(self) -> None:
+        """Through the reader's own `_int`, so it is a `PlanSyntaxError` naming the line
+        rather than a bare `ValueError` out of `int()` taking the reader down."""
+        text = "plan 3 x\nnode track track shipvision\nregression_reset soon\n"
+
+        # THE LINE NUMBER, not just the type: every malformed plan raises `PlanSyntaxError`,
+        # so a bare `raises` here passed just as well when the header was the thing wrong.
+        with pytest.raises(PlanSyntaxError, match=r"<string>:3"):
+            parse_plan(text)

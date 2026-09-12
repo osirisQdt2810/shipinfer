@@ -23,7 +23,8 @@ namespace shipinfer::tracking {
         return out;
     }
 
-    std::shared_ptr<Associator> AssociatorRegistry::create(const std::string& impl) const {
+    std::shared_ptr<Associator> AssociatorRegistry::create(
+        const std::string& impl, const TrackerOptions& options) const {
         // `find` and a TYPED refusal, not `at`: this is public, so a second caller that had
         // not asked `has` first would get `std::out_of_range` out of a registry whose whole
         // vocabulary is `ConfigError`.
@@ -31,7 +32,7 @@ namespace shipinfer::tracking {
         if (entry == entries_.end()) {
             throw ConfigError("no tracker is registered as '" + impl + "'");
         }
-        return entry->second();
+        return entry->second(options);
     }
 
     AssociatorRegistry& ASSOCIATORS() {
@@ -58,6 +59,15 @@ namespace shipinfer::tracking {
             return cache;
         }
 
+        //: What each cached (impl, slot) was BUILT with, so a second caller asking for the
+        //: same pair with different options is refused rather than silently handed the first
+        //: caller's tracker. The cache is the whole reason: whoever calls first wins, and
+        //: without this the loser runs a configuration no chain states.
+        std::map<std::pair<std::string, std::string>, TrackerOptions>& made_options() {
+            static std::map<std::pair<std::string, std::string>, TrackerOptions> cache;
+            return cache;
+        }
+
     }  // namespace
 
     std::vector<MadeAssociator> made_associators() {
@@ -70,11 +80,22 @@ namespace shipinfer::tracking {
     }
 
     std::shared_ptr<Associator> create_associator(const std::string& impl,
-                                                  const std::string& slot) {
+                                                  const std::string& slot,
+                                                  const TrackerOptions& options) {
         if (ASSOCIATORS().has(impl)) {
             std::lock_guard<std::mutex> held(made_lock());
-            std::shared_ptr<Associator>& cached = made()[{impl, slot}];
-            if (!cached) cached = ASSOCIATORS().create(impl);
+            const std::pair<std::string, std::string> key{impl, slot};
+            std::shared_ptr<Associator>& cached = made()[key];
+            if (!cached) {
+                cached = ASSOCIATORS().create(impl, options);
+                made_options()[key] = options;
+            } else if (!(made_options()[key] == options)) {
+                throw ConfigError(
+                    "tracker slot '" + slot + "' was already built for impl '" + impl +
+                    "' with different options; whoever calls first wins this cache, so the "
+                    "second set would be silently ignored and this slot would run a "
+                    "configuration no chain states");
+            }
             return cached;
         }
         std::ostringstream known;

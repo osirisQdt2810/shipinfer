@@ -97,6 +97,15 @@ namespace {
 
         const PlanNode* track = plan.node("track");
         check(track != nullptr && track->per == "camera", "per: camera");
+        // ZERO, and read as a value rather than as an absence: it is the operator refusing
+        // every stream restart, which no default can express (`CSRC-TRACKER-OPTIONS`).
+        check(track != nullptr && track->regression_reset && *track->regression_reset == 0,
+              "the tracker's regression_reset, carried as 0");
+        check(track != nullptr && track->tracker_options.count("max_age") == 1 &&
+                  track->tracker_options.at("max_age") == "90",
+              "and its keywords, as strings the lane converts");
+        check(track != nullptr && track->tracker_options.at("track_threshold") == "0.4",
+              "including one whose value is not a whole number");
         check(plan.node("mtmc") != nullptr && plan.node("mtmc")->scope == "global", "scope");
         check(plan.node("nothing") == nullptr, "an undeclared slot is absent, not empty");
 

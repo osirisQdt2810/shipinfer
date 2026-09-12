@@ -122,6 +122,89 @@ namespace {
         check(associator->ids("cam-empty", 1, {}).empty(), "no detections, no ids");
     }
 
+    void the_chains_regression_reset_reaches_the_tracker() {
+        // `CSRC-TRACKER-OPTIONS`, and the check that proves the knob ARRIVED rather than that
+        // a struct carried it: the shard's default recovers from a restart 64 frames or more
+        // below the high-water mark, and `0` is the operator saying never. So the same restart
+        // is accepted by one tracker and refused by the other.
+        tracking::TrackerOptions refuses;
+        refuses.regression_reset = 0;
+        const auto strict = tracking::create_associator("shipvision", "slot_reset_0", refuses);
+        strict->ids("cam-reset", 100, {box(100, 100, 0.9f, 0)});
+
+        bool refused = false;
+        try {
+            strict->ids("cam-reset", 0, {box(100, 100, 0.9f, 0)});
+        } catch (const InferenceError&) {
+            refused = true;
+        }
+        check(refused, "regression_reset 0 refuses a restart rather than recovering from it");
+
+        // The control. Without it "refused" could be any restart being refused, which is a
+        // different finding -- the default is 64 and this regression is 100.
+        const auto lenient = tracking::create_associator("shipvision", "slot_reset_default");
+        lenient->ids("cam-reset-default", 100, {box(100, 100, 0.9f, 0)});
+        bool recovered = true;
+        try {
+            lenient->ids("cam-reset-default", 0, {box(100, 100, 0.9f, 0)});
+        } catch (const InferenceError&) {
+            recovered = false;
+        }
+        check(recovered, "and the default still recovers from the same restart");
+    }
+
+    void an_option_bytetrack_does_not_have_is_refused_by_name() {
+        // Ignoring it is the failure this closes: `max_ago: 90` would be a tracker running its
+        // default with nothing said, and every frame still gets an id, so nothing looks wrong.
+        tracking::TrackerOptions typo;
+        typo.options["max_ago"] = "90";
+
+        bool refused = false;
+        try {
+            tracking::create_associator("shipvision", "slot_typo", typo);
+        } catch (const ConfigError& error) {
+            refused = std::string(error.what()).find("max_ago") != std::string::npos;
+        }
+
+        check(refused, "an unknown tracker option is a ConfigError naming the key");
+    }
+
+    void an_options_value_of_the_wrong_type_is_refused_by_name() {
+        tracking::TrackerOptions bad;
+        bad.options["max_age"] = "soon";
+
+        bool refused = false;
+        try {
+            tracking::create_associator("shipvision", "slot_bad_value", bad);
+        } catch (const ConfigError& error) {
+            refused = std::string(error.what()).find("max_age") != std::string::npos;
+        }
+
+        check(refused, "and so is a value the key's type cannot take");
+    }
+
+    void two_callers_that_disagree_about_one_slot_are_refused() {
+        // The cache is the reason: whoever calls first wins, so without this the second caller
+        // is silently handed the first's tracker and that slot runs options no chain states.
+        tracking::TrackerOptions ninety;
+        ninety.options["max_age"] = "90";
+        tracking::TrackerOptions thirty;
+        thirty.options["max_age"] = "30";
+
+        check(tracking::create_associator("shipvision", "slot_agree", ninety) ==
+                  tracking::create_associator("shipvision", "slot_agree", ninety),
+              "the same options twice is still one associator");
+
+        bool refused = false;
+        try {
+            tracking::create_associator("shipvision", "slot_agree", thirty);
+        } catch (const ConfigError& error) {
+            refused = std::string(error.what()).find("different options") != std::string::npos;
+        }
+
+        check(refused, "but a second caller that disagrees is refused rather than ignored");
+    }
+
     void the_registry_refuses_an_absent_name_with_its_own_error() {
         // `AssociatorRegistry::create` is public, so it cannot answer `std::out_of_range` for
         // a caller that did not ask `has` first -- the registry's vocabulary is ConfigError.
@@ -170,6 +253,10 @@ int main() {
     a_refused_frame_throws_so_the_caller_can_publish_it_untracked();
     a_confirmed_track_gets_a_positive_id();
     a_frame_with_no_detections_answers_nothing();
+    the_chains_regression_reset_reaches_the_tracker();
+    an_option_bytetrack_does_not_have_is_refused_by_name();
+    an_options_value_of_the_wrong_type_is_refused_by_name();
+    two_callers_that_disagree_about_one_slot_are_refused();
     the_registry_refuses_an_absent_name_with_its_own_error();
     made_associators_lists_what_was_built();
     an_unknown_impl_is_refused_by_name();

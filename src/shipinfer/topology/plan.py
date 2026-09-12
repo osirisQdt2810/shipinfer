@@ -108,6 +108,12 @@ class PlanNode:
     #: end-to-end run issued zero global ids (`CSRC-MTMC-GATE-OPTIONS`).
     min_hits: int | None = None
     min_height_fraction: float | None = None
+    #: WHAT A `track` SLOT SAID ABOUT ITS TRACKER. The other plane read none of it, so one
+    #: chain ran two trackers (`CSRC-TRACKER-OPTIONS`). Values stay as written -- the LANE
+    #: owns the key table. What still does NOT cross, and why, is `tracker_options` in
+    #: `benchmarks/parity/known.py`.
+    regression_reset: int | None = None
+    tracker_options: tuple[tuple[str, str], ...] = ()
 
 
 class SettingsLike(Protocol):
@@ -435,6 +441,13 @@ def resolve_plan(
                 cameras=(
                     _barrier_cameras(node.spec.params, where) if node.kind == "mtmc" else ()
                 ),
+                # ONLY FOR A `track` NODE, on the same rule the four above follow.
+                regression_reset=(
+                    _tracker_reset(node.spec.params, where) if node.kind == "track" else None
+                ),
+                tracker_options=(
+                    _tracker_options(node.spec.params, where) if node.kind == "track" else ()
+                ),
             )
         )
         if (event_field := ROW_FIELD_KINDS.get(node.kind)) is not None:
@@ -668,6 +681,50 @@ def _barrier_cameras(params: Mapping[str, Any], where: str) -> tuple[str, ...]:
     return tuple(_speakable(camera, f"{where}: `cameras`") for camera in cameras)
 
 
+def _tracker_reset(params: Mapping[str, Any], where: str) -> int | None:
+    """How far a camera's ``frame_id`` may go backwards before the tracker is reset.
+
+    Through the element's own reader, so there is one definition of what the chain means —
+    and ZERO is the interesting value: it says "never recover from a stream restart", which
+    the other plane could not hear at all before this line existed.
+    """
+    from shipinfer.topology.elements.track import parse_regression_reset
+
+    value = params.get("regression_reset")
+    if value is None:
+        return None
+    return parse_regression_reset(value, where=where)
+
+
+def _tracker_options(params: Mapping[str, Any], where: str) -> tuple[tuple[str, str], ...]:
+    """``params: options:`` as the plan spells it, sorted so one chain writes one plan.
+
+    RENDERED AS WRITTEN, not converted: the lane owns the key table and refuses a key it does
+    not have, the way ``TrackerShard`` does at ``open()``. A writer that converted here would
+    have to guess a type per key and could only drop what it did not recognise — which is the
+    silence this whole line exists to remove.
+    """
+    options = params.get("options") or {}
+    if not isinstance(options, Mapping):
+        raise ConfigurationError(
+            f"{where}: `params: options:` must be a mapping of tracker keyword arguments, "
+            f"got {type(options).__name__}"
+        )
+    out: list[tuple[str, str]] = []
+    for key in sorted(options):
+        # A SPEAKABLE key and value, for the plan's own reason: it is a whitespace-separated
+        # line format, so a value with a space in it would be read back as two.
+        value = options[key]
+        rendered = "true" if value is True else "false" if value is False else str(value)
+        out.append(
+            (
+                _speakable(str(key), f"{where}: `options` key"),
+                _speakable(rendered, f"{where}: `options` value for {key!r}"),
+            )
+        )
+    return tuple(out)
+
+
 def _barrier_instants(params: Mapping[str, Any], where: str) -> int | None:
     """How many instants may be open at once, or `None` when the chain does not say."""
     value = params.get("max_instants")
@@ -785,6 +842,10 @@ def plan_text(plan: ResolvedPlan) -> str:
             lines.append(f"sync_window_ms {node.sync_window_ms!r}")
         if node.max_instants is not None:
             lines.append(f"max_instants {node.max_instants}")
+        if node.regression_reset is not None:
+            lines.append(f"regression_reset {node.regression_reset}")
+        for key, value in node.tracker_options:
+            lines.append(f"tracker_option {key} {value}")
     lines.append("")
     lines += [f"edge {producer} {consumer} {caps}" for producer, consumer, caps in plan.edges]
     lines += [f"field {name} " + " ".join(slots) for name, slots in sorted(plan.fields.items())]
@@ -1202,6 +1263,37 @@ def _max_instants(node: dict[str, object], args: Sequence[str], where: str) -> N
     node["max_instants"] = value
 
 
+def _regression_reset(node: dict[str, object], args: Sequence[str], where: str) -> None:
+    """How far a camera's `frame_id` may regress before the tracker is reset.
+
+    Zero passes: it is the operator saying "never recover from a stream restart". Negative
+    does not -- the element refuses it, so no chain can produce this line.
+    """
+    _want(args, 1, where, "regression_reset <frames>")
+    value = _int(args[0], where)
+    if value < 0:
+        raise PlanSyntaxError(
+            f"{where}: regression_reset is {value}; a frame count cannot be negative, and 0 "
+            f"already refuses every regression"
+        )
+    node["regression_reset"] = value
+
+
+def _tracker_option(node: dict[str, object], args: Sequence[str], where: str) -> None:
+    """One `key value` pair for the tracker's constructor. Repeatable, one line per key.
+
+    REFUSED, not last-wins: a key stated twice is a chain that cannot be read one way, and
+    the lane would silently take whichever line came second.
+    """
+    _want(args, 2, where, "tracker_option <key> <value>")
+    options = tuple(node.get("tracker_options") or ())
+    if any(key == args[0] for key, _ in options):
+        raise PlanSyntaxError(
+            f"{where}: tracker option {args[0]!r} is stated twice; one key has one value"
+        )
+    node["tracker_options"] = (*options, (args[0], args[1]))
+
+
 #: Verbs that attach to the `node` block above them, the way `capacity` attaches to `queue`.
 _ATTRIBUTES = {
     "model": _word_attr("model"),
@@ -1226,4 +1318,6 @@ _ATTRIBUTES = {
     "camera": _camera,
     "min_hits": _min_hits,
     "min_height_fraction": _min_height_fraction,
+    "regression_reset": _regression_reset,
+    "tracker_option": _tracker_option,
 }
