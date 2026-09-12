@@ -717,6 +717,58 @@ So the item has the justification it said it lacked. Whether ~14% is worth ~1 GB
 buffer-ring restructuring is a judgement for whoever builds it; what is no longer true is that
 the number is unknown, or that it is 2%.
 
+## How late a frame reaches the barrier, and why the window is not the lever
+
+The gate arm left one number unexplained: `mtmc_frames late` was 24 950 of 68 538 frames read —
+better than a third of the fleet reaching the barrier after its instant had closed, carrying no
+global id. `late` says a frame missed its instant; nothing said *by how much*, and that is the
+difference between a window too narrow and a chain too slow to reach one. `mtmc_arrival_lag_us`
+reports it now, measured at the mtmc stage because that is the only place holding both the
+capture stamp (wall) and the arrival moment on one clock.
+
+| 50 cameras × 20 fps | arm 1 | arm 2 | arm 3 |
+|---|---|---|---|
+| samples | 60 847 | 61 837 | 61 743 |
+| p50 | **248.5 ms** | **246.8 ms** | **237.5 ms** |
+| p95 | 582.9 ms | 580.7 ms | 566.8 ms |
+| p99 | 785.9 ms | 792.9 ms | 754.8 ms |
+| max | 1 205 ms | 1 216 ms | 1 223 ms |
+| `late` | 23 924 | 23 762 | 23 030 |
+| frame p50 end to end | 284.2 ms | 284.7 ms | 272.8 ms |
+
+**The window is 60 ms.** A frame arrives a median of ~240 ms after it was captured — four
+windows — and the lag at this one stage is most of the frame's whole ~280 ms.
+
+**And it is the SPREAD that strands a frame, not the delay.** A fleet delayed uniformly by
+240 ms would bucket together perfectly: every camera's frame would land in the same
+late-opened instant. What strands a frame is arriving after its instant closed, so the variable
+is the *dispersion* against the window — p50 240 ms to p99 760 ms, about 520 ms, nine times the
+window.
+
+**At twelve cameras the lag fits inside the window, and the window stops mattering.** The same
+sweep the 50-camera fleet answered 18 → 42 → 50 identities to, run at twelve:
+
+| `sync_window_ms` | lag p50 | lag p95 | cameras / instant | admitted | ids / tracks | frames | p50 |
+|---|---|---|---|---|---|---|---|
+| **60** | 19.4 ms | 38.2 ms | 10.9 / 12 | 66 205 (89.9%) | 17 / 96 | 16 722 | 69.3 ms |
+| 120 | 20.7 ms | 44.1 ms | 11.4 / 12 | 66 209 (89.9%) | 18 / 95 | 16 722 | 62.7 ms |
+| 250 | 19.2 ms | 39.0 ms | 11.4 / 12 | 66 336 (89.9%) | 17 / 96 | 16 730 | 62.1 ms |
+
+Identities, admission and frames are **flat**. What still moves is the close *reason* —
+`window` 1 169 → 4 → 2 and `advanced` 365 → 1 465 → 1 466 — so a wider window changes how an
+instant ends and not what it holds, because at twelve cameras they are all there anyway.
+
+**That answers the question the fleet-size contrast raised.** The rate is the same 20 fps in
+both fleets; what differs is how long a frame takes to reach the barrier — 19 ms at twelve
+cameras, inside one window, against 240 ms at fifty, past four of them. The window was a lever
+at fifty only because the lag had outgrown it, and the earlier sweep priced that lever at 17%
+of the frames and 29% of p50. What has to come down is the chain's latency to `mtmc` and its
+variance, which is upstream of the barrier and nothing the barrier can do.
+
+Measured with `SHIPINFER_BENCH_SOURCE=nvdec scripts/run_cpp_bench.sh <label>` over GStreamer
+RTSP from the pan fixture, 4 GPUs, 70 s with the analysis's 10 s warm-up;
+`SHIPINFER_BENCH_CHAIN` points at a chain whose `sync_window_ms` is the swept variable.
+
 ## The verdict, and the one open question
 
 The ≥5× target needs a ratio to be against, and the four above give opposite answers. Absent

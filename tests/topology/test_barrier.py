@@ -451,6 +451,46 @@ class TestALateFrameIsCountedAndNeverRetroFitted:
 # -- bounded ---------------------------------------------------------------------------------
 
 
+class TestHowLateAFrameArrived:
+    """`late` says a frame missed its instant; this says by how much.
+
+    The distinction the barrier's reasons cannot draw: a window too narrow and a chain too
+    slow to reach one produce the same `late` count and want opposite fixes.
+    """
+
+    def test_a_sample_is_recorded_and_read_back(self) -> None:
+        held = barrier()
+
+        held.note_arrival_lag_us(1_500)
+        held.note_arrival_lag_us(9_000)
+
+        assert held.arrival_lag_us == [1500, 9000]
+        assert held.lag_samples_overwritten == 0
+
+    def test_the_samples_are_a_copy(self) -> None:
+        """A percentile reorders what it is given, and a caller must not be able to reorder
+        the barrier's own state by taking one."""
+        held = barrier()
+        held.note_arrival_lag_us(3)
+
+        held.arrival_lag_us.append(99)
+
+        assert held.arrival_lag_us == [3]
+
+    def test_the_ring_wraps_rather_than_growing_or_stopping(self, monkeypatch) -> None:
+        """Both halves of the bound are wrong in ways nothing else here would see: an
+        unbounded list on a 24/7 shard, or a distribution frozen on a long run's warm-up while
+        the frame percentiles printed beside it cover the whole run."""
+        monkeypatch.setattr("shipinfer.topology.barrier.MAX_LAG_SAMPLES", 3)
+        held = barrier()
+
+        for lag in range(5):
+            held.note_arrival_lag_us(lag)
+
+        assert held.arrival_lag_us == [3, 4, 2], "the newest two replaced the oldest two"
+        assert held.lag_samples_overwritten == 2, "and it says how often it wrapped"
+
+
 class TestTheBucketsAreBounded:
     def test_the_oldest_instant_is_evicted_and_counted(self) -> None:
         """A camera whose clock runs away must not be able to grow this map."""

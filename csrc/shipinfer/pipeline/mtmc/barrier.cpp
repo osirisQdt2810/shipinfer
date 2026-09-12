@@ -124,6 +124,36 @@ namespace shipinfer::mtmc {
         return instant_counts_;
     }
 
+    void InstantBarrier::note_arrival_lag_us(uint32_t lag_us, bool negative) {
+        std::lock_guard<std::mutex> held(lock_);
+        if (negative) ++lag_negative_;
+        if (arrival_lag_us_.size() < kMaxLagSamples) {
+            arrival_lag_us_.push_back(lag_us);
+            return;
+        }
+        // WRAPS rather than stops. Keeping the first N froze the distribution on the warm-up
+        // of any run longer than the ring, while the frame percentiles printed beside it
+        // covered the whole run -- two numbers over different windows, with nothing saying so.
+        arrival_lag_us_[lag_next_] = lag_us;
+        lag_next_ = (lag_next_ + 1) % kMaxLagSamples;
+        ++lag_overwritten_;
+    }
+
+    std::vector<uint32_t> InstantBarrier::arrival_lag_us() const {
+        std::lock_guard<std::mutex> held(lock_);
+        return arrival_lag_us_;  // copied: `percentile` reorders what it is given
+    }
+
+    uint64_t InstantBarrier::lag_samples_overwritten() const {
+        std::lock_guard<std::mutex> held(lock_);
+        return lag_overwritten_;
+    }
+
+    uint64_t InstantBarrier::lag_samples_negative() const {
+        std::lock_guard<std::mutex> held(lock_);
+        return lag_negative_;
+    }
+
     InstantBarrier::InstantSizes InstantBarrier::instant_sizes() const {
         std::lock_guard<std::mutex> guard(lock_);
         return {cameras_held_, instants_ended_, cameras_held_max_};

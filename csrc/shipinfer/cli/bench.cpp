@@ -1002,6 +1002,19 @@ int main(int argc, char** argv) {
                                   ? 0.0
                                   : static_cast<double>(sizes.cameras) / sizes.instants)
                           << " largest " << sizes.largest << " over " << sizes.instants << "\n";
+                // HOW LATE A FRAME REACHED THIS BARRIER, which is the number `late` cannot
+                // give: it says a frame missed its instant, not by how much, so it cannot
+                // tell a window that is too narrow from a chain too slow to reach one. Read
+                // against `sync_window_ms`: a p50 of several windows is the chain's latency.
+                std::vector<uint32_t> lag = barrier->arrival_lag_us();
+                std::cout << "mtmc_arrival_lag_us " << slot << " samples " << lag.size()
+                          << " overwritten " << barrier->lag_samples_overwritten()
+                          << " negative " << barrier->lag_samples_negative() << "\n";
+                std::cout << "mtmc_arrival_lag_us " << slot << " p50 " << percentile(lag, 0.50)
+                          << " p95 " << percentile(lag, 0.95) << " p99 "
+                          << percentile(lag, 0.99) << " max "
+                          << (lag.empty() ? 0 : *std::max_element(lag.begin(), lag.end()))
+                          << "\n";
                 for (const auto& [reason, count] : barrier->instant_stats()) {
                     std::cout << "mtmc_instants " << slot << " " << reason << " " << count
                               << "\n";

@@ -828,6 +828,91 @@ class TestTwoMtmcSlotsCannotParkEveryWorkerBetweenThem:
         assert first.waiter_budget.permits == 4, "workers - 1, so one always drains its lane"
 
 
+# -- how late a frame arrived ----------------------------------------------------------------------
+
+
+@needs_shipvision
+class TestHowLateAFrameArrivedReachesTheBarrier:
+    """The five lines that PRODUCE the number, which the storage tests cannot reach.
+
+    `tests/topology/test_barrier.py` calls `note_arrival_lag_us` with a literal, so every one
+    of its assertions holds if the call site hands it nonsense. Substitute `time.monotonic()`
+    for `time.time()` and the subtraction is about -1.7e9 on any real host: every sample
+    clamps to zero and the histogram reports a barrier every frame reaches instantly. Two
+    ledger items were closed on this number.
+    """
+
+    def test_the_element_hands_the_barrier_a_real_lag(self) -> None:
+        """A frame stamped 50 ms ago must read as roughly 50 ms, not as zero and not as 50.
+
+        The bounds are wide on purpose — this is a wall clock and a real scheduler — but a
+        monotonic clock (hugely negative, clamped to 0) and a millisecond/microsecond mix-up
+        (50 instead of 50 000) both fall outside them.
+        """
+        import time
+
+        element = opened()
+        try:
+            element.process(
+                ChainItem(
+                    context=RequestContext(
+                        camera_id="cam-a",
+                        frame_id=0,
+                        captured_unix_ns=time.time_ns() - 50_000_000,
+                    ),
+                    caps=Caps.parse("meta@cpu"),
+                    payload=None,
+                    meta={
+                        "tracks": [track(1, "cam-a", 0, TALL, SAME_A)],
+                        "frame_hw": (HEIGHT, WIDTH),
+                    },
+                )
+            )
+
+            samples = element.barrier.arrival_lag_us
+            assert len(samples) == 1, "one frame, one sample"
+            assert 40_000 <= samples[0] <= 10_000_000, (
+                f"{samples[0]} us is not ~50 ms: a monotonic clock clamps to 0 and a "
+                f"millisecond mix-up reads 50, and both would pass every storage test"
+            )
+            assert element.barrier.lag_samples_negative == 0, "the clocks agree here"
+        finally:
+            element.close()
+
+    def test_a_frame_stamped_in_the_future_is_clamped_and_counted(self) -> None:
+        """`backward` cannot see this: it compares a camera's stamps against that camera's own
+        history, so a stepped server clock leaves it at zero while every lag reads 0 — a
+        barrier every frame appears to reach instantly, which is the inversion the whole
+        measurement exists to prevent."""
+        import time
+
+        element = opened()
+        try:
+            element.process(
+                ChainItem(
+                    context=RequestContext(
+                        camera_id="cam-a",
+                        frame_id=0,
+                        captured_unix_ns=time.time_ns() + 5_000_000_000,
+                    ),
+                    caps=Caps.parse("meta@cpu"),
+                    payload=None,
+                    meta={
+                        "tracks": [track(1, "cam-a", 0, TALL, SAME_A)],
+                        "frame_hw": (HEIGHT, WIDTH),
+                    },
+                )
+            )
+
+            assert element.barrier.arrival_lag_us == [0], "clamped, not negative"
+            assert element.barrier.lag_samples_negative == 1, (
+                "and counted, or a shard whose clock stepped reports p50 0 beside a large "
+                "`late` with nothing saying why"
+            )
+        finally:
+            element.close()
+
+
 # -- the instant bound ----------------------------------------------------------------------------
 
 
