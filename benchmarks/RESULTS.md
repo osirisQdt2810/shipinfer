@@ -769,8 +769,6 @@ Measured with `SHIPINFER_BENCH_SOURCE=nvdec scripts/run_cpp_bench.sh <label>` ov
 RTSP from the pan fixture, 4 GPUs, 70 s with the analysis's 10 s warm-up;
 `SHIPINFER_BENCH_CHAIN` points at a chain whose `sync_window_ms` is the swept variable.
 
-## Camera affinity: a saturation effect, not a design-rate one
-
 ## Camera affinity: a saturation effect, not a deployment-density one
 
 `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` said the shared worker pool reorders a camera's frames,
@@ -821,17 +819,16 @@ generate. The 3.7% untracked in that fifty-on-four row is 17× these numbers and
 evidence against building the sequencer; it is a measurement at 4× the density with a fifth of
 the frames refused upstream.
 
-**Where the frames that carry no ids go is NOT settled here, and this row used to claim it
-was.** An earlier draft carried a `lag p50` column and concluded from it that the cause is chain
-latency rather than ordering. The bench emits no such metric: it reports `reassembly_us_*` (time
-in reassembly) and `frame_us_*` (captured→emitted), and neither is arrival-versus-capture at the
-barrier. The column was one of those two under a new name, no raw output here backed it, and the
-fifty-camera figure beside it was extrapolated from nothing this run measured — all twelve-camera
-arms. Removed rather than relabelled, because `MTMC-A-THIRD-OF-FRAMES-ARRIVE-LATE` says in its
-own words *"do not touch the window until that histogram exists"*, and answering it with the
-proxy it was written to forbid is how the histogram never gets built. The instrument that does
-measure it is `MTMC-LAG-IS-NOT-INSTRUMENTED` (#255, open at the time of writing — the
-pointer is pending until it lands); read that item's numbers, not these.
+**Where the frames that carry no ids go is NOT answered by THESE arms, and a draft of this row
+claimed it was.** It carried a `lag p50` column and a "~240 ms at fifty cameras" beside it, and
+concluded chain latency rather than ordering. Every arm here is **twelve** cameras, so no
+fifty-camera figure came out of this run — that is the whole defect, and the column is struck
+for it.
+
+The instrument itself is real and lives 47 lines up: **"How late a frame reaches the barrier"**
+reports `mtmc_arrival_lag_us` p50 248.5 / 246.8 / 237.5 ms at fifty cameras and 19.4 ms at
+twelve, from `bench.cpp`'s own mtmc block. `MTMC-A-THIRD-OF-FRAMES-ARRIVE-LATE` is closed
+against those numbers. Read that section for the lag; this one is about the worker count.
 
 Measured with, verbatim:
 

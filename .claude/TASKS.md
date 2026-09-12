@@ -2869,15 +2869,25 @@ hook down, for when the operator asked to see something before it is executed.
       balance is what this project exists to get right; paying that for 0.2% is the wrong
       trade. The per-camera sequencer stays unbuilt until a deployment runs saturated, and
       `benchmarks/RESULTS.md` holds the table to re-read when one does.
-      WHERE THE FRAMES THAT CARRY NO IDS GO IS NOT SETTLED HERE, and a draft of this line said
-      it was: it quoted a ~20 ms arrival lag against the 60 ms window and ~240 ms at fifty
-      cameras, and concluded chain latency rather than ordering. The bench emits no arrival-lag
-      metric -- `reassembly_us_*` is time in reassembly and `frame_us_*` is captured-to-emitted
-      -- no raw output backed the column, and every arm here is twelve cameras, so no
-      fifty-camera number was measured at all. Struck rather than relabelled, because
-      `MTMC-A-THIRD-OF-FRAMES-ARRIVE-LATE` says "do not touch the window until that histogram
-      exists" and this answered it with the proxy that item forbids. The instrument is
-      `MTMC-LAG-IS-NOT-INSTRUMENTED` (#255); its numbers are the ones to read.
+      WHERE THE FRAMES THAT CARRY NO IDS GO IS NOT ANSWERED BY THESE ARMS, and a draft of this
+      line claimed it was: it quoted a ~20 ms arrival lag against the 60 ms window and ~240 ms
+      at fifty cameras, and concluded chain latency rather than ordering. Every arm here is
+      TWELVE cameras, so no fifty-camera figure came out of this run -- that is the defect, and
+      the column is struck for it.
+      AN EARLIER DRAFT OF THIS RETRACTION OVERREACHED and is corrected here rather than left
+      standing (#256 r4): it said the bench emits no arrival-lag metric, which was true when
+      written and false by the time it was read -- #255 merged `mtmc_arrival_lag_us` into
+      `bench.cpp`'s mtmc block, tabled p50 248.5/246.8/237.5 ms at fifty cameras and 19.4 ms at
+      twelve in `benchmarks/RESULTS.md`, and CLOSED `MTMC-A-THIRD-OF-FRAMES-ARRIVE-LATE` against
+      those numbers. It also pointed at `MTMC-LAG-IS-NOT-INSTRUMENTED`, which exists nowhere.
+      A rebase can falsify prose that was true when it was written; the pointer is now to the
+      section and the closed item that actually hold the measurement.
+      ONE PART OF THAT REVIEW IS WRONG, checked rather than accepted: it inferred these arms'
+      logs "almost certainly DO contain a p50 lag line". They do not -- `grep mtmc_arrival_lag_us
+      .artifacts/cpp/aff*.log` is empty, because the binary that ran them was built from this
+      branch's base, which predates #255. The fourteen `mtmc_*` lines they DO carry are the
+      instant, frame and identity counters. So the narrow claim stands on its own evidence and
+      not only on the twelve-camera argument.
       AND THE PRIORITY IS LOWER THAN THIS ITEM READS, which is the useful thing today's
       measurements say about it. At the DESIGN load -- 50 cameras x 20 fps, the sizing this box
       is arranged around -- the tracker refuses **3.7%** of accepted frames, not 37%: 1 105 of
