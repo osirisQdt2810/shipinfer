@@ -1201,6 +1201,20 @@ review job, and a PR touching `.github/workflows/**` cannot pass that job, so th
 stranded waiting for a human. The grant closes it for that class and no other: every other PR
 still merges itself on APPROVE plus the label, and none is mine to merge by hand.
 
+### V170 — 12 Sep. Stop, now
+
+> chờ đã, dừng lại ngay cho tôi
+
+An interrupt, mid-turn, with nothing asked for after it. CLAUDE.md's "Finishing" rule names
+exactly three stopping points and this is one of them: *"or the operator interrupted."* So the
+turn ends here rather than at the next milestone, and the `Stop` hook is told so with
+`SHIPINFER_ALLOW_STOP=1` for that one command -- which is what that escape exists for.
+
+WHAT WAS IN FLIGHT, so nothing is lost: #236's blocking finding is fixed and rebased in
+`scratchpad/wtlane` but NOT pushed and NOT merged; #245 and shipvision#16 are open; the drain
+fix is committed on `fix/a-drain-cannot-evict-what-the-survivors-are-filling` and unpushed.
+Nothing is mid-write and no run holds a GPU.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
