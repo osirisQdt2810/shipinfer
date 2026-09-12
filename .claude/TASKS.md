@@ -2777,6 +2777,15 @@ hook down, for when the operator asked to see something before it is executed.
       `drive_identity.py` runs the reference with `validate_every_step=True` and would throw
       rather than answer. So the day the upstream fix lands, that C++ check flips on somebody
       remembering this line -- which is why the line names the test.
+      THE PIN IS A GATE NOW, 11 Sep: `tests/pipeline/test_identity_parity.py::
+      TestTheReferenceStillAdoptsTwoTracksFromOneCamera` runs the reference itself with
+      `validate_every_step=False` (production's default) and asserts BOTH challengers still
+      land -- `identity 0 members: cam1#1 cam2#1 cam0#2 cam0#3`, reproduced today. Its failure
+      message IS the porting instruction: bump the submodule, port the change, re-emit
+      `golden/identity/basic.txt`, flip the C++ check from 2 to 1. A second test pins the other
+      half -- asked to validate itself the reference throws "two tracks from one camera". So the
+      upstream fix can no longer land unnoticed, and the ORDER above is unchanged: it still
+      starts in `shipvision/mtmc/identity.py`.
       IMPACT: in production `validate_every_step` is off, so nothing reports it. The state stays
       plausible -- `member_from_camera` returns whichever member came first, forever -- so one
       global id carries two tracks from one camera and the second is a ghost no instant can
