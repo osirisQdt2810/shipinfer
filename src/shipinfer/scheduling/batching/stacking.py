@@ -42,6 +42,15 @@ class StackingBatcher(Batcher):
         self._max_batch_size = max_batch_size
         self._input_names = tuple(spec.name for spec in input_specs)
 
+    def set_output_specs(self, specs: Sequence[TensorSpec]) -> None:
+        """Follow a backend that now returns something else — a device fold attaching.
+
+        MUTATED rather than rebuilt, because every instance of a model was handed THIS object
+        at construction and keeps it: a replacement would leave them scattering against the
+        specs the model no longer has. Called at chain open, before any traffic.
+        """
+        self._output_specs = tuple(specs)
+
     # -- pack ---------------------------------------------------------------------------
 
     def assemble(self, items: Sequence[WorkItem]) -> AssembledBatch:
