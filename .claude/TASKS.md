@@ -4670,7 +4670,9 @@ hook down, for when the operator asked to see something before it is executed.
       worth doing when a chain wants one, and `ship_person_cpu.yaml` does not. What this
       closes is the SILENCE, which was the defect.
       EVIDENCE: `test_plan_stages` 85 checks, `test_tracking_associator` 44,
-      `test_plan_parity` 130, all six plan goldens re-emitted with the new line.
+      `test_plan_parity` 130. TWO of the FIVE plan goldens changed -- the two that have
+      a `track` node; a draft of this line said "all six", which was wrong twice over
+      (#261 r1).
 
 - [ ] CSRC-TRACKER-ATTRIBUTION · one plane drops a row for a poor overlap and the other has no
       step to drop it in. The last knob of the `tracker_options` register entry, which #259 and

@@ -56,8 +56,43 @@ namespace shipinfer::tracking {
         // REFUSED, not ignored, mirroring `TrackerShard.__init__` on the other plane: a
         // `max_ago: 90` typo is a tracker running 30 with nothing said, and the failure is
         // invisible because every frame still gets an id.
+        // doc: long why an algorithm this lane has not is refused rather than approximated
+        // THE LANE HAS ONE TRACKER, and says so. `impl: shipvision` is the registry key on
+        // both planes, but the ALGORITHM inside it is the library's: the other plane resolves
+        // any name in `shipvision.mot.TRACKERS` (`sort`, `bytetrack`, `ocsort`, `botsort`,
+        // `deepsortv2`) and this lane has ByteTrack alone. So a chain naming `botsort` used to
+        // run ByteTrack over here with NOTHING SAID -- `made.impl` cannot show it either,
+        // since the impl is `shipvision` on both paths and only the algorithm differs.
+        //
+        // REFUSED AT LOAD, which is the whole value: porting BoT-SORT is the expensive half
+        // and is worth doing only when a chain wants one, but running the wrong tracker under
+        // its name is not a cheaper version of having it (`CSRC-TRACKER-ALGORITHM`).
+        //
+        // EMPTY PASSES: the chain did not say, so the lane's own default stands -- and both
+        // planes default to ByteTrack, which is the one case that needs nothing carried.
+        void refuse_a_tracker_this_lane_has_not(const std::string& algorithm) {
+            if (!algorithm.empty() && algorithm != "bytetrack") {
+                throw ConfigError(
+                    "this build's `shipvision` tracking lane runs bytetrack "
+                    "alone, and the chain asks for '" +
+                    algorithm +
+                    "'. The other plane resolves that name through "
+                    "shipvision.mot.TRACKERS; porting it here is "
+                    "CSRC-TRACKER-ALGORITHM. Refused rather than run as "
+                    "bytetrack, which would publish one tracker's ids under "
+                    "another's name");
+            }
+        }
+
         shipvision::mot::ByteTrackTracker::Options byte_track_options(
-            const std::map<std::string, std::string>& stated) {
+            const TrackerOptions& options) {
+            // THE ALGORITHM FIRST: a chain naming another tracker is not one whose keys are
+            // worth converting. A `void` check reads as what it is -- the earlier form
+            // returned its own argument so it could be threaded through the member-init list,
+            // which made `byte_track_options(check_algorithm(...))` look like a conversion
+            // (#261 r1).
+            refuse_a_tracker_this_lane_has_not(options.algorithm);
+            const std::map<std::string, std::string>& stated = options.options;
             shipvision::mot::ByteTrackTracker::Options built;
             for (const auto& [key, value] : stated) {
                 if (key == "track_threshold") {
@@ -84,36 +119,6 @@ namespace shipinfer::tracking {
             return built;
         }
 
-        // doc: long why an algorithm this lane has not is refused rather than approximated
-        // THE LANE HAS ONE TRACKER, and says so. `impl: shipvision` is the registry key on
-        // both planes, but the ALGORITHM inside it is the library's: the other plane resolves
-        // any name in `shipvision.mot.TRACKERS` (`sort`, `bytetrack`, `ocsort`, `botsort`,
-        // `deepsortv2`) and this lane has ByteTrack alone. So a chain naming `botsort` used to
-        // run ByteTrack over here with NOTHING SAID -- `made.impl` cannot show it either,
-        // since the impl is `shipvision` on both paths and only the algorithm differs.
-        //
-        // REFUSED AT LOAD, which is the whole value: porting BoT-SORT is the expensive half
-        // and is worth doing only when a chain wants one, but running the wrong tracker under
-        // its name is not a cheaper version of having it (`CSRC-TRACKER-ALGORITHM`).
-        //
-        // EMPTY PASSES: the chain did not say, so the lane's own default stands -- and both
-        // planes default to ByteTrack, which is the one case that needs nothing carried.
-        const std::map<std::string, std::string>& check_algorithm(
-            const std::string& algorithm, const std::map<std::string, std::string>& options) {
-            if (!algorithm.empty() && algorithm != "bytetrack") {
-                throw ConfigError(
-                    "this build's `shipvision` tracking lane runs bytetrack "
-                    "alone, and the chain asks for '" +
-                    algorithm +
-                    "'. The other plane resolves that name through "
-                    "shipvision.mot.TRACKERS; porting it here is "
-                    "CSRC-TRACKER-ALGORITHM. Refused rather than run as "
-                    "bytetrack, which would publish one tracker's ids under "
-                    "another's name");
-            }
-            return options;
-        }
-
         // ONE SHARD PER ASSOCIATOR, and `create_associator` decides how many associators
         // there are: one per (impl, slot), shared by every worker. The sharing axis is not
         // this file's to choose -- it was, and choosing "one per process" here gave two
@@ -122,9 +127,8 @@ namespace shipinfer::tracking {
         class ShardAssociator : public Associator {
           public:
             explicit ShardAssociator(const TrackerOptions& options)
-                : shard_(
-                      byte_track_options(check_algorithm(options.algorithm, options.options)),
-                      options.regression_reset.value_or(kRegressionReset)) {}
+                : shard_(byte_track_options(options),
+                         options.regression_reset.value_or(kRegressionReset)) {}
 
             std::vector<int> ids(const std::string& camera_id, int64_t frame_id,
                                  const std::vector<Detection>& detections) override {

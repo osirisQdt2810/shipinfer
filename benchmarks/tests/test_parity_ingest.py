@@ -388,12 +388,18 @@ class TestKnownDivergences:
             "delete this test with it"
         )
 
-        # AND NO STEP TO FEED IT. `TrackerShard::update` answers an id per detection, so there
-        # is no place a row could be dropped for a poor overlap.
-        shard = (ROOT / "csrc" / "shipinfer" / "pipeline" / "tracking" / "shard.h").read_text()
-        assert (
-            "attribution" not in shard.lower()
-        ), "the C++ shard grew an attribution step; the divergence has changed shape"
+        # AND NO STEP TO FEED IT, checked across every file one could land in rather than
+        # `shard.h` alone -- an absence asserted in one file is an absence nobody guards
+        # (#261 r1). `associator.h` is excluded: it MENTIONS attribution today, in the comment
+        # saying this plane has none.
+        for path in (
+            ROOT / "csrc" / "shipinfer" / "pipeline" / "tracking" / "shard.h",
+            ROOT / "csrc" / "shipinfer" / "pipeline" / "tracking" / "bytetrack.cpp",
+            ROOT / "csrc" / "shipinfer" / "pipeline" / "graph" / "stages.cpp",
+        ):
+            assert (
+                "attribution" not in path.read_text().lower()
+            ), f"{path.name} grew an attribution step; the divergence has changed shape"
 
     def test_the_lanes_key_table_still_mirrors_bytetracks_struct(self) -> None:
         """The drift channel #259's review named, closed by #261.
@@ -418,11 +424,16 @@ class TestKnownDivergences:
             pytest.skip("3rdparty/shipvision is not checked out")
 
         text = header.read_text(encoding="utf-8")
+        # ANCHORED ON THE CLASS, not the first `struct Options` in the file: another class
+        # gaining one earlier would have this compare the wrong table, silently (#261 r1).
+        text = text[text.index("class ByteTrackTracker") :]
         body = text[text.index("struct Options") :]
         body = body[: body.index("};")]
-        # `float track_threshold = 0.5f;` -> `track_threshold`. Declarations only, so the
-        # doc comments between them cannot be mistaken for fields.
-        declared = set(re.findall(r"^\s*(?:float|int|bool)\s+(\w+)\s*=", body, re.M))
+        # ANY TYPE, not `float|int|bool`. Enumerating the types this test knows would give it
+        # the PR's own failure mode: a `size_t` or a `std::string` added upstream is forwarded
+        # by the other plane and refused at load here, while this stays green because the
+        # field never entered the set. Doc comments start `///` and cannot be read as one.
+        declared = set(re.findall(r"^\s*[A-Za-z_][\w:]*\s+(\w+)\s*(?:=|;)", body, re.M))
         assert declared, f"no fields parsed out of {header}; the struct's shape changed"
 
         lane = (
