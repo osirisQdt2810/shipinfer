@@ -3869,7 +3869,7 @@ hook down, for when the operator asked to see something before it is executed.
       libcudart the way torch does (`torch/lib/libcudart.so.12`) or read the flag through
       torch and drop the ctypes route.
 
-- [~] BENCH-PRECISION-SELECTS-NO-PLAN · HALF DONE 12 Sep: the knob no longer LIES, and it
+- [x] BENCH-PRECISION-SELECTS-NO-PLAN · HALF DONE 12 Sep: the knob no longer LIES, and it
       still does not SELECT. `--precision` names the BASELINE's flat engines; our side loads
       `model_repository/<name>/1/model.plan` whatever precision it holds, so on a
       `--systems shipinfer` run the flag changed nothing except which file the digest guard
@@ -3909,8 +3909,64 @@ hook down, for when the operator asked to see something before it is executed.
       behaviour -- `--install` is the documented workflow and does it today -- only a new
       caller, and it needs the same "already identical, skip the copy" guard `_install` has.
       `int8` comes back to the choices on the day this lands.
-      NOT STARTED as code: two PRs from this session are in review (#256, #258) and the
-      house rule is one at a time, so this waits for them rather than becoming a third.
+      DONE 12 Sep, #262, on option (b) exactly as decided above. `require_same_engines` had
+      the two paths it needed already: it resolves the flat engine AND the plan's destination,
+      and it digests both. A named precision whose digests differ now INSTALLS the flat engine
+      at that destination instead of refusing -- so the flag selects, and the digest equality
+      the guard enforces holds by construction rather than by the operator having run the
+      installer by hand.
+      NO PRECISION NAMED IS STILL THE OLD REFUSAL, and that is the line worth keeping: the
+      install is what a CLAIM buys. With nothing claimed there is nothing to select, and
+      overwriting the operator's repository on a difference nobody asked about would be a
+      worse defect than the one this closes.
+      THE COST, as stated when it was decided: the bench writes into `model_repository` before
+      measuring. `build_engines.py --install` is the documented workflow and does exactly
+      this, so it is a new caller rather than a new behaviour -- and the refusal it replaces
+      already printed "(which also installs the plan)" as the operator's remedy.
+      EVIDENCE: `test_a_named_precision_installs_the_plan_it_names` (the plan starts fp32,
+      ends fp16, and a second call copies nothing) and
+      `test_without_a_named_precision_a_mismatch_is_still_refused` (the refusal stands and
+      nothing is written). Probed by making the install branch unreachable: the first turns
+      red on the refusal it replaced.
+      `int8` comes back to the choices now that this has landed -- and what it waits on is the
+      BUILDER, not this flag: the segmenter does not build at int8 on this box.
+      ROUND 1 CAUGHT THE HALF THAT WOULD HAVE HURT: the install sat below the
+      `system == "baseline"` scoping, which skips only the embedder PAIR -- so
+      `--systems baseline --precision fp16` rewrote the detector and segmenter while leaving
+      both embedders, on a run where nothing of ours loads a plan at all. A MIXED repository,
+      and the next unnamed run is documented to "measure whatever is installed and say so",
+      so it would have said so about a half-converted one. Gated on the system now, and this
+      method already held that acting on an artefact a baseline-only run does not load is a
+      defect -- overwriting one is worse.
+      AND THE OPERATOR-FACING TEXT SAID THE OPPOSITE, which is where the cost had to be
+      stated: `--precision`'s `--help` still said a mismatch is "refused rather than reported"
+      and never mentioned the write. It now says WRITES INTO THE MODEL REPOSITORY at the flag
+      that triggers it, and the two `config.py` comments that called the flag a non-selector
+      are corrected rather than left inverted.
+      THE WRITE IS ATOMIC: staged beside the plan and `os.replace`d, because `write_bytes`
+      truncates first and a Ctrl-C mid-copy would leave a truncated plan and no original.
+      AND THE IDEMPOTENCE TEST DID NOT TEST IT -- a second call rewriting identical bytes
+      passed the bytes check identically. It asserts on `st_mtime_ns` now, and goes red when
+      the digest skip is removed.
+      ROUND 2 FOUND THAT ROUND 1'S GATE BROKE THE DEFAULT RUN, which is the more useful
+      finding of the two: `run_bench.py`'s pre-flight called `baseline` first, so on
+      `--systems baseline,shipinfer` -- the default -- the baseline arm's digest check refused
+      the very mismatch the install exists to resolve, and the flag selected only on
+      `--systems shipinfer`. The pre-flight runs the arm that WRITES first now; the
+      measurement loop keeps the baseline's order, because only the pre-flight has a writer.
+      AND NOTHING DROVE THE SEQUENCE, which is why two rounds of unit tests missed it: each
+      called one arm in isolation, and one passed `require_same_engines()`'s `"both"` default,
+      a value no production caller produces. There is a test for the ORDER now, and a control
+      asserting the old one refuses -- so the order is a decision rather than an accident of
+      how the loop happens to be written.
+      ROUND 3 FOUND THE MIXED REPOSITORY AGAIN, by a third route: the copy sat INSIDE the
+      per-model loop, and `_ENGINE_PAIRS` puts the two that install cleanly first and the two
+      that most often fail last -- so an abort on the embedders left the repository half fp16
+      and half fp32, permanently, from a run the operator asked to measure. Worse than r1's,
+      whose mixed state came from a run that measured nothing of ours.
+      SO IT IS TWO PASSES: the loop COLLECTS what it has earned and every raise in it is a
+      reason to write nothing at all; the copies happen after all four models clear. "All four
+      or none" is the invariant `--precision` already claims, and now the one it keeps.
 
 - [x] BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE · **MERGED as #218 (squash `1054479`, 10 Sep),
       APPROVE on round 3 after two BLOCKING rounds.** Round 2's five findings, and the first is a

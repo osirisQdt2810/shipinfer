@@ -244,6 +244,143 @@ class TestBothSidesLoadTheSameEngine:
         with pytest.raises(RuntimeError, match="measures the engines"):
             config.require_same_engines()
 
+    def test_a_named_precision_installs_the_plan_it_names(self, tmp_path: Path) -> None:
+        """`BENCH-PRECISION-SELECTS-NO-PLAN`'s other half: the flag now SELECTS.
+
+        It named the baseline's flat engine and nothing else -- our side loaded whatever
+        precision `<model>/1/model.plan` held, so the flag decided which file the digest was
+        compared against and never which file ran. A named precision installs it.
+        """
+        config = replace(
+            self._config(tmp_path, b"PLAN-FP16", b"PLAN-FP32-INSTALLED"), precision="fp16"
+        )
+        repository = config.model_repository
+        assert repository is not None
+        plan = repository / "ship_detector" / "1" / "model.plan"
+        assert plan.read_bytes() == b"PLAN-FP32-INSTALLED", "the wrong precision, to start"
+
+        config.require_same_engines("shipinfer")
+
+        assert plan.read_bytes() == b"PLAN-FP16", "the named precision is what is installed"
+
+        # IDEMPOTENT, asserted on the mtime rather than the bytes: a second call that rewrote
+        # identical bytes would pass a bytes check identically, so that check was not the
+        # evidence it read as (#262's review).
+        before = plan.stat().st_mtime_ns
+        config.require_same_engines("shipinfer")
+        assert plan.stat().st_mtime_ns == before, "the second call copies nothing"
+
+    def test_the_default_run_installs_before_the_baseline_arm_checks(
+        self, tmp_path: Path
+    ) -> None:
+        """THE SEQUENCE, which is what nothing drove before (#262 r2).
+
+        `run_bench.py`'s pre-flight calls one arm then the other, and `--systems` defaults to
+        both. With `baseline` first, its digest check refused the very mismatch the install
+        exists to resolve -- so the flag selected only on `--systems shipinfer`, and the
+        `--help` promising "which precision BOTH sides load" was false in the mode it named.
+        The unit tests missed it because they called one arm in isolation, and one of them
+        passed the `"both"` default no production caller ever produces.
+        """
+        config = replace(
+            self._config(tmp_path, b"PLAN-FP16", b"PLAN-FP32-INSTALLED"), precision="fp16"
+        )
+        repository = config.model_repository
+        assert repository is not None
+        plan = repository / "ship_detector" / "1" / "model.plan"
+
+        # The pre-flight's order, as `run_bench.py` runs it.
+        for system in ("shipinfer", "baseline"):
+            config.require_same_engines(system)
+
+        assert plan.read_bytes() == b"PLAN-FP16", "installed by our arm"
+
+    def test_the_old_order_is_what_refused(self, tmp_path: Path) -> None:
+        """The control: baseline first sees the mismatch before anything installs, which is
+        the abort this reordering removes. Kept as a test so the order is a DECISION rather
+        than an accident of how the loop happens to be written."""
+        config = replace(
+            self._config(tmp_path, b"PLAN-FP16", b"PLAN-FP32-INSTALLED"), precision="fp16"
+        )
+
+        with pytest.raises(RuntimeError, match="measures the engines"):
+            config.require_same_engines("baseline")
+
+    def test_an_abort_partway_installs_nothing_at_all(self, tmp_path: Path) -> None:
+        """ALL FOUR MODELS OR NONE, which is the invariant `--precision` already claims.
+
+        `_ENGINE_PAIRS` puts the two that install cleanly FIRST, so a copy inside the loop
+        left the repository half fp16 and half fp32 -- permanently, from a run the operator
+        asked to measure and which then aborted (#262 r3). The fixture is this file's own
+        `_repository_without_embedder_plans`, "the state of the box immediately after a build".
+        """
+        engine = tmp_path / "yolo26n_fp32.engine"
+        engine.write_bytes(b"PLAN-FP16")
+        repository = self._repository_without_embedder_plans(tmp_path, b"PLAN-FP32-INSTALLED")
+        config = BenchConfig(
+            det_engine=engine,
+            seg_engine=engine,
+            emb_engine=engine,
+            model_repository=repository,
+            precision="fp16",
+        )
+        installable = {
+            model: (repository / model / "1" / "model.plan")
+            for model in ("ship_detector", "ship_segmenter")
+        }
+
+        # The embedders have no plan to hold the precision to, so the loop raises -- AFTER the
+        # two above have already cleared it.
+        with pytest.raises(RuntimeError, match="no plan at"):
+            config.require_same_engines("shipinfer")
+
+        for model, plan in installable.items():
+            assert plan.read_bytes() == b"PLAN-FP32-INSTALLED", (
+                f"{model} was installed before the run aborted, leaving a repository that is "
+                f"half one precision and half the other"
+            )
+
+    def test_a_baseline_only_run_installs_nothing(self, tmp_path: Path) -> None:
+        """`--systems baseline` loads no plan of ours, so it may not rewrite one.
+
+        The scoping above skips only the embedder PAIR, so this fell through and rewrote the
+        detector and segmenter while leaving both embedders -- a MIXED repository, from a run
+        where nothing of ours runs at all (#262's review, reproduced). The next unnamed run is
+        documented to "measure whatever is installed and say so", and would have said so about
+        a half-converted one.
+        """
+        config = replace(
+            self._config(tmp_path, b"PLAN-FP16", b"PLAN-FP32-INSTALLED"), precision="fp16"
+        )
+        repository = config.model_repository
+        assert repository is not None
+        plans = {
+            model: (repository / model / "1" / "model.plan")
+            for model in ("ship_detector", "ship_segmenter")
+        }
+
+        with pytest.raises(RuntimeError, match="measures the engines"):
+            config.require_same_engines("baseline")
+
+        for model, plan in plans.items():
+            assert plan.read_bytes() == b"PLAN-FP32-INSTALLED", f"{model} was not rewritten"
+
+    def test_without_a_named_precision_a_mismatch_is_still_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """Installing is what a CLAIM buys. With no precision named there is no claim, so a
+        difference between the two engines is the old refusal and not a licence to overwrite
+        the operator's repository."""
+        config = self._config(tmp_path, b"PLAN-FP32", b"PLAN-FP16-DIFFERENT")
+        repository = config.model_repository
+        assert repository is not None
+        plan = repository / "ship_detector" / "1" / "model.plan"
+
+        with pytest.raises(RuntimeError, match="measures the engines"):
+            config.require_same_engines()
+
+        assert plan.read_bytes() == b"PLAN-FP16-DIFFERENT", "and nothing was written"
+
     def _repository_without_embedder_plans(self, tmp_path: Path, plan: bytes) -> Path:
         """The state of the box immediately after a build, BEFORE the reid fanout existed:
         every flat engine present, det and seg plans installed, the embedders' absent."""
