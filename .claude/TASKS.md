@@ -3869,7 +3869,7 @@ hook down, for when the operator asked to see something before it is executed.
       libcudart the way torch does (`torch/lib/libcudart.so.12`) or read the flag through
       torch and drop the ctypes route.
 
-- [~] BENCH-PRECISION-SELECTS-NO-PLAN · HALF DONE 12 Sep: the knob no longer LIES, and it
+- [x] BENCH-PRECISION-SELECTS-NO-PLAN · HALF DONE 12 Sep: the knob no longer LIES, and it
       still does not SELECT. `--precision` names the BASELINE's flat engines; our side loads
       `model_repository/<name>/1/model.plan` whatever precision it holds, so on a
       `--systems shipinfer` run the flag changed nothing except which file the digest guard
@@ -3909,8 +3909,26 @@ hook down, for when the operator asked to see something before it is executed.
       behaviour -- `--install` is the documented workflow and does it today -- only a new
       caller, and it needs the same "already identical, skip the copy" guard `_install` has.
       `int8` comes back to the choices on the day this lands.
-      NOT STARTED as code: two PRs from this session are in review (#256, #258) and the
-      house rule is one at a time, so this waits for them rather than becoming a third.
+      DONE 12 Sep, #262, on option (b) exactly as decided above. `require_same_engines` had
+      the two paths it needed already: it resolves the flat engine AND the plan's destination,
+      and it digests both. A named precision whose digests differ now INSTALLS the flat engine
+      at that destination instead of refusing -- so the flag selects, and the digest equality
+      the guard enforces holds by construction rather than by the operator having run the
+      installer by hand.
+      NO PRECISION NAMED IS STILL THE OLD REFUSAL, and that is the line worth keeping: the
+      install is what a CLAIM buys. With nothing claimed there is nothing to select, and
+      overwriting the operator's repository on a difference nobody asked about would be a
+      worse defect than the one this closes.
+      THE COST, as stated when it was decided: the bench writes into `model_repository` before
+      measuring. `build_engines.py --install` is the documented workflow and does exactly
+      this, so it is a new caller rather than a new behaviour -- and the refusal it replaces
+      already printed "(which also installs the plan)" as the operator's remedy.
+      EVIDENCE: `test_a_named_precision_installs_the_plan_it_names` (the plan starts fp32,
+      ends fp16, and a second call copies nothing) and
+      `test_without_a_named_precision_a_mismatch_is_still_refused` (the refusal stands and
+      nothing is written). Probed by making the install branch unreachable: the first turns
+      red on the refusal it replaced.
+      `int8` comes back to the choices now that this has landed.
 
 - [x] BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE · **MERGED as #218 (squash `1054479`, 10 Sep),
       APPROVE on round 3 after two BLOCKING rounds.** Round 2's five findings, and the first is a

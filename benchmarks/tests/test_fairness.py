@@ -244,6 +244,42 @@ class TestBothSidesLoadTheSameEngine:
         with pytest.raises(RuntimeError, match="measures the engines"):
             config.require_same_engines()
 
+    def test_a_named_precision_installs_the_plan_it_names(self, tmp_path: Path) -> None:
+        """`BENCH-PRECISION-SELECTS-NO-PLAN`'s other half: the flag now SELECTS.
+
+        It named the baseline's flat engine and nothing else -- our side loaded whatever
+        precision `<model>/1/model.plan` held, so the flag decided which file the digest was
+        compared against and never which file ran. A named precision installs it.
+        """
+        config = replace(
+            self._config(tmp_path, b"PLAN-FP16", b"PLAN-FP32-INSTALLED"), precision="fp16"
+        )
+        repository = config.model_repository
+        assert repository is not None
+        plan = repository / "ship_detector" / "1" / "model.plan"
+        assert plan.read_bytes() == b"PLAN-FP32-INSTALLED", "the wrong precision, to start"
+
+        config.require_same_engines()
+
+        assert plan.read_bytes() == b"PLAN-FP16", "the named precision is what is installed"
+        config.require_same_engines()  # idempotent: the second run copies nothing
+
+    def test_without_a_named_precision_a_mismatch_is_still_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """Installing is what a CLAIM buys. With no precision named there is no claim, so a
+        difference between the two engines is the old refusal and not a licence to overwrite
+        the operator's repository."""
+        config = self._config(tmp_path, b"PLAN-FP32", b"PLAN-FP16-DIFFERENT")
+        repository = config.model_repository
+        assert repository is not None
+        plan = repository / "ship_detector" / "1" / "model.plan"
+
+        with pytest.raises(RuntimeError, match="measures the engines"):
+            config.require_same_engines()
+
+        assert plan.read_bytes() == b"PLAN-FP16-DIFFERENT", "and nothing was written"
+
     def _repository_without_embedder_plans(self, tmp_path: Path, plan: bytes) -> Path:
         """The state of the box immediately after a build, BEFORE the reid fanout existed:
         every flat engine present, det and seg plans installed, the embedders' absent."""

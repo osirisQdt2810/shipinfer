@@ -591,13 +591,41 @@ class BenchConfig:
                     f"its own from ONNX, and a run across two engines measures the engines. "
                     f"Run `python scripts/build_engines.py --force` to put one file in both."
                 )
-            if _digest(flat) != _digest(plan):
-                raise RuntimeError(
-                    f"{model}: the baseline loads {flat.name} and the server loads "
-                    f"{plan.relative_to(repository.parent)}, and they are different files. "
-                    f"A comparison across two engines measures the engines. Rebuild both "
-                    f"from one ONNX with `python scripts/build_engines.py --force`."
+            if _digest(flat) == _digest(plan):
+                continue
+            if self.precision is not None:
+                # doc: long why a named precision INSTALLS rather than refuses
+                # THE SELECTION HALF (`BENCH-PRECISION-SELECTS-NO-PLAN`). `--precision` named
+                # the BASELINE's flat engine and nothing else: our side loaded
+                # `<model>/1/model.plan` whatever precision it held, so the flag decided which
+                # file the digest was compared against and never which file ran.
+                #
+                # INSTALLING rather than resolving the plan path by precision, which was the
+                # other candidate: `parameters.engine_file` is ONE value read off
+                # `config.yaml`, so a precision-aware path needs a config per precision or an
+                # override that teaches the REPOSITORY layer about precision -- and then
+                # `serve` loads a different file from `bench` on one repository, which is the
+                # divergence this item is about. This is also what the refusal below already
+                # told the operator to do by hand: `build_engines.py` "also installs the plan".
+                #
+                # THE COST, stated: the bench writes into the model repository before
+                # measuring. `--install` is the documented workflow and does exactly this
+                # today, so it is a new caller rather than a new behaviour.
+                print(
+                    f"{model}: installing {flat.name} as "
+                    f"{plan.relative_to(repository.parent)} for --precision "
+                    f"{self.precision}",
+                    file=sys.stderr,
                 )
+                plan.parent.mkdir(parents=True, exist_ok=True)
+                plan.write_bytes(flat.read_bytes())
+                continue
+            raise RuntimeError(
+                f"{model}: the baseline loads {flat.name} and the server loads "
+                f"{plan.relative_to(repository.parent)}, and they are different files. "
+                f"A comparison across two engines measures the engines. Rebuild both "
+                f"from one ONNX with `python scripts/build_engines.py --force`."
+            )
 
     # -- reporting ----------------------------------------------------------------------
 
