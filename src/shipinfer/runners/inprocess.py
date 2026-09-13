@@ -73,6 +73,7 @@ from shipinfer.topology import (
     Topology,
     WaiterBudget,
 )
+from shipinfer.topology.chain import cross_camera_slots
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; `ingest` is imported inside `_ingest`
     from shipinfer.ingest import IngestManager, SourceFactory
@@ -320,7 +321,19 @@ class InprocessRunner(Runner):
             metrics=self._metrics.registry,
             workers=self._wanted_workers,
             waiter_budget=self._waiter_budget,
+            camera_groups=self._camera_group_count(),
         )
+
+    def _camera_group_count(self) -> int:
+        """How many cross-camera identity spaces this process holds.
+
+        THROUGH `cross_camera_slots`, which the load-time refusal also reads: one place that
+        counts, because two counts is what #263 shipped twice. Both earlier versions counted
+        declared `group:` NAMES -- a bare slot contributes none, and two slots sharing one
+        name count 1 -- so neither routed, both took every camera, and the second overwrote
+        the first's ids (r1, r2).
+        """
+        return max(1, len(cross_camera_slots(self._topology.nodes)))
 
     @property
     def cameras(self) -> tuple[str, ...]:

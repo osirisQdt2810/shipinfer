@@ -67,6 +67,7 @@ __all__ = [
     "MISSED_BACKWARD",
     "MISSED_DUPLICATE",
     "MISSED_LATE",
+    "MISSED_NOT_MINE",
     "MISSED_WOULD_STARVE",
     "InstantBarrier",
     "InstantEntry",
@@ -146,6 +147,12 @@ MISSED_BACKWARD = "backward"
 #: recovers a camera whose stamp jumped into the future (the DeepStream path takes the
 #: camera's own RTCP clock): one frame refused, then the real clock is adopted again.
 BACKWARD_REFUSALS_BEFORE_ADOPTING = 1
+
+#: This camera belongs to ANOTHER group in this process, so this group never saw the frame.
+#: Only ever counted when the process holds more than one group -- a lone group associates
+#: every camera it is handed, roster or not, which is what its roster has always meant. The
+#: C++ twin is `kMissedNotMine`.
+MISSED_NOT_MINE = "not_mine"
 
 #: How wide an instant is, in milliseconds — the maximum capture spread of one instant, and
 #: the longest any caller waits. **A proposal, not a measurement** (the phase-C plan's open

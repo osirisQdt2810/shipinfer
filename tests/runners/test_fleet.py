@@ -766,7 +766,7 @@ class TestACameraGroupIsAnAtomicUnitOfPlacement:
         assert clients[1].cameras == ["q-1", "q-3"]
 
     def test_the_launcher_asks_every_element_and_never_what_kind_it_is(self, clients) -> None:
-        """The seam, asserted directly. ``_camera_groups`` walks ``Element.camera_group()``
+        """The seam, asserted directly. ``camera_groups`` walks ``Element.camera_group()``
         with no ``ElementKind`` test and no import of an element implementation module, so a
         *second* kind that needs co-located cameras is a method override rather than an
         ``elif`` in ``runners/`` (ADR-017 §2). ``grouped-track`` is that second kind, invented
@@ -802,8 +802,13 @@ class TestACameraGroupIsAnAtomicUnitOfPlacement:
         finally:
             built.stop(timeout_s=5.0)
 
-    def test_one_camera_in_two_groups_is_refused_when_the_fleet_is_built(self) -> None:
-        """A camera that would have to be on two shards at once, refused before a start."""
+    def test_one_camera_in_two_groups_is_refused_before_a_runner_exists(self) -> None:
+        """A camera that would have to be on two shards at once.
+
+        REFUSED AT LOAD now, so the fleet never sees such a chain and no runner has to. The
+        earlier version built the topology INSIDE the `raises` block, which made it pass on
+        whichever refusal came first and cover neither on purpose (#263 r2).
+        """
         chain_yaml = textwrap.dedent("""
             name: overlapping
             elements:
@@ -814,15 +819,8 @@ class TestACameraGroupIsAnAtomicUnitOfPlacement:
               output: {impl: none}
             """)
 
-        with pytest.raises(ConfigurationError, match="claimed by camera groups"):
-            FleetRunner(
-                Topology.from_spec(ChainSpec.from_yaml(chain_yaml)),
-                ServerSettings(),
-                chain_yaml=chain_yaml,
-                shards=2,
-                gpus=[2, 3],
-                command=sleeps(),
-            )
+        with pytest.raises(ConfigurationError, match="claimed by mtmc slots"):
+            Topology.from_spec(ChainSpec.from_yaml(chain_yaml))
 
 
 class TestTheLockIsNeverHeldAcrossAnRpc:

@@ -62,6 +62,7 @@ from shipinfer.core.errors import (
     ChainSpecError,
     ChainStructureError,
     ConditionSyntaxError,
+    ConfigurationError,
     UnknownElementError,
 )
 from shipinfer.topology.base import ChainItem, Element, ElementKind
@@ -75,6 +76,8 @@ __all__ = [
     "ElementNode",
     "ElementSpec",
     "Topology",
+    "camera_groups",
+    "cross_camera_slots",
     "load_topology",
 ]
 
@@ -416,6 +419,10 @@ class Topology:
             CapsMismatchError: two elements that can hand data to each other agree on no
                 format/location — including the *bypass* pair created when a ``when:``
                 element is skipped.
+            ConfigurationError: also the two cross-camera rules, which are chain-file faults
+                and so belong here rather than on the runner that happens to ask first — two
+                or more ``mtmc`` slots with one of them unrostered, and one camera claimed by
+                two groups.
         """
         if not spec.elements:
             raise ChainSpecError(
@@ -495,6 +502,8 @@ class Topology:
         _check_row_selection(nodes)
         _check_row_indexed_meta(nodes)
         _check_one_filler_per_row(nodes)
+        _check_every_group_is_rostered(nodes)
+        _check_no_camera_is_claimed_twice(nodes)
         edges = _negotiate_edges(nodes)
         return cls(spec.name, nodes, edges)
 
@@ -892,6 +901,129 @@ def _resolve_produced(node: ElementNode, arrivals: Sequence[_Arrival]) -> tuple[
     # Two declared caps can resolve to the same thing (`*@gpu, nv12@*` behind an nv12@gpu
     # producer). Dedupe, preserving preference order, so the error messages stay readable.
     return tuple(dict.fromkeys(resolved))
+
+
+# doc: long the placement invariant a group buys, and why this asks no element its kind
+def camera_groups(topology: Topology) -> dict[str, str]:
+    """``{camera_id: group}`` for every camera an element of this chain says must stay together.
+
+    Asked of every node through :meth:`~shipinfer.topology.base.Element.camera_group`, with
+    **no test of what kind the element is**. That matters more than it looks: a launcher that
+    checked ``node.kind is ElementKind.MTMC`` would import an element implementation module,
+    re-parse a ``params:`` key the element had already parsed, and grow an ``elif`` for the
+    next kind that needs co-located cameras — the switch statement ADR-017 §2's registry
+    exists to delete. The element declares; this function only collects.
+
+    An element that declares no group contributes nothing: the fleet then places its cameras
+    by load and the group is whatever ended up together, which is the honest answer for a
+    chain that did not say. Declaring the roster is what buys the invariant.
+
+    HERE rather than in `runners/fleet.py`, where it began: it is pure topology and BOTH
+    runners need it -- the fleet to place cameras, the in-process runner to know whether a
+    slot must route (`ElementContext.camera_groups`). A second way of counting groups is a
+    second place the refusal below can be missing from.
+
+    Raises:
+        ConfigurationError: one camera is claimed by two differently-named groups — a chain
+            nobody can place, since the camera would have to be on two shards. A chain built
+            through :meth:`Topology.from_spec` never reaches this: the stricter, slot-keyed
+            :func:`_check_no_camera_is_claimed_twice` refuses it at load. This stays for a
+            ``Topology`` assembled some other way.
+    """
+    groups: dict[str, str] = {}
+    for node in topology.nodes:
+        declared = node.element.camera_group()
+        if declared is None:
+            continue
+        for camera_id in declared.cameras:
+            existing = groups.get(camera_id)
+            if existing is not None and existing != declared.name:
+                raise ConfigurationError(
+                    f"camera {camera_id!r} is claimed by camera groups {existing!r} and "
+                    f"{declared.name!r}. A group is an atomic unit of placement, so a camera "
+                    f"in two of them would have to be on two shards at once"
+                )
+            groups[camera_id] = declared.name
+    return groups
+
+
+def cross_camera_slots(nodes: Sequence[ElementNode]) -> tuple[ElementNode, ...]:
+    """The ``mtmc`` slots a chain declares -- one identity space each.
+
+    ONE READER of this count, because two answers are what #263 shipped twice: the load-time
+    refusal counted slots while the routing guard counted declared `group:` NAMES, so two
+    slots sharing one name counted 1 and neither routed. BY KIND, unlike :func:`camera_groups`
+    beside it: that one is asked by a runner PLACING cameras and must not test kinds
+    (ADR-017 §2), while this is a question about identity spaces, and two slots are two
+    `IdentityMap`s whatever the chain calls them.
+    """
+    return tuple(node for node in nodes if node.kind is ElementKind.MTMC)
+
+
+def _check_no_camera_is_claimed_twice(nodes: Sequence[ElementNode]) -> None:
+    """One camera belongs to one identity space. `plan_stages.cpp`, line for line.
+
+    KEYED ON THE SLOT and never on the declared `group:`, which is the whole finding: two
+    slots sharing a name are still two `IdentityMap`s, so a name-keyed check compared
+    `"quay" != "quay"`, found no contradiction, and let both claim the camera -- two global
+    ids for one object, last slot to run wins (#263 r4).
+
+    Raises:
+        ConfigurationError: two `mtmc` slots claim one camera, or one slot lists it twice.
+    """
+    claimed: dict[str, str] = {}
+    for node in cross_camera_slots(nodes):
+        declared = node.element.camera_group()
+        if declared is None:
+            continue
+        for camera_id in declared.cameras:
+            owner = claimed.get(camera_id)
+            # NAMED FOR WHAT IT IS, the way the other plane names it: `cameras: [cam0, cam0]`
+            # hit this branch and reported two slots with one name, which reads as a bug in
+            # the checker rather than in the chain.
+            if owner == node.name:
+                raise ConfigurationError(
+                    f"mtmc slot {node.name!r} lists camera {camera_id!r} twice; a roster is a "
+                    f"set of cameras, and a duplicate would have the barrier wait for one "
+                    f"camera twice"
+                )
+            if owner is not None:
+                raise ConfigurationError(
+                    f"camera {camera_id!r} is claimed by mtmc slots {owner!r} and "
+                    f"{node.name!r}; one camera belongs to one group, or its objects get two "
+                    f"global ids and the last slot to run wins"
+                )
+            claimed[camera_id] = node.name
+
+
+def _check_every_group_is_rostered(nodes: Sequence[ElementNode]) -> None:
+    """With more than one cross-camera group, each must say which cameras are its own.
+
+    An unrostered group means EVERY camera: right for the single-group chains written before
+    rosters existed, and exactly the old failure with two -- both slots take every camera and
+    give one object two global ids. The other plane refuses the same chain, and the fleet
+    cannot place it either.
+
+    Raises:
+        ConfigurationError: two or more `mtmc` slots, one of them with no roster.
+    """
+    slots = cross_camera_slots(nodes)
+    if len(slots) < 2:
+        return
+    bare = [
+        node
+        for node in slots
+        if not (declared := node.element.camera_group()) or not declared.cameras
+    ]
+    if bare:
+        raise ConfigurationError(
+            f"chain has {len(slots)} `mtmc` slots "
+            f"({', '.join(sorted(node.name for node in slots))}) and "
+            f"{', '.join(sorted(node.name for node in bare))} declares no `cameras:`. An "
+            f"unrostered group is EVERY camera, so two of them would each claim the whole "
+            f"fleet and give one object two global ids. Give every group its roster, or run "
+            f"one group."
+        )
 
 
 def _check_row_selection(nodes: Sequence[ElementNode]) -> None:

@@ -104,6 +104,21 @@ elements:
   output:  {impl: runner-sink}
 """
 
+#: TWO `mtmc` slots that SHARE a `group:` name. Legal -- their rosters are disjoint, so the
+#: chain loads -- and the case a count of distinct names gets wrong.
+TWO_GROUP_CHAIN = """
+name: two_groups
+elements:
+  decode:     {impl: replay}
+  detect:     {impl: runner-detect, model: ship_detector}
+  track:      {impl: runner-track, after: detect}
+  mtmc_north: {kind: mtmc, impl: shipvision, scope: global,
+               params: {group: quay, cameras: [cam-n1]}}
+  mtmc_south: {kind: mtmc, impl: shipvision, scope: global,
+               params: {group: quay, cameras: [cam-s1]}}
+  output:     {impl: runner-sink}
+"""
+
 #: A gated detector in front of a ``recognize`` slot the test chooses, so the question "is
 #: this element charged an expiry check?" is asked of exactly one element. In ``CHAIN``
 #: the answer would always come from ``segment``, which is the next element that needs a model
@@ -491,6 +506,11 @@ def load_fan_in(*, drop_camera: str) -> Topology:
     """The two-cap fan-in, with the camera whose items the donor consumes."""
     text = textwrap.dedent(FAN_IN_CHAIN).replace("__DROP__", drop_camera)
     return Topology.from_spec(ChainSpec.from_yaml(text))
+
+
+def load_two_groups() -> Topology:
+    """The chain whose two `mtmc` slots answer to one `group:` name."""
+    return Topology.from_spec(ChainSpec.from_yaml(textwrap.dedent(TWO_GROUP_CHAIN)))
 
 
 def settings(**pipeline: Any) -> ServerSettings:
@@ -1723,6 +1743,21 @@ class TestWhatTheElementsAreTold:
 
         assert runner.workers == 1, "the override won, as it always did"
         assert context.workers == 1, "and it is what the elements are told"
+
+    def test_the_group_count_is_of_slots_and_never_of_declared_names(self) -> None:
+        """Two slots are two identity spaces whatever the chain calls them.
+
+        Counting distinct `group:` names answers 1 for this chain, and then neither slot
+        routes: both take every camera and the second overwrites the first's global ids.
+        `chain.py`'s load check and `plan_stages.cpp` both count slots (#263 r2).
+        """
+        context = InprocessRunner(load_two_groups()).element_context()
+
+        assert context.camera_groups == 2
+
+    def test_a_chain_with_no_cross_camera_slot_is_one_group(self) -> None:
+        """`max(1, ...)`: an element asks "am I one of several", and the answer is no."""
+        assert InprocessRunner(load()).element_context().camera_groups == 1
 
     def test_the_image_ops_are_not_resolved_yet_and_say_so(self) -> None:
         """``None`` and not a host-side default. An element that needs ops and finds none

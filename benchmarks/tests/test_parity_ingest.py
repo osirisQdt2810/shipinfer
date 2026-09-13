@@ -472,36 +472,6 @@ class TestKnownDivergences:
             f"the other plane already accepts and this lane refuses at load."
         )
 
-    def test_python_mtmc_has_no_roster_routing(self) -> None:
-        """The `mtmc_group_routing` entry's reproducing case, read off both trees.
-
-        The C++ plane routes two groups on one shard; Python relies on its fleet to put each
-        group on a shard of its own, so its element never tests a roster. Fails, and should,
-        the moment `MtmcElement` learns to route -- or the `inprocess` runner learns to refuse
-        two groups, which is the other half of the choice.
-        """
-        element = (ROOT / "src" / "shipinfer" / "topology" / "elements" / "mtmc.py").read_text()
-        body = element[element.index("def _do_process") :]
-        body = body[: body.index("\n    def ", 1)]
-        # ON THE MEMBERSHIP TEST, not on the word `_roster`: `_do_process` already calls
-        # `_note_silent_roster()`, which REPORTS a roster rather than routing by one, so the
-        # bare word was a false positive. `not in self._roster` is the spelling a routing test
-        # takes -- it is exactly what `camera_added` uses to decide whether to warn.
-        assert "not in self._roster" not in body, (
-            "MtmcElement._do_process now tests roster membership, so the planes may have "
-            "converged -- close the mtmc_group_routing entry and delete this test with it"
-        )
-
-        # The fleet is WHY that is right today: it places a group's cameras on one shard, so
-        # no Python process holds two groups. The `inprocess` runner is the hole.
-        fleet = (ROOT / "src" / "shipinfer" / "runners" / "fleet.py").read_text()
-        assert "_camera_groups" in fleet, "the placement this divergence rests on is gone"
-
-        stages = (ROOT / "csrc" / "shipinfer" / "pipeline" / "graph" / "stages.cpp").read_text()
-        assert (
-            "routes_ &&" in stages
-        ), "the C++ stage no longer routes conditionally; the divergence has changed shape"
-
     def test_the_two_halves_of_the_register_name_the_same_ids(self) -> None:
         """Both directions, because only one was guarded and the other was the hole.
 

@@ -72,6 +72,7 @@ from shipinfer.topology.barrier import (
     DROPPED_FAILED,
     DROPPED_SHUTDOWN,
     MISSED_LATE,
+    MISSED_NOT_MINE,
     MISSED_WOULD_STARVE,
     InstantBarrier,
     InstantEntry,
@@ -97,6 +98,7 @@ __all__ = [
     "DEFAULT_MAX_INSTANTS",
     "DEFAULT_SYNC_WINDOW_MS",
     "MISSED_LATE",
+    "MISSED_NOT_MINE",
     "MISSED_UNASSIGNABLE",
     "MISSED_WOULD_STARVE",
     "MISSING_TRACKS",
@@ -116,8 +118,8 @@ _SILENT_AFTER_WINDOW_CLOSES = 100
 #
 # The barrier owns the rest of it: what happened to an *instant* (`complete`, `window`,
 # `advanced`, `evicted`, `expired`, `shutdown`, `failed`) and what happened to a *frame* that
-# missed one (`late`, `duplicate`, `backward`, `would_starve`). Those live in
-# `topology/barrier.py` and four of them are re-exported here because they are the `reason=`
+# missed one (`late`, `duplicate`, `backward`, `would_starve`, `not_mine`). Those live in
+# `topology/barrier.py` and five of them are re-exported here because they are the `reason=`
 # labels this element's metrics carry. The two below are the element's own, because only an
 # element that knows what a track is can produce them.
 
@@ -358,6 +360,11 @@ class ShipvisionMtmc(Element):
         group, roster = parse_group(self.params, where=f"mtmc element {name!r}")
         self._group = group or name
         self._roster = roster
+        # THE SAME ROSTER as a membership container, because the two tests below are on the
+        # PER-FRAME path: a tuple scan is O(roster) per frame per slot, and the other plane
+        # uses a set for exactly this (`stages.cpp`: `roster_.count`). The tuple stays: it
+        # carries the declared ORDER, which `camera_group()` and `_announce_roster` publish.
+        self._roster_set = frozenset(roster)
         self._window_s = self._positive("sync_window_ms", DEFAULT_SYNC_WINDOW_MS) / 1e3
         # UNSET STAYS UNSET, so the barrier can size the bound to the fleet rather than to a
         # constant. Validated here anyway: a refusal at open() names the element and the key.
@@ -395,6 +402,10 @@ class ShipvisionMtmc(Element):
         #: Latched so the under-sized-group warning is one line per *crossing* rather than
         #: one per camera announcement.
         self._starved_group = False
+        #: Whether this process holds another group to route to -- resolved at `open` from
+        #: `ElementContext.camera_groups`. Initialised here and cleared at `close` like every
+        #: other piece of this element's state.
+        self._routes = False
         #: Instants that gave up on their window. The silent-roster check waits for
         #: `_SILENT_AFTER_WINDOW_CLOSES` of them, because a declared camera is silent until its
         #: first frame arrives and a check at the first close would malign one that is starting.
@@ -468,6 +479,11 @@ class ShipvisionMtmc(Element):
         """
         mtmc = load_mtmc()
         types = load_types()
+        # WHETHER THERE IS ANYWHERE TO ROUTE TO. A roster is the FLEET's placement hint, so
+        # with one group it is not a filter and `camera_added` warns and associates. Two in
+        # ONE process both taking every camera is two contradictory sets of ids for one
+        # object -- the other plane's `routes_`, same guard.
+        self._routes = context.camera_groups > 1
         self._TrackingError = load_errors().TrackingError
         self._CameraTracks = mtmc.CameraTracks
         self._FrameTrackCluster = mtmc.FrameTrackCluster
@@ -601,6 +617,7 @@ class ShipvisionMtmc(Element):
         self._TrackingError = _NeverRaised
         self._warned_unassignable = False
         self._starved_group = False
+        self._routes = False
         self._CameraTracks = None
         self._FrameTrackCluster = None
         self._FrameTag = None
@@ -616,14 +633,22 @@ class ShipvisionMtmc(Element):
         holding the runner's lifecycle lock, behind which every other lifecycle call queues,
         so the bound is worth stating rather than assuming.
 
-        Warns, but does not refuse, when the camera is outside a declared roster: a roster is
-        written once and cameras are added by API at run time, so refusing here would make a
-        stale list able to reject a live camera. The warning is the record that the two
-        disagree.
+        A camera outside the declared roster is never refused, and which of the two things
+        happens to it depends on whether the chain has somewhere else to put it. With ANOTHER
+        group in the process it is ignored here, silently, because that group owns it and this
+        barrier must not wait on a camera it will never be submitted. With no other group the
+        roster is a placement hint rather than a filter, so the camera is associated and the
+        disagreement is recorded as a warning -- a roster is written once while cameras are
+        added by API at run time, and a stale list must not be able to reject a live camera.
         """
         if self._barrier is None:
             return
-        if self._roster and camera_id not in self._roster:
+        if self._roster_set and camera_id not in self._roster_set:
+            if self._routes:
+                # ANOTHER GROUP OWNS IT, so this barrier must not wait on it. Announcing put
+                # a camera in `live` that `_do_process` never submits: no instant could close
+                # `complete`, and `_note_silent_roster` then blamed this group (#263 r1).
+                return
             _LOG.warning(
                 "mtmc element %r: camera %r is not in group %r's declared roster %s; "
                 "associating it anyway. Update `params: cameras:` — the fleet reads it to "
@@ -695,6 +720,15 @@ class ShipvisionMtmc(Element):
 
         assert self._barrier is not None  # `process` refuses before `open`
         camera_id = item.context.camera_id
+        if self._routes and self._roster_set and camera_id not in self._roster_set:
+            # NOT THIS GROUP'S CAMERA. Published with no ids and never submitted: this
+            # group's barrier must not wait on it. COUNTED, because #258's review found the
+            # other plane passing over every frame with nothing saying so.
+            self._metrics.frame_missing(MISSED_NOT_MINE)
+            # UNCHANGED, not `_missing`: that marker is the KIND, so marking here would say
+            # the mtmc stage is missing on the very event the OTHER slot fills with ids --
+            # `is_partial()` true on every frame of a two-group deployment (#263 r1).
+            return item
         capture_s = self._capture_s(item)
         view = self._view(item, camera_id, capture_s, tracks)
         # HOW LATE THIS FRAME IS: here, because only this place holds both stamps on one

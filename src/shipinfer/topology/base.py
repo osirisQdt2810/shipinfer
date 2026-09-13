@@ -342,6 +342,7 @@ class CameraGroup:
 
 
 @dataclass(frozen=True, slots=True)
+# doc: long every field a runner resolves for an element, each with the reason it exists
 class ElementContext:
     """Everything the surrounding runner tells an element at :meth:`Element.open`.
 
@@ -369,6 +370,17 @@ class ElementContext:
             process**. ``workers`` alone is not enough: each element counts only its own
             waiters, so two ``mtmc`` slots would each admit ``workers - 1`` and park every
             worker between them.
+        camera_groups: how many cross-camera identity spaces this PROCESS holds -- the
+            ``mtmc`` SLOTS, from :func:`~shipinfer.topology.chain.cross_camera_slots`, which
+            is also what the load-time roster refusal reads. Two slots are two ``IdentityMap``
+            s whatever the chain calls them, so counting declared ``group:`` names is wrong
+            and a runner filling this field must call that one function. More than one means a
+            group's element must route: two of them taking every camera would issue two
+            contradictory sets of global ids for one object. ``1`` is every chain in this
+            repository, and then a roster is a placement hint rather than a filter. NOT "one
+            per shard": the count is of the TOPOLOGY and every shard holds the whole chain,
+            so a two-group chain answers ``2`` on each -- which is what stops the non-owning
+            slot swallowing that shard's cameras into a second identity space.
         ops: batched image preprocessing bound to this shard's device, in the shape
             ``models=`` has. What arrives is a ``ThreadLocalImageOps``, because one shared
             element is walked by many threads. An element that needs it and finds ``None``
@@ -391,6 +403,7 @@ class ElementContext:
     workers: int | None = None
     ops: ImageOpsLike | None = None
     waiter_budget: WaiterBudget | None = None
+    camera_groups: int = 1
 
 
 class Element(abc.ABC):
