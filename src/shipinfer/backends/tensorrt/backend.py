@@ -246,10 +246,13 @@ class TensorRTBackend(ModelBackend):
     def keep_on_device(self, output_name: str) -> None:
         """Stop copying one output home, and stop advertising it.
 
-        The C++ twin is `TrtInstance::keep_on_device`. The two halves are one decision: a host
-        buffer this run never wrote is worse than no output, because a reader finds it and
-        gets the previous batch. NOT "a consumer reads it on the device" -- that needs a
-        lifetime the bindings do not have (`ENGINE-DEVICE-OUTPUT-OUTLIVES-ITS-BATCH`).
+        Keeping and hiding are one decision: a host buffer this run never wrote is worse than
+        no output, because a reader finds it and gets the previous batch. NOT "a consumer
+        reads it on the device" -- only an attachment this backend owns may, inside `execute`
+        (`ENGINE-DEVICE-OUTPUT-OUTLIVES-ITS-BATCH`, ruled 13 Sep).
+
+        Raises:
+            ConfigurationError: no engine, an unknown name, or the LAST advertised output.
         """
         if self._loaded is None:
             raise ConfigurationError(
@@ -264,7 +267,17 @@ class TensorRTBackend(ModelBackend):
                 f"{self.context.instance_name}: cannot keep output {output_name!r} on the "
                 f"device; the engine has no such output. It has {', '.join(known)}"
             )
-        self._kept_on_device = self._kept_on_device | {output_name}
+        # THE LAST ADVERTISED OUTPUT is refused, the C++ twin's rule: an engine advertising
+        # nothing answers nothing, and `InferenceResponse` states the opposite invariant.
+        kept = self._kept_on_device | {output_name}
+        folded = self._fold.name if self._fold is not None else None
+        if folded is None and all(name in kept for name in known):
+            raise ConfigurationError(
+                f"{self.context.instance_name}: keeping {output_name!r} on the device would "
+                f"leave this engine advertising no output at all; a response must carry at "
+                f"least one, and an engine that keeps everything answers nothing"
+            )
+        self._kept_on_device = kept
 
     def set_fold(self, fold: Any) -> None:
         """Compute ``fold.name`` on the device and stop copying the bank it reduces home.
@@ -348,6 +361,10 @@ class TensorRTBackend(ModelBackend):
                     batch_size,
                 )
                 outputs[fold.name] = Tensor.from_numpy(areas.cpu().numpy())
+            # `engine.cpp`'s unconditional `gpuStreamSynchronize`, same post-condition:
+            # `execute` returns with the network retired. Free today, since every fetch and
+            # the fold's `.cpu()` already block.
+            stream.synchronize()
         return outputs
 
     def _set_input_shapes(self, batch_size: int) -> None:

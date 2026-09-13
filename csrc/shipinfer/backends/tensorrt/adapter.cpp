@@ -42,11 +42,28 @@ namespace shipinfer {
         return instance_->output_rows(visible_.at(index));
     }
     void TrtEngineAdapter::keep_on_device(const std::string& output_name) {
-        // THROUGH THE INSTANCE FIRST, which owns the refusal: it checks the name against the
-        // artefact's own outputs and names the list, so an unknown one never reaches the
-        // bookkeeping below.
-        instance_->keep_on_device(output_name);
         const auto& outputs = instance_->engine().outputs();
+        // THE LAST ADVERTISED OUTPUT, refused BEFORE anything is mutated. Keeping it leaves
+        // `outputs()` at zero, and `InferenceResponse` states the opposite invariant --
+        // "Never empty for a completed response" -- so `first()` would throw `out_of_range`
+        // from inside a stage rather than the mistake being refused where it was made.
+        // Checked here and not after the erase, or a refusal would leave the instance's
+        // `kept_on_device_` already set. An unknown name falls through to the instance, which
+        // owns that refusal and names the artefact's outputs.
+        for (size_t i = 0; i < outputs.size(); ++i) {
+            if (outputs[i].name != output_name) continue;
+            const bool last = visible_.size() == 1 && visible_.front() == i && !folds();
+            if (last) {
+                throw BackendError("keeping '" + output_name +
+                                   "' on the device would leave this engine advertising no "
+                                   "output at all; a response must carry at least one, and "
+                                   "an engine that keeps everything answers nothing");
+            }
+            break;
+        }
+        // THROUGH THE INSTANCE, which owns the unknown-name refusal: it checks the name
+        // against the artefact's own outputs and names the list.
+        instance_->keep_on_device(output_name);
         for (size_t i = 0; i < outputs.size(); ++i) {
             if (outputs[i].name != output_name) continue;
             visible_.erase(std::remove(visible_.begin(), visible_.end(), i), visible_.end());

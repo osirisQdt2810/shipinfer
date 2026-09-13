@@ -76,13 +76,26 @@ namespace shipinfer {
         // width cannot be un-flattened: a segmentation engine's `(300, 38)` rows and
         // `(32, 160, 160)` prototypes are two shapes the fold needs and one product hides.
         std::vector<int64_t> dims;
+        // doc: long who may read an engine output on the device, and why it is not a stage
         // NO DEVICE POINTER HERE, and that is a decision rather than an omission (#260's
         // review, finding 3). `output_buffers_` belongs to the NEXT batch the moment this one
         // ends -- `bindings.py` states the same rule for the host side -- and a response
         // outlives its batch, so a pointer into that buffer would hand camera A's frame
-        // camera B's numbers with the `(camera_id, frame_id)` tag intact. An output kept on
-        // the device is one NOTHING ABOVE READS; a consumer that wants to read one needs a
-        // stated lifetime first (`ENGINE-DEVICE-OUTPUT-OUTLIVES-ITS-BATCH`).
+        // camera B's numbers with the `(camera_id, frame_id)` tag intact.
+        //
+        // THE LIFETIME, ruled 13 Sep (`ENGINE-DEVICE-OUTPUT-OUTLIVES-ITS-BATCH`): an engine
+        // output may be read on the device ONLY by an attachment the BACKEND owns, installed
+        // when the instance is composed, running inside `execute` on the instance's own
+        // stream, and leaving a host-sized answer behind before `execute` returns.
+        // `TrtInstance::set_fold` is that shape and is the only instance of it.
+        //
+        // A STAGE CANNOT BE THAT CONSUMER, which is the half worth stating because it is the
+        // one a future author will try: `ModelStage` holds a `Model&` and a timeout, `infer`
+        // hands back a `future<InferenceResponse>`, and it never learns which instance ran
+        // its batch -- its own kernels are on the WORKER's stream, ordered against the
+        // model's only by a blocking synchronise. So "runs inside the batch" is not something
+        // a chain can arrange; it is something the backend is. A stage that needs a device
+        // output needs a lease, and the ledger item names what would make one cheap.
         const float* row(size_t index) const { return data.data() + index * row_elems; }
     };
 

@@ -118,24 +118,32 @@ namespace shipinfer {
         // readable afterwards, which is why the adapter above stops advertising it.
         void set_fold(DeviceFold fold, size_t leave_on_device);
 
-        // Leave one output where the network wrote it, for a consumer that reads it on the
-        // device. Call before `start`, like `set_fold`, because this is a per-MODEL decision:
-        // a chain declares once which outputs a stage consumes on the device, and asking per
-        // REQUEST would spend per-frame bytes on an answer that never changes.
+        // doc: long who may keep an output on the device, and the promise this used to make
+        // Stop copying one output home. NOT "for a consumer that reads it on the device",
+        // which is what this said until the 13 Sep ruling under
+        // `ENGINE-DEVICE-OUTPUT-OUTLIVES-ITS-BATCH` found no seam that can honour it: a STAGE
+        // cannot read one. It holds a `Model&` and gets a `future<InferenceResponse>`, never
+        // learns which instance ran its batch, and does its own device work on the worker's
+        // stream -- and `output_buffers_` belongs to the next batch the moment this one ends.
+        // What a kept output IS for is an attachment THIS CLASS owns, installed before
+        // `start`, running inside `execute` on `stream_`, leaving a host-sized answer behind
+        // before `execute` returns. `set_fold` is that shape and is the only instance of it.
+        // So keeping is also HIDING (`TrtEngineAdapter` drops it from `visible_`): a host
+        // buffer this run never wrote is worse than no output, because a reader finds it and
+        // gets the previous batch.
         //
         // BY NAME, because which position an output occupies is the export's choice and not
         // the chain's -- the same argument `InferenceResponse::named` already carries. Refused
-        // when the artefact has no such output, rather than silently keeping nothing.
-        //
-        // `set_fold` is one caller of this: the bank it reduces is an output nothing above
-        // reads, which is the same fact stated for one output rather than any.
+        // when the artefact has no such output, and refused by the adapter when it would be
+        // the LAST advertised one: an engine that keeps everything answers nothing.
         void keep_on_device(const std::string& output_name);
         bool folds() const { return static_cast<bool>(fold_); }
         // The fold's answer on the host: `rows` floats, valid until the next `execute`.
         const float* fold_result() const { return fold_host_.as<float>(); }
-        // An output where the network wrote it. The fold was the first caller; any output
-        // named to `keep_on_device` is read this way too, which is why the comment that said
-        // "nothing else needs this" is gone rather than qualified.
+        // An output where the network wrote it. VALID ONLY INSIDE `execute`, on `stream_`:
+        // the next batch writes there. The fold is the only caller and the only shape of
+        // caller the ruling admits -- it reads the bank here and copies one float a row home
+        // two statements later, so nothing device-resident outlives its batch.
         const float* output_device(size_t index) const {
             return static_cast<const float*>(output_buffers_.at(index).get());
         }

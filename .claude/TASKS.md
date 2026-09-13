@@ -3056,7 +3056,7 @@ hook down, for when the operator asked to see something before it is executed.
       untouched, an unknown name refused with the list. 36 C++ binaries green in the
       container; offline Python 4376 passed.
 
-- [ ] ENGINE-DEVICE-OUTPUT-OUTLIVES-ITS-BATCH · a consumer that wants to READ an output on the
+- [x] ENGINE-DEVICE-OUTPUT-OUTLIVES-ITS-BATCH · a consumer that wants to READ an output on the
       device needs a lifetime, and the bindings do not have one. Opened by #260's review, which
       is what stopped that PR shipping the unsafe half. `ENGINE-COPIES-EVERY-OUTPUT-HOME` now
       lets an output stop coming home when NOTHING reads it; the remaining case is a stage that
@@ -3077,6 +3077,43 @@ hook down, for when the operator asked to see something before it is executed.
       empty, so `data.data() + i * row_elems` is a bogus pointer that `graph/stages.cpp` and
       `mask_area.cpp` dereference. Both are free to fix ONCE there is a device-resident output
       in a response at all; today there is not.
+
+      SETTLED 13 Sep: adopt (c), and NOT IN THE WORDS ABOVE. "Consumers that run INSIDE the
+      batch, like the fold" reads as though a chain-declared stage could qualify by running
+      early enough. It cannot, and writing that into `request.h` would put a promise in the
+      header no seam here can honour: `ModelStage` holds a `Model&` and a timeout, `infer`
+      hands back a future, it never learns which instance ran its batch, and its own kernels
+      are on the WORKER's stream -- ordered against the model's only by a blocking
+      synchronise, which is the cost `EXECUTE-BLOCKS-THE-INSTANCE-THREAD` exists to delete.
+      THE CONTRACT AS WRITTEN: an engine output may be read on the device ONLY by an
+      attachment the BACKEND owns, installed when the instance is composed, running inside
+      `execute` on the instance's own stream, and leaving a HOST-sized answer behind before
+      `execute` returns. `set_fold` is that shape and is the only instance of it.
+      (c) COSTS NOTHING because it forbids only what nobody does: `keep_on_device` has ZERO
+      production callers on either plane -- the door is built and only tests walk through it
+      -- and the consumer this item names, a crop-from-mask, appears nowhere but this file.
+      THE FOLD IS NOT THE PRECEDENT IT LOOKS LIKE, which is the finding worth keeping: it
+      reads `output_device` and copies one float a row home on the same stream two statements
+      later. Nothing device-resident has ever outlived a batch, so the fold is the NEGATION of
+      the crop-from-mask case rather than its model.
+      THE TWO "FREE TO FIX" TRAPS ARE NOT REACHABLE, and saying so is the point -- otherwise
+      someone fixes nothing. A kept output is not merely un-dereferenceable, it is
+      UNREPRESENTABLE: the adapter erases it from `visible_`, `outputs()` counts `visible_`,
+      and `engine/instance.cpp` never builds an `OutputTensor` for it. `row()` also needs no
+      bounds check: every caller is already bounded (`stages.cpp` by `row_elems/stride` after
+      its own refusal, `mask_area.cpp` by `response.rows` after `require_static`). The sync
+      gap was PYTHON-ONLY -- `engine.cpp` ends `execute` with an unconditional
+      `gpuStreamSynchronize` -- and is closed here with one line, so the two planes now make
+      the same post-condition rather than one making it by accident.
+      WHAT IS FIXED HERE, because it was reachable: keeping the LAST advertised output left
+      `outputs()` at zero and `InferenceResponse` asserting the opposite ("Never empty for a
+      completed response"), so `first()` threw `out_of_range` from inside a stage. Both planes
+      refuse it now, before anything is mutated.
+      WHAT WOULD REOPEN THIS, stated rather than declaring the question shut: (1)
+      `EXECUTE-BLOCKS-THE-INSTANCE-THREAD` landing first -- its event-per-batch IS shape (b)'s
+      lease, and (b)'s only objection is that it puts a wait on a batch path that has no
+      events on it yet; with them, a lease may cost a query rather than a sync. (2) A fused
+      detector decode, the first real consumer that would want one.
 
 - [ ] EXECUTE-BLOCKS-THE-INSTANCE-THREAD · PRICED 12 Sep at the design load: ~14% of instance-thread wall. PROFILED 11 Sep: `cudaStreamSynchronize` is **32.2%
       of all CUDA API time** -- 9.64 s over 5 564 calls, 1.73 ms average -- because

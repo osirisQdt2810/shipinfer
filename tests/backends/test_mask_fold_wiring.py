@@ -67,6 +67,14 @@ class FakeBindings:
 
 
 class NullStream:
+    #: Counted, because `execute`'s post-condition is that the network is retired when it
+    #: returns -- the C++ twin's unconditional `gpuStreamSynchronize`. A double with no such
+    #: method would make that promise untestable here rather than merely unmodelled.
+    synchronised: int = 0
+
+    def synchronize(self) -> None:
+        type(self).synchronised += 1
+
     def activate(self) -> Any:
         class _Ctx:
             def __enter__(self) -> None:
@@ -157,6 +165,28 @@ class TestAnOutputKeptOnTheDevice:
 
         assert bindings.fetched == ["output0", "output1"], "both fetched, as they always were"
         assert all(t.memory_kind is MemoryKind.HOST for t in outputs.values())
+
+    def test_keeping_the_last_advertised_output_is_refused(self) -> None:
+        """An engine that keeps everything answers nothing, and `InferenceResponse` states
+        the opposite invariant -- "Never empty for a completed response". Refused where the
+        mistake is made rather than as an `out_of_range` from inside a stage."""
+        backend, _ = backend_with_engine()
+        backend.keep_on_device("output1")
+
+        with pytest.raises(ConfigurationError, match="advertising no output at all"):
+            backend.keep_on_device("output0")
+
+        assert [s.name for s in backend.output_specs] == ["output0"], "and nothing moved"
+
+    def test_execute_returns_with_the_network_retired(self) -> None:
+        """`engine.cpp` ends `execute` with an unconditional `gpuStreamSynchronize` and this
+        plane did not: every path happened to block, so the promise held by accident."""
+        before = NullStream.synchronised
+        backend, _ = backend_with_engine()
+
+        backend.execute({"images": Tensor.from_numpy(np.zeros((3,), np.float32))}, 3)
+
+        assert NullStream.synchronised == before + 1
 
     def test_a_name_the_engine_lacks_is_refused_with_the_list(self) -> None:
         """The same refusal `set_fold` makes, for the same reason: unchecked it would keep
