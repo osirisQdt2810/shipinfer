@@ -41,6 +41,20 @@ namespace shipinfer {
                         Device src_device) override;
         void execute(int rows) override;
         const float* output(size_t index = 0) const override;
+
+        // doc: long why keeping an output means hiding it, and what that is not
+        // Stop copying one output home, and stop ADVERTISING it. The two go together: a host
+        // buffer nothing wrote is worse than no output at all, because a reader finds it and
+        // gets the previous batch. This is the fold's arrangement without the fold -- an
+        // output nothing above reads stops being paid for.
+        //
+        // NOT "a consumer reads it on the device". That needs a stated LIFETIME and does not
+        // have one: `output_buffers_` belongs to the next batch the moment this one ends, and
+        // a response outlives its batch (#260's review, finding 3). See
+        // `ENGINE-DEVICE-OUTPUT-OUTLIVES-ITS-BATCH`.
+        //
+        // Before the first `execute`, like the fold.
+        void keep_on_device(const std::string& output_name);
         TrtInstance& instance() { return *instance_; }
         //: Whether this adapter answers a folded output. For the stage that would otherwise
         //: fold on the host, and for a test.

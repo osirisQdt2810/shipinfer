@@ -48,6 +48,10 @@ class TensorRTBackend(ModelBackend):
     #: this object with `object.__new__`, where an `__init__`-only field would surface as an
     #: `AttributeError` from inside `execute`.
     _fold: MaskAreaFold | None = None
+    #: A class attribute for the same reason `_fold` is: the contract test builds this object
+    #: with `object.__new__`, so `__init__` never runs and an instance attribute would not
+    #: exist to read.
+    _kept_on_device: frozenset[str] = frozenset()
 
     def __init__(self, context: BackendContext) -> None:
         super().__init__(context)
@@ -70,6 +74,7 @@ class TensorRTBackend(ModelBackend):
         self._graph_replays = 0
         self._enqueues = 0
         self._fold: MaskAreaFold | None = None
+        self._kept_on_device: frozenset[str] = frozenset()
 
     # -- lifecycle -----------------------------------------------------------------------
 
@@ -219,6 +224,10 @@ class TensorRTBackend(ModelBackend):
             return super().output_specs
         strip = self.context.config.max_batch_size > 0
         specs = [t.to_spec(strip) for t in self._loaded.outputs]
+        # A KEPT OUTPUT STOPS BEING ADVERTISED, for the reason the bank does: its host buffer
+        # is one this run never wrote, and a reader that finds it gets the previous batch.
+        # Keeping and hiding are one decision, not two.
+        specs = [spec for spec in specs if spec.name not in self._kept_on_device]
         if self._fold is None:
             return tuple(specs)
         # THE BANK STOPS BEING ADVERTISED and a width-1 output takes its place at the END,
@@ -233,6 +242,29 @@ class TensorRTBackend(ModelBackend):
             shape=(1,) if strip else (batch, 1),
         )
         return (*kept, area)
+
+    def keep_on_device(self, output_name: str) -> None:
+        """Stop copying one output home, and stop advertising it.
+
+        The C++ twin is `TrtInstance::keep_on_device`. The two halves are one decision: a host
+        buffer this run never wrote is worse than no output, because a reader finds it and
+        gets the previous batch. NOT "a consumer reads it on the device" -- that needs a
+        lifetime the bindings do not have (`ENGINE-DEVICE-OUTPUT-OUTLIVES-ITS-BATCH`).
+        """
+        if self._loaded is None:
+            raise ConfigurationError(
+                f"{self.context.instance_name}: an output can only be kept on the device on a "
+                f"loaded engine, because the name is checked against that engine's outputs"
+            )
+        # AGAINST THE ARTEFACT, not `output_specs`, for the reason `set_fold` does the same:
+        # `output_specs` is what this backend ADVERTISES, which a fold has already edited.
+        known = tuple(tensor.name for tensor in self._loaded.outputs)
+        if output_name not in known:
+            raise ConfigurationError(
+                f"{self.context.instance_name}: cannot keep output {output_name!r} on the "
+                f"device; the engine has no such output. It has {', '.join(known)}"
+            )
+        self._kept_on_device = self._kept_on_device | {output_name}
 
     def set_fold(self, fold: Any) -> None:
         """Compute ``fold.name`` on the device and stop copying the bank it reduces home.
@@ -303,6 +335,8 @@ class TensorRTBackend(ModelBackend):
             for spec in self.output_specs:
                 if fold is not None and spec.name == fold.name:
                     continue  # computed below; the engine has no such output to fetch
+                if spec.name in self._kept_on_device:
+                    continue  # kept: never fetched, and `output_specs` no longer names it
                 array = bindings.fetch_output(
                     spec.name, batch_size, stream, async_copy=async_copy
                 )
