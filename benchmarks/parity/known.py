@@ -44,7 +44,7 @@ class KnownDivergence:
         return self.explains is not None and self.explains(python_record, cpp_record)
 
 
-#: Two entries, both documentary (``explains=None``): the difference is in what each plane
+#: One entry, documentary (``explains=None``): the difference is in what each plane
 #: READS from a chain, so it reaches no trace field -- it reaches different ``track_id``
 #: streams for one chain file, which no golden here holds yet. P6-D1/D2/D3 were closed by
 #: converging the planes; #259 narrowed `tracker_options`, #258 opened `mtmc_group_routing`.
@@ -68,24 +68,5 @@ KNOWN: Mapping[str, KnownDivergence] = {
         decided_in="PR #215 review round 3, finding 2; narrowed in #259 and again in #261",
         ledger="[ ] CSRC-TRACKER-ATTRIBUTION one plane drops a row for a poor overlap",
         case="test_the_cpp_plane_has_no_attribution_step",
-    ),
-    "mtmc_group_routing": KnownDivergence(
-        id="mtmc_group_routing",
-        seam="mtmc.global_id",
-        python=(
-            "src/shipinfer/topology/elements/mtmc.py has no roster test anywhere: "
-            "camera_added warns about a camera outside the declared roster and associates it, "
-            "and _do_process submits every camera it is handed. Right today because "
-            "runners/fleet.py::_camera_groups puts each group on its own SHARD, so no process "
-            "holds two -- but the inprocess runner does not shard"
-        ),
-        cpp=(
-            "csrc/shipinfer/pipeline/graph/stages.cpp routes by roster when the plan built "
-            "more than one mtmc slot, counting a passed-over frame as `not_mine`. With one "
-            "group it does not route, which is the Python behaviour exactly"
-        ),
-        decided_in="PR #258 review round 1, findings 1 and 2",
-        ledger="[ ] MTMC-PYTHON-ROUTES-BY-SHARD-ONLY the C++ plane routes two groups per shard",
-        case="test_python_mtmc_has_no_roster_routing",
     ),
 }

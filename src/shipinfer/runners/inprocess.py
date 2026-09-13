@@ -320,7 +320,22 @@ class InprocessRunner(Runner):
             metrics=self._metrics.registry,
             workers=self._wanted_workers,
             waiter_budget=self._waiter_budget,
+            camera_groups=self._camera_group_count(),
         )
+
+    def _camera_group_count(self) -> int:
+        """How many distinct cross-camera groups this process holds.
+
+        THROUGH `camera_group()` with no kind test, which is `_camera_groups`' argument one
+        process down: an element declares, this counts. At least 1, because a chain with no
+        group still has one element's worth of "everything here".
+        """
+        named = {
+            declared.name
+            for node in self._topology.nodes
+            if (declared := node.element.camera_group()) is not None
+        }
+        return max(1, len(named))
 
     @property
     def cameras(self) -> tuple[str, ...]:

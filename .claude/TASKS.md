@@ -3475,7 +3475,7 @@ hook down, for when the operator asked to see something before it is executed.
       `cam00..cam11` running), which is the diagnostic that survives and the reason the chain's
       own roster should be fixed or dropped -- a separate question from this PR.
 
-- [ ] MTMC-PYTHON-ROUTES-BY-SHARD-ONLY · the C++ plane routes two groups on one shard and the
+- [x] MTMC-PYTHON-ROUTES-BY-SHARD-ONLY · the C++ plane routes two groups on one shard and the
       Python plane cannot. Opened by #258, which landed the C++ half: with more than one `mtmc`
       slot `MtmcStage` routes by roster, while `MtmcElement._do_process` has no roster test at
       all and `camera_added` warns-and-associates. That is right for Python TODAY because its
@@ -3487,6 +3487,28 @@ hook down, for when the operator asked to see something before it is executed.
       `test_python_mtmc_has_no_roster_routing`. THE FIX is one of two, and the choice is the
       item: give `MtmcElement` the same route-when-more-than-one-group test, or refuse two
       mtmc slots in the `inprocess` runner and say the fleet is the only way to have two.
+      DONE 12 Sep, #263, on the FIRST -- the planes converge rather than one documenting what
+      the other cannot do. Refusing would have left a permanent divergence and this register
+      entry open forever, which is what V88 is against; converging closes both.
+      THE HOOK ALREADY EXISTED, which is what made the choice cheap: `ElementContext` carries
+      `waiter_budget` precisely because "two `mtmc` slots would each admit `workers - 1` and
+      park every worker between them" -- a process-wide fact the runner resolves and hands
+      down. `camera_groups` lands beside it for the same reason, counted through
+      `Element.camera_group()` with NO KIND TEST, which is `_camera_groups`' own argument one
+      process down: the element declares, the runner collects.
+      SO THE ELEMENT ROUTES WHEN `camera_groups > 1` and not otherwise -- the same guard as
+      the other plane's `routes_`, and for the same reason. With one group a roster stays the
+      FLEET's placement hint and `camera_added` warns-and-associates, which is what every
+      chain here relies on; `ship_person_cpu.yaml` declares `cam-01..04` against a
+      `cam00..11` fleet, and filtering on that is what dropped every frame on the C++ side
+      before #258's review caught it.
+      COUNTED, not silent: `MISSED_NOT_MINE` ("not_mine") on both planes, because #258's
+      review showed a pass-over with no counter reads as a healthy run that simply issued no
+      ids.
+      EVIDENCE: four cases in `TestTwoGroupsInOneProcessRouteByRoster`, probed BOTH ways --
+      never routing turns 2 red, routing for one group turns the compatibility case red. The
+      `mtmc_group_routing` register entry and its reproducing case are DELETED rather than
+      narrowed, which is what the register asks for when a divergence is closed by converging.
 
 - [ ] MTMC-TWO-GROUPS-SHARE-AN-ID-SPACE-DOWNSTREAM · group north's global id 7 and group
       south's id 7 are the same number and a reader cannot tell them apart. Each group gets its
