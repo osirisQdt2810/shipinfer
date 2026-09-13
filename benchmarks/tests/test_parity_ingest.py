@@ -330,6 +330,36 @@ class TestTheBackoffColumnIsReadFromThePlane:
         assert [r.numbers[1] for r in retries] == expected
 
 
+def _struct_fields(text: str, cls: str, struct: str) -> set[str]:
+    """The member names of ``struct <struct>`` inside ``class <cls>``.
+
+    A REWRITE rather than a fourth widening: three review rounds each widened one dimension of
+    a regex over C++ -- the type list, the token shape, then the delimiter -- and each fix left
+    the next open. So strip comments, find the braces by COUNTING, and take the identifier that
+    terminates a declaration; a member function is excluded by its `)`.
+    """
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    text = re.sub(r"//[^\n]*", "", text)
+    text = text[text.index(f"class {cls}") :]
+    start = text.index("{", text.index(f"struct {struct}"))
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                body = text[start + 1 : index]
+                break
+    else:  # pragma: no cover - a header that does not close its own struct
+        raise AssertionError(f"unbalanced braces in {cls}::{struct}")
+    return {
+        name
+        for name in re.findall(r"(\w+)\s*(?:=[^;]*|\{[^;]*\})?;", body)
+        if name not in {"const", "override", "final", "default", "delete"}
+    }
+
+
 class TestKnownDivergences:
     """The register is a register: cited, ledgered, reproduced, and mirrored in C++."""
 
@@ -423,17 +453,9 @@ class TestKnownDivergences:
         if not header.is_file():
             pytest.skip("3rdparty/shipvision is not checked out")
 
-        text = header.read_text(encoding="utf-8")
-        # ANCHORED ON THE CLASS, not the first `struct Options` in the file: another class
-        # gaining one earlier would have this compare the wrong table, silently (#261 r1).
-        text = text[text.index("class ByteTrackTracker") :]
-        body = text[text.index("struct Options") :]
-        body = body[: body.index("};")]
-        # NOT MATCHING THE TYPE AT ALL -- the third attempt, and the first that is not a list
-        # of types this test happens to know: `float|int|bool` missed `size_t`, then one token
-        # of `[\w:]*` missed `unsigned int` and `std::vector<int>`. Take the identifier that
-        # TERMINATES the declaration; `void reset();` is skipped because `)` breaks the match.
-        declared = set(re.findall(r"(\w+)\s*(?:=[^;]*)?;", body))
+        declared = _struct_fields(
+            header.read_text(encoding="utf-8"), "ByteTrackTracker", "Options"
+        )
         assert declared, f"no fields parsed out of {header}; the struct's shape changed"
 
         lane = (

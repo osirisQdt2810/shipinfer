@@ -100,8 +100,9 @@ namespace shipinfer {
         std::string slot;
         std::string output;
         //: The chain's `impl:`, which is the registry key -- `tracking/associator.h`. The
-        //: algorithm inside an impl (`params: algorithm: bytetrack`) is that lane's own
-        //: business and the plan does not carry it.
+        //: ALGORITHM inside it is carried too, in `options` below, so a lane can refuse one
+        //: it does not have; this used to say the plan did not carry it, which is the
+        //: mechanism #261 replaced.
         std::string impl;
         //: WHICH ROWS THIS TRACKER SEES, on `CropSpec`'s convention and for the same reason:
         //: the Python element states `selects_rows = True` and feeds its tracker only the
