@@ -819,7 +819,7 @@ class TestACameraGroupIsAnAtomicUnitOfPlacement:
               output: {impl: none}
             """)
 
-        with pytest.raises(ConfigurationError, match="claimed by camera groups"):
+        with pytest.raises(ConfigurationError, match="claimed by mtmc slots"):
             Topology.from_spec(ChainSpec.from_yaml(chain_yaml))
 
 

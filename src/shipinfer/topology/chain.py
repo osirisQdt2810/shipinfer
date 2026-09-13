@@ -76,6 +76,8 @@ __all__ = [
     "ElementNode",
     "ElementSpec",
     "Topology",
+    "camera_groups",
+    "cross_camera_slots",
     "load_topology",
 ]
 
@@ -501,12 +503,9 @@ class Topology:
         _check_row_indexed_meta(nodes)
         _check_one_filler_per_row(nodes)
         _check_every_group_is_rostered(nodes)
+        _check_no_camera_is_claimed_twice(nodes)
         edges = _negotiate_edges(nodes)
-        built = cls(spec.name, nodes, edges)
-        # AT LOAD, so both runners inherit it. `runners/fleet.py` was the only caller, so a
-        # single process never checked that a camera is in exactly one group (#263 r2).
-        camera_groups(built)
-        return built
+        return cls(spec.name, nodes, edges)
 
     @classmethod
     def from_file(cls, path: str | Path) -> Topology:
@@ -925,9 +924,11 @@ def camera_groups(topology: Topology) -> dict[str, str]:
     second place the refusal below can be missing from.
 
     Raises:
-        ConfigurationError: one camera is claimed by two different groups. That is a chain
-            nobody can place — the camera would have to be on two shards — so it is refused
-            when the fleet is built rather than on the camera that happens to be added second.
+        ConfigurationError: one camera is claimed by two differently-named groups — a chain
+            nobody can place, since the camera would have to be on two shards. A chain built
+            through :meth:`Topology.from_spec` never reaches this: the stricter, slot-keyed
+            :func:`_check_no_camera_is_claimed_twice` refuses it at load. This stays for a
+            ``Topology`` assembled some other way.
     """
     groups: dict[str, str] = {}
     for node in topology.nodes:
@@ -957,6 +958,42 @@ def cross_camera_slots(nodes: Sequence[ElementNode]) -> tuple[ElementNode, ...]:
     `IdentityMap`s whatever the chain calls them.
     """
     return tuple(node for node in nodes if node.kind is ElementKind.MTMC)
+
+
+def _check_no_camera_is_claimed_twice(nodes: Sequence[ElementNode]) -> None:
+    """One camera belongs to one identity space. `plan_stages.cpp`, line for line.
+
+    KEYED ON THE SLOT and never on the declared `group:`, which is the whole finding: two
+    slots sharing a name are still two `IdentityMap`s, so a name-keyed check compared
+    `"quay" != "quay"`, found no contradiction, and let both claim the camera -- two global
+    ids for one object, last slot to run wins (#263 r4).
+
+    Raises:
+        ConfigurationError: two `mtmc` slots claim one camera, or one slot lists it twice.
+    """
+    claimed: dict[str, str] = {}
+    for node in cross_camera_slots(nodes):
+        declared = node.element.camera_group()
+        if declared is None:
+            continue
+        for camera_id in declared.cameras:
+            owner = claimed.get(camera_id)
+            # NAMED FOR WHAT IT IS, the way the other plane names it: `cameras: [cam0, cam0]`
+            # hit this branch and reported two slots with one name, which reads as a bug in
+            # the checker rather than in the chain.
+            if owner == node.name:
+                raise ConfigurationError(
+                    f"mtmc slot {node.name!r} lists camera {camera_id!r} twice; a roster is a "
+                    f"set of cameras, and a duplicate would have the barrier wait for one "
+                    f"camera twice"
+                )
+            if owner is not None:
+                raise ConfigurationError(
+                    f"camera {camera_id!r} is claimed by mtmc slots {owner!r} and "
+                    f"{node.name!r}; one camera belongs to one group, or its objects get two "
+                    f"global ids and the last slot to run wins"
+                )
+            claimed[camera_id] = node.name
 
 
 def _check_every_group_is_rostered(nodes: Sequence[ElementNode]) -> None:

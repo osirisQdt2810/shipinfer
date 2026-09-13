@@ -3528,6 +3528,10 @@ hook down, for when the operator asked to see something before it is executed.
             the mtmc stage was missing on the very event the other slot filled with ids --
             `is_partial()` true on every frame of a two-group deployment. The not-mine path
             returns the item UNCHANGED: this process did answer the frame, from another slot.
+      A HEALTHY TWO-GROUP DEPLOYMENT TICKS `not_mine` AT FULL FRAME RATE per non-owning slot,
+      on both planes -- `frames_missing` rising at 1000/s with nothing wrong. The counter is
+      the C++ one's twin and stays; it is a sentence the runbook owes the first two-group
+      deployment, not a defect.
       A CAMERA IN NO ROSTER AT ALL is the residue of (3), and it has its own line below
       (`MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED`) rather than prose inside a closed item.
 

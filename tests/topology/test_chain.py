@@ -1761,7 +1761,7 @@ class TestEveryGroupSaysWhichCamerasAreItsOwn:
 
         assert load(chain) is not None
 
-    def test_a_camera_claimed_by_two_groups_is_refused_at_load(self) -> None:
+    def test_a_camera_claimed_by_two_slots_is_refused_at_load(self) -> None:
         """A camera is in exactly one identity space. The fleet refused this when it placed
         cameras; a single process never asked, so the rule now runs at load (#263 r2)."""
         chain = self._two_groups(
@@ -1769,7 +1769,34 @@ class TestEveryGroupSaysWhichCamerasAreItsOwn:
             "params: {group: south, cameras: [cam-n1]}}"
         )
 
-        with pytest.raises(ConfigurationError, match="claimed by camera groups"):
+        with pytest.raises(ConfigurationError, match="claimed by mtmc slots"):
+            load(chain)
+
+    def test_two_slots_sharing_a_group_name_may_not_share_a_camera(self) -> None:
+        """The SLOT is the key, not the name -- two slots are two `IdentityMap`s either way.
+
+        A name-keyed check compares `"quay" != "quay"`, finds no contradiction, and lets both
+        slots claim the camera: two global ids for one object, last slot to run wins. The
+        sibling above only covers the differently-named case and so passed for the wrong
+        reason (#263 r4).
+        """
+        chain = self._two_groups(
+            "{kind: mtmc, impl: shipvision, scope: global, "
+            "params: {group: north, cameras: [cam-n1]}}"
+        )
+
+        with pytest.raises(ConfigurationError, match="claimed by mtmc slots"):
+            load(chain)
+
+    def test_one_slot_listing_a_camera_twice_is_named_for_what_it_is(self) -> None:
+        """`plan_stages.cpp` refuses this by name and said why: reported as "two slots
+        ('quay' and 'quay')" it reads as a bug in the checker rather than in the chain."""
+        chain = self._two_groups(
+            "{kind: mtmc, impl: shipvision, scope: global, "
+            "params: {group: south, cameras: [cam-s1, cam-s1]}}"
+        )
+
+        with pytest.raises(ConfigurationError, match="lists camera 'cam-s1' twice"):
             load(chain)
 
     def test_one_group_may_still_name_no_cameras(self) -> None:
