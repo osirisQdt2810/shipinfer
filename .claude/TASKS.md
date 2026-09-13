@@ -3567,6 +3567,19 @@ hook down, for when the operator asked to see something before it is executed.
       `a_routing_slot_that_names_no_cameras_is_refused` / `a_lone_slot_may_name_no_cameras`
       in `test_mtmc_stage.cpp`.
 
+- [x] MTMC-THE-ROUTING-DIAGNOSTIC-IS-ACTIONABLE · two notes from #266's approving review,
+      both about a thing being true but unreachable.
+      (1) `cameras_not_mine` had no operational consumer on this plane -- the C++ bench prints
+      it per slot while here only a test could reach it, and the metric's own help text told an
+      operator to read it. It is named in the silent-roster warning now, which is the moment it
+      is worth reading: `silent_cameras` lists what the roster PROMISED, so on a routing mistake
+      it points away from the cause and the routed-away set points at it. Only when non-empty,
+      so a one-group chain sees no new clause.
+      (2) The unrostered-slot refusal sat AFTER `load_mtmc()`, so a pure chain-file question
+      could only be tested where the submodule is checked out -- which is not what CI has. It
+      is asked before the bridge loads, and its two cases moved out of the `@needs_shipvision`
+      class: on main they SKIP with no submodule, on this branch they PASS.
+
 - [ ] MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED · with two groups, a camera NEITHER roster names
       is returned unchanged by every slot, so its event carries no `global_ids`, no marker
       saying why, and `is_partial()` false. Reachable: add a camera by API that the chain
