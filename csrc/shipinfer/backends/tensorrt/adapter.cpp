@@ -1,5 +1,6 @@
 #include "shipinfer/backends/tensorrt/adapter.h"
 
+#include <algorithm>
 #include <string>
 
 #include "shipinfer/core/platform.h"
@@ -40,6 +41,19 @@ namespace shipinfer {
         if (folds() && index == visible_.size()) return 1;  // the fold: one area a row
         return instance_->output_rows(visible_.at(index));
     }
+    void TrtEngineAdapter::keep_on_device(const std::string& output_name) {
+        // THROUGH THE INSTANCE FIRST, which owns the refusal: it checks the name against the
+        // artefact's own outputs and names the list, so an unknown one never reaches the
+        // bookkeeping below.
+        instance_->keep_on_device(output_name);
+        const auto& outputs = instance_->engine().outputs();
+        for (size_t i = 0; i < outputs.size(); ++i) {
+            if (outputs[i].name != output_name) continue;
+            visible_.erase(std::remove(visible_.begin(), visible_.end(), i), visible_.end());
+            return;
+        }
+    }
+
     size_t TrtEngineAdapter::outputs() const {
         return visible_.size() + (folds() ? 1 : 0);
     }

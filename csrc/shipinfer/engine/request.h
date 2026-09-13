@@ -76,6 +76,13 @@ namespace shipinfer {
         // width cannot be un-flattened: a segmentation engine's `(300, 38)` rows and
         // `(32, 160, 160)` prototypes are two shapes the fold needs and one product hides.
         std::vector<int64_t> dims;
+        // NO DEVICE POINTER HERE, and that is a decision rather than an omission (#260's
+        // review, finding 3). `output_buffers_` belongs to the NEXT batch the moment this one
+        // ends -- `bindings.py` states the same rule for the host side -- and a response
+        // outlives its batch, so a pointer into that buffer would hand camera A's frame
+        // camera B's numbers with the `(camera_id, frame_id)` tag intact. An output kept on
+        // the device is one NOTHING ABOVE READS; a consumer that wants to read one needs a
+        // stated lifetime first (`ENGINE-DEVICE-OUTPUT-OUTLIVES-ITS-BATCH`).
         const float* row(size_t index) const { return data.data() + index * row_elems; }
     };
 

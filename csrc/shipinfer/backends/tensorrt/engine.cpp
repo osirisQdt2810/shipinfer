@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iostream>
 #include <numeric>
+#include <sstream>
 
 #include "shipinfer/core/buffers.h"
 #include "shipinfer/core/platform.h"
@@ -211,8 +212,27 @@ namespace shipinfer {
         const size_t bytes = static_cast<size_t>(engine_->max_batch()) * sizeof(float);
         fold_device_ = DeviceBuffer(bytes);
         fold_host_ = PinnedBuffer(bytes);
-        kept_on_device_ = leave_on_device;
+        kept_on_device_.insert(leave_on_device);
         fold_ = std::move(fold);
+    }
+
+    void TrtInstance::keep_on_device(const std::string& output_name) {
+        const auto& outputs = engine_->outputs();
+        for (size_t i = 0; i < outputs.size(); ++i) {
+            if (outputs[i].name == output_name) {
+                kept_on_device_.insert(i);
+                return;
+            }
+        }
+        // NAMED IN THE REFUSAL, with what the artefact does have: the caller asked for an
+        // output by a name the export does not use, and "no such output" without the list is
+        // a question the operator has to answer with `polygraphy` to get on with their day.
+        std::ostringstream known;
+        for (const auto& spec : outputs) {
+            known << (known.tellp() > 0 ? ", " : "") << spec.name;
+        }
+        throw BackendError("cannot keep output '" + output_name + "' on the device: " +
+                           engine_->path() + " has no such output; it has " + known.str());
     }
 
     void TrtInstance::execute(int rows) {
@@ -254,7 +274,7 @@ namespace shipinfer {
             // The folded output stays where it is. This is the copy the fold exists to
             // remove -- a `(32, 160, 160)` bank is 3.1 MB a row, and nothing above reads it
             // once an area has been computed from it.
-            if (i == kept_on_device_) continue;
+            if (kept_on_device_.count(i) != 0) continue;
             const auto& spec = engine_->outputs()[i];
             GPU_CHECK(gpuMemcpyAsync(host_outputs_[i].get(), output_buffers_[i].get(),
                                      spec.row_bytes() * static_cast<size_t>(rows),

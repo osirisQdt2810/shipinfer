@@ -18,7 +18,7 @@ import pytest
 from shipinfer.backends.tensorrt.backend import TensorRTBackend
 from shipinfer.backends.tensorrt.engine import EngineIO, LoadedEngine
 from shipinfer.core.errors import ConfigurationError
-from shipinfer.core.types import DataType, Tensor
+from shipinfer.core.types import DataType, MemoryKind, Tensor
 from shipinfer.topology.elements.masks import InstanceMaskArea
 
 torch = pytest.importorskip("torch")
@@ -116,6 +116,55 @@ def backend_with_engine() -> tuple[TensorRTBackend, FakeBindings]:
     backend._enqueue = lambda stream: None  # type: ignore[method-assign]
     backend._enqueues = 0
     return backend, bindings
+
+
+class TestAnOutputKeptOnTheDevice:
+    """`ENGINE-COPIES-EVERY-OUTPUT-HOME`, the Python half of the C++ `keep_on_device`.
+
+    The fold proved ONE output can stay where the network wrote it. This is the general door,
+    and what it has to get right is that the copy home does not happen and the consumer is
+    handed the binding rather than a numpy view of a buffer nothing filled.
+    """
+
+    def test_a_kept_output_is_neither_fetched_nor_advertised(self) -> None:
+        """The two halves are one decision. Advertising it while never filling its host
+        buffer is worse than dropping it: a reader finds the name and gets the last batch."""
+        backend, bindings = backend_with_engine()
+        backend.keep_on_device("output1")
+
+        outputs = backend.execute({"images": Tensor.from_numpy(np.zeros((3,), np.float32))}, 3)
+
+        assert bindings.fetched == ["output0"], "the kept output's copy home never happened"
+        assert "output1" not in outputs, "and nothing is published under its name"
+        assert [s.name for s in backend.output_specs] == ["output0"], "nor advertised"
+
+    def test_the_other_outputs_are_untouched(self) -> None:
+        """Nothing changes for a consumer that never heard of this — the reason the default
+        is host and the reason this is per-output rather than per-engine."""
+        backend, bindings = backend_with_engine()
+        backend.keep_on_device("output1")
+
+        outputs = backend.execute({"images": Tensor.from_numpy(np.zeros((3,), np.float32))}, 3)
+
+        assert outputs["output0"].memory_kind is MemoryKind.HOST
+        assert outputs["output0"].host is not None
+        assert bindings.fetched == ["output0"], "it still comes home as it always did"
+
+    def test_without_the_call_every_output_still_comes_home(self) -> None:
+        backend, bindings = backend_with_engine()
+
+        outputs = backend.execute({"images": Tensor.from_numpy(np.zeros((3,), np.float32))}, 3)
+
+        assert bindings.fetched == ["output0", "output1"], "both fetched, as they always were"
+        assert all(t.memory_kind is MemoryKind.HOST for t in outputs.values())
+
+    def test_a_name_the_engine_lacks_is_refused_with_the_list(self) -> None:
+        """The same refusal `set_fold` makes, for the same reason: unchecked it would keep
+        nothing and the consumer would read a buffer that did come home, silently."""
+        backend, _ = backend_with_engine()
+
+        with pytest.raises(ConfigurationError, match="output0, output1"):
+            backend.keep_on_device("prototypes")
 
 
 class TestWhatTheBackendAdvertises:
