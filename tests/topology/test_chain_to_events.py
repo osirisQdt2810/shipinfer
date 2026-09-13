@@ -1,4 +1,4 @@
-"""A chain walked by a real runner, ending in a file of schema-v4 events.
+"""A chain walked by a real runner, ending in a file of perception events.
 
 The end-to-end this slice exists for. Everything else about the ``output`` element is a unit
 test over one item; this is the one that says a *frame* entering an in-process runner comes
@@ -49,6 +49,12 @@ needs_shipvision = pytest.mark.skipif(
 )
 
 HEIGHT, WIDTH = 400, 400
+
+#: The chain's `mtmc` SLOT, which is the identity space's name on the event -- and not the
+#: chain's `group:` below, which is a placement label two slots may share. Spelled out so an
+#: event that carried the group instead would fail here rather than agree by coincidence.
+SLOT = "mtmc_north"
+GROUP = "quay"
 
 #: One ship and one person per frame, far apart, so an IoU attribution has one right answer.
 BOXES = np.array([[10.0, 10.0, 110.0, 210.0], [300.0, 300.0, 340.0, 380.0]], dtype=np.float32)
@@ -144,7 +150,8 @@ class EventsTrack(Element):
 
 @registry_for(ElementKind.MTMC).register("events-mtmc")
 class EventsMtmc(Element):
-    """A cross-camera tier filing C6's shape: one global id per track, aligned with them."""
+    """A cross-camera tier filing C6's shape: one global id per track, aligned with them,
+    and the SLOT that minted them -- the two meta keys `elements/mtmc.py` files together."""
 
     kind: ClassVar[ElementKind] = ElementKind.MTMC
     accepts: ClassVar[tuple[str, ...]] = ("meta@cpu",)
@@ -155,7 +162,10 @@ class EventsMtmc(Element):
 
     def _do_process(self, item: ChainItem) -> ChainItem:
         tracks = item.meta.get("tracks", ())
-        return item.derive(global_ids=[900 + index for index in range(len(tracks))])
+        return item.derive(
+            global_ids=[900 + index for index in range(len(tracks))],
+            global_id_group=self.name,
+        )
 
 
 @registry_for(ElementKind.TRACK).register("events-track-per-camera")
@@ -288,6 +298,30 @@ def settings(workers: int = 2) -> ServerSettings:
     )
 
 
+def two_group_chain_for(path: Path) -> Topology:
+    """Two `mtmc` slots with disjoint rosters -- two identity spaces in one process.
+
+    The real element on both, because routing is what makes the two spaces separate and a
+    double would be reimplementing it rather than exercising it.
+    """
+    return Topology.from_spec(ChainSpec.from_yaml(textwrap.dedent(f"""
+                name: two_groups
+                elements:
+                  decode: {{impl: replay}}
+                  detect: {{impl: events-detect}}
+                  embed:  {{impl: events-embed}}
+                  track:  {{impl: shipvision,
+                            params: {{options: {{min_hits: 1, max_age: 3}}}}}}
+                  mtmc_north: {{kind: mtmc, impl: shipvision,
+                                params: {{group: quay, cameras: [cam-a],
+                                          options: {{min_hits: 1}}}}}}
+                  mtmc_south: {{kind: mtmc, impl: shipvision,
+                                params: {{group: quay, cameras: [cam-b],
+                                          options: {{min_hits: 1}}}}}}
+                  output: {{impl: jsonlines, params: {{path: "{path}", flush_every: 0}}}}
+                """)))
+
+
 def chain_for(path: Path, *, track: str, mtmc: str, extra: str = "") -> Topology:
     return Topology.from_spec(ChainSpec.from_yaml(textwrap.dedent(f"""
                 name: events
@@ -296,13 +330,14 @@ def chain_for(path: Path, *, track: str, mtmc: str, extra: str = "") -> Topology
                   detect: {{impl: events-detect}}
                   embed:  {{impl: events-embed}}
                   track:  {{impl: {track}{extra}}}
-                  mtmc:   {{impl: {mtmc}, params: {{group: quay, cameras: [cam-a, cam-b]}}}}
+                  {SLOT}: {{kind: mtmc, impl: {mtmc},
+                            params: {{group: {GROUP}, cameras: [cam-a, cam-b]}}}}
                   output: {{impl: jsonlines, params: {{path: "{path}", flush_every: 0}}}}
                 """)))
 
 
 class TestAChainOfDoublesWritesEvents:
-    """Frames in, one v4 line out per frame, with the identity on the right object."""
+    """Frames in, one line out per frame, with the identity on the right object."""
 
     def test_one_event_per_frame_reaches_the_file(self, runner, tmp_path: Path) -> None:
         path = tmp_path / "events.jsonl"
@@ -314,7 +349,7 @@ class TestAChainOfDoublesWritesEvents:
         assert {event["image_id"] for event in events_in(path)} == {0, 1, 2}
         assert {event["camera_id"] for event in events_in(path)} == {"cam-a"}
 
-    def test_the_event_is_schema_v4_with_the_identity_on_each_object(
+    def test_the_event_carries_the_version_and_the_identity_on_each_object(
         self, runner, tmp_path: Path
     ) -> None:
         """The whole fan-out in one assertion set: rows, track ids, global ids, embeddings.
@@ -332,7 +367,7 @@ class TestAChainOfDoublesWritesEvents:
         assert until(lambda: len(events_in(path)) == 2), events_in(path)
         event = events_in(path)[0]
 
-        assert event["schema_version"] == 4
+        assert event["schema_version"] == 5
         assert event["type"] == "Det2MOT"
         assert event["ship_det_id_vec"] == [f"cam-a_{event['image_id']}_0"]
         assert event["det_id_vec"] == [f"cam-a_{event['image_id']}_1"]
@@ -340,6 +375,7 @@ class TestAChainOfDoublesWritesEvents:
         assert event["body_track_id_vec"] == [101]
         assert event["ship_global_id_vec"] == [900]
         assert event["body_global_id_vec"] == [901]
+        assert event["global_id_group"] == SLOT, "whose counter minted the 900 and the 901"
         assert event["ship_feature_vec"] == [[1.0, 0.0]]
         assert event["body_feature_vec"] == [[1.0, 1.0]]
         assert (event["img_width"], event["img_height"]) == (WIDTH, HEIGHT)
@@ -440,7 +476,7 @@ class TestTheRealStatefulTierWritesEvents:
         tracked = [event for event in events_in(path) if event["ship_track_id_vec"] != [None]]
         assert tracked, "no frame carried a tracklet"
         event = tracked[0]
-        assert event["schema_version"] == 4
+        assert event["schema_version"] == 5
         assert len(event["ship_track_id_vec"]) == 1
         assert len(event["body_track_id_vec"]) == 1
         assert event["ship_track_id_vec"] != event["body_track_id_vec"]
@@ -473,7 +509,19 @@ class TestTheRealStatefulTierWritesEvents:
         assert until(lambda: len(events_in(path)) == 4), events_in(path)
 
         for event in events_in(path):
-            assert event["schema_version"] == 4
+            assert event["schema_version"] == 5
+            # ASSERTED AS A PAIR, never as "every frame names a slot": whether an instant
+            # closes is the timing question this docstring says is not pinned here, and a
+            # frame that missed one carries no ids AND no slot. What IS invariant is which
+            # name appears when one does -- the SLOT, not the chain's `group: quay`.
+            group = event.get("global_id_group")
+            assert group in (SLOT, None), "the tier that answered names itself"
+            if group is None:
+                assert all(
+                    identity is None
+                    for prefix in ("ship", "body")
+                    for identity in event[f"{prefix}_global_id_vec"]
+                ), "ids with no identity space named for them"
             for prefix in ("ship", "body"):
                 globals_ = event[f"{prefix}_global_id_vec"]
                 tracks = event[f"{prefix}_track_id_vec"]
@@ -484,3 +532,42 @@ class TestTheRealStatefulTierWritesEvents:
                         "a global id is an identity for a tracklet, so an object with no "
                         "track cannot carry one"
                     )
+
+
+@needs_shipvision
+class TestTwoIdentitySpacesAreTellableApartOnTheWire:
+    """`MTMC-TWO-GROUPS-SHARE-AN-ID-SPACE-DOWNSTREAM`, on the bytes a consumer reads.
+
+    Two slots are two `IdentityMap`s with their own counters, so each hands out 1, 2, 3 --
+    and before v5 the event said only "global id 7", which of two objects nobody could say.
+    Both slots declare `group: quay` on purpose: a group is a PLACEMENT label two slots may
+    share (`test_chain.py::test_two_slots_may_share_one_group_name`), so a field carrying it
+    would name both spaces the same and this test would fail.
+    """
+
+    def test_each_cameras_events_name_the_slot_that_minted_their_ids(
+        self, runner, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "events.jsonl"
+        started = runner(
+            two_group_chain_for(path),
+            settings=settings(workers=4),
+            source_factory=scripted(frames=2),
+        )
+        started.add_camera(CameraSpec("cam-a", "injected://a", 0.0))
+        started.add_camera(CameraSpec("cam-b", "injected://b", 0.0))
+
+        assert until(lambda: len(events_in(path)) == 4), events_in(path)
+
+        owner = {"cam-a": "mtmc_north", "cam-b": "mtmc_south"}
+        named = 0
+        for event in events_in(path):
+            group = event.get("global_id_group")
+            if group is None:
+                continue
+            named += 1
+            assert group == owner[event["camera_id"]], (
+                "a camera's ids were minted by the other group's counter, or the field "
+                "carries the shared `group:` rather than the slot"
+            )
+        assert named == 4, f"a slot passed over its own camera: {events_in(path)}"

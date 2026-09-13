@@ -237,7 +237,27 @@ class SinkOutput(Element):
             captured_unix_ns=item.context.captured_unix_ns,
             fps=float(item.meta.get("fps", 0.0)),
             missing_stages=tuple(item.meta.get(MISSING_STAGES, ())),
+            global_id_group=self._group_of(item),
         )
+
+    def _group_of(self, item: ChainItem) -> str | None:
+        """Which identity space minted this frame's global ids, or ``None`` for no group.
+
+        Raises:
+            ValidationError: a group was filed with no ``meta["global_ids"]``. The two are
+                one answer and ``elements/mtmc.py`` files them together, so a name on its
+                own would label ids this frame does not carry.
+        """
+        group = item.meta.get("global_id_group")
+        if group is None:
+            return None
+        if item.meta.get("global_ids") is None:
+            raise ValidationError(
+                f"output element {self.name!r} was handed meta['global_id_group'] "
+                f"{group!r} with no meta['global_ids'] for it to name. A group is which "
+                "counter minted this frame's ids, and this frame carries none"
+            )
+        return str(group)
 
     def _records(self, item: ChainItem, detections: Detections) -> tuple[ObjectRecord, ...]:
         """One record per detection row, filled from whatever the chain filed."""

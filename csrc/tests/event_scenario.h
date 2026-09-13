@@ -27,6 +27,8 @@ namespace shipinfer::parity {
         int64_t emitted_unix_ns = 0;
         std::vector<std::string> missing;
         std::string reason = "complete";
+        //: The `mtmc` slot that answered, empty for a scenario with no cross-camera tier.
+        std::string global_id_group;
         //: Set when the scenario says `finished <reason>` rather than `reason <word>`, so the
         //: word comes from `to_string(FinishReason)` on this plane and from the collector's
         //: own constants on the other.
@@ -124,6 +126,8 @@ namespace shipinfer::parity {
                 scenario.camera = first("camera");
             } else if (directive == "source") {
                 scenario.source = first("source");
+            } else if (directive == "global_id_group") {
+                scenario.global_id_group = first("global_id_group");
             } else if (directive == "reason") {
                 scenario.reason = first("reason");
             } else if (directive == "finished") {

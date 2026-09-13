@@ -218,6 +218,26 @@ namespace {
         check(line.find("\"camera_id\":\"cam0\"") != std::string::npos, "the tag survives");
     }
 
+    void test_the_group_that_minted_the_ids_reaches_the_wire() {
+        // v5. Two `mtmc` groups are two counters, so north's 7 and south's 7 are different
+        // objects; the `MtmcStage` that associated a frame names itself on its event.
+        EmissionInputs named = a_frame();
+        named.global_id_group = "mtmc_north";
+
+        const std::string line =
+            event_of(named, FinishReason::Complete, {}, "shard-1", kLabels, {}).to_json();
+
+        check(line.find("\"global_id_group\":\"mtmc_north\"") != std::string::npos,
+              "the group reaches the JSON: " + line.substr(0, 200));
+        // AND OMITTED when no slot answered for the frame -- a missed instant, or a chain
+        // with no cross-camera tier. A chain that HAS one writes it on every frame it
+        // associates, single-group or not.
+        const std::string plain =
+            event_of(a_frame(), FinishReason::Complete, {}, "shard-1", kLabels, {}).to_json();
+        check(plain.find("global_id_group") == std::string::npos,
+              "and is absent, not null, when none did: " + plain.substr(0, 200));
+    }
+
 }  // namespace
 
 int main() {
@@ -231,6 +251,7 @@ int main() {
         test_the_det_id_and_the_geometry_come_from_the_tag();
         test_every_finish_reason_has_a_wire_word();
         test_the_whole_event_carries_the_frames_geometry_and_reason();
+        test_the_group_that_minted_the_ids_reaches_the_wire();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "FAIL: the record builder's tests could not run: %s\n",
                      error.what());

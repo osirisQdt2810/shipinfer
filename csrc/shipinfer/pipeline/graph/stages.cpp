@@ -372,7 +372,7 @@ namespace shipinfer {
         //
         // ONLY WHEN THE PLAN BUILT MORE THAN ONE GROUP (`routes_`), and that is the whole
         // guard rather than a refinement of it. A roster has always been a statement to the
-        // FLEET about which shard a camera belongs on -- `runners/fleet.py::_camera_groups`
+        // FLEET about which shard a camera belongs on -- `topology/chain.py::camera_groups`
         // reads it to place cameras, and the element itself associates every camera it is
         // handed (`elements/mtmc.py::camera_added` warns and carries on). Making it a filter
         // for a lone group silently dropped every frame of `ship_person_cpu.yaml`, whose
@@ -511,6 +511,13 @@ namespace shipinfer {
         batch.name = output_;
         batch.width = 1;
         if (outcome.associated && outcome.results) {
+            // WHOSE COUNTER, filed only here -- beside the ids and never without them, which
+            // is where `elements/mtmc.py` files it too. A frame that missed its instant
+            // carries no ids, so naming a slot for it would name one that answered nothing.
+            // `name()` IS the slot (`from_plan.cpp` passes `spec.slot` as it), so this reads
+            // the one that exists rather than carrying a second copy -- which is also the
+            // mechanism the other plane uses (`self.name`).
+            state.note_global_id_group(name());
             const auto& ids =
                 *std::static_pointer_cast<const std::map<mtmc::TrackKey, int64_t>>(
                     outcome.results);

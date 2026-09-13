@@ -5,6 +5,24 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-13 — a global id says which group minted it (event schema v5)
+
+Two `mtmc` groups are two `IdentityMap`s with their own counters, so north's global id 7 and
+south's 7 are different objects wearing one number -- and the event stream flattened them, on
+both planes. `PerceptionEvent.global_id_group` names the SLOT that answered -- not its `group:`, which is
+a placement label two slots may share and would therefore name two spaces at once.
+ON THE EVENT and not on `ObjectRecord`: the wire format is per-class vectors and a frame's
+camera is in exactly one group, so it is one string rather than four more arrays. The rejected
+alternative, ids minted from a per-group base, needs no schema change but spends id space and
+hides the group.
+It is written CONDITIONALLY -- the v4 arrays are always present because a consumer indexes
+them by row, while a scalar has nothing to stay aligned with. Present exactly when a tier
+answered for that frame, which a one-group chain does on every frame; absence is the fact
+`missing_stages` carries. So the gate had to compare both readings: `mixed_frame.scn` gained
+a `global_id_group` directive and the other three goldens deliberately did not.
+
+---
+
 ## 2026-09-12 — the tracker reads the chain's params, on both planes
 
 `PlanNode` carried nothing a `track` slot said about its tracker, so a chain stating

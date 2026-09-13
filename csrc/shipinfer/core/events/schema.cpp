@@ -214,6 +214,13 @@ namespace shipinfer::events {
         append_words(out, missing_stages);
         out += ",\"reason\":";
         append_string(out, reason);
+        // OMITTED WHEN EMPTY, and AFTER `reason` because that is where the other plane
+        // appends it. Present exactly when a cross-camera tier answered for THIS frame, so
+        // absence is the frame-level fact `missing_stages` carries.
+        if (!global_id_group.empty()) {
+            out += ",\"global_id_group\":";
+            append_string(out, global_id_group);
+        }
         if (!extra.empty()) {
             out += ",\"extra\":{";
             bool first = true;
@@ -235,7 +242,8 @@ namespace shipinfer::events {
                           int64_t width, int64_t height, double fps, int64_t captured_ns,
                           int64_t captured_unix_ns,
                           const std::vector<std::string>& missing_stages,
-                          const std::string& reason, int64_t now_ns, int64_t now_unix_ns) {
+                          const std::string& reason, int64_t now_ns, int64_t now_unix_ns,
+                          const std::string& global_id_group) {
         using namespace std::chrono;
         PerceptionEvent event;
         event.camera_id = camera_id;
@@ -265,6 +273,7 @@ namespace shipinfer::events {
             captured_ns ? std::max<int64_t>(0, (monotonic - captured_ns) / 1000) : 0;
         event.missing_stages = missing_stages;
         event.reason = reason;
+        event.global_id_group = global_id_group;
         return event;
     }
 

@@ -114,7 +114,7 @@ elements:
       cameras: [cam-01, cam-02, cam-03, cam-04]
       sync_window_ms: 60
 
-  # One JSON object per line, schema v4. `path: "-"` writes to stdout, which is what a
+  # One JSON object per line, schema v5. `path: "-"` writes to stdout, which is what a
   # container with no volume wants.
   output:
     impl: jsonlines

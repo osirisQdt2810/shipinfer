@@ -12,6 +12,9 @@ captured_unix_ns 1700000000000000000
 emitted_unix_ns 1700000001000000000
 missing ship_segmenter
 reason timeout
+# The `mtmc` SLOT whose counter minted the ids above. Only this scenario names one, so the
+# gate compares both readings: the key present, and the key absent on the other three.
+global_id_group mtmc_north
 
 person cam0_7_0 0.5 10 20 30 40 track 3 confirmed global 11 emb 0.25 0.5
 # No track, no global id, no embedding: three nulls and an empty vector, which is the half
