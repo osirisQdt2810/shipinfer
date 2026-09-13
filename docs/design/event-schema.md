@@ -33,9 +33,11 @@ joins two cameras reads these, one that follows a single camera keeps reading th
 global id 7 and south's 7 are different objects wearing one number. `global_id_group` is the
 **slot** that answered, not its `group:` — a group is a placement label and two slots may
 share one, so naming it would give two identity spaces one name.
-**Written only when a group answered**, unlike the arrays above, which are always present:
-an array is indexed by row and a missing one would break the join, while this is a scalar,
-and every chain here has one group. Absence reads as "one identity space".
+**Written only when a slot answered for that frame**, unlike the arrays above, which are
+always present: an array is indexed by row and a missing one would break the join, while this
+is a scalar with nothing to stay aligned with. A chain that has a cross-camera tier writes it
+on every frame that tier associates — single-group or not — so absence means *this frame* got
+no cross-camera answer, the same fact `missing_stages` carries, and never "one group here".
 
 The module itself (`src/shipinfer/core/events/schema.py`) is stdlib-only so a consumer may
 copy it out wholesale; `TestTheSchemaIsPortable` enforces that.

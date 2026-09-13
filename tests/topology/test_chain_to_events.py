@@ -510,10 +510,18 @@ class TestTheRealStatefulTierWritesEvents:
 
         for event in events_in(path):
             assert event["schema_version"] == 5
-            # THE REAL ELEMENT, and what reaches the wire is its SLOT and not the chain's
-            # `group: quay` -- two slots may share a group, so the group would name two
-            # identity spaces at once, which is the thing this field exists to prevent.
-            assert event["global_id_group"] == SLOT, "the tier that answered names itself"
+            # ASSERTED AS A PAIR, never as "every frame names a slot": whether an instant
+            # closes is the timing question this docstring says is not pinned here, and a
+            # frame that missed one carries no ids AND no slot. What IS invariant is which
+            # name appears when one does -- the SLOT, not the chain's `group: quay`.
+            group = event.get("global_id_group")
+            assert group in (SLOT, None), "the tier that answered names itself"
+            if group is None:
+                assert all(
+                    identity is None
+                    for prefix in ("ship", "body")
+                    for identity in event[f"{prefix}_global_id_vec"]
+                ), "ids with no identity space named for them"
             for prefix in ("ship", "body"):
                 globals_ = event[f"{prefix}_global_id_vec"]
                 tracks = event[f"{prefix}_track_id_vec"]

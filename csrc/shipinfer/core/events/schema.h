@@ -1,7 +1,8 @@
 // The perception event — `src/shipinfer/core/events/schema.py`, key for key.
 //
-// Schema v4: per-object parallel arrays split by class, plus frame identity, geometry and
-// `missing_stages`, so a partial frame says so instead of reading as an empty complete one.
+// Schema v5: per-object parallel arrays split by class, plus frame identity, geometry,
+// `missing_stages` -- so a partial frame says so instead of reading as an empty complete one
+// -- and `global_id_group`, the identity space the frame's `global_id`s came from.
 // Why every v1 key keeps its name, type and people-only meaning (a deployed `motservice`
 // must need no rebuild): `docs/design/event-schema.md`.
 //
