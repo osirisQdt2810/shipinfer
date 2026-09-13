@@ -66,10 +66,10 @@ def _fatal_health(lines: list[str]) -> int:
     )
 
 
-#: A register entry with no divergence behind it. The real register is empty -- P6-D1/D2/D3
-#: were closed by converging the planes -- and the differ's accept path still has to be
-#: tested, so the two tests that exercise it bring their own entry and the mutation it
-#: explains. Testing the mechanism against a fabricated entry is what keeps those tests from
+#: A register entry with no divergence behind it. The real register holds ONE (`tracker_options`,
+#: whose two planes differ on which rows go null) and it explains no trace field, so the
+#: differ's accept path still has to be tested -- the two tests that exercise it bring their
+#: own entry and the mutation it explains. Testing the mechanism against a fabricated entry is what keeps those tests from
 #: needing a real divergence to survive.
 _SYNTHETIC = {
     "state_case": KnownDivergence(
@@ -435,13 +435,23 @@ class TestKnownDivergences:
             "on the wire value for one"
         )
 
-        # AND THE STEP IT MUST NOT GROW. Narrow on purpose: a cost matrix or an IoU cut in
-        # `shard.cpp` would be the re-derivation the 13 Sep ruling refuses, and the positive
-        # reads above would not notice it.
-        assert "iou" not in shard.lower(), (
-            "shard.cpp grew an IoU step. The ruling under CSRC-TRACKER-ATTRIBUTION is that "
-            "this lane maps by recorded provenance and must not re-derive it geometrically"
-        )
+        # doc: long the guard's two failure modes, each of which this exact test has had
+        # AND THE STEP IT MUST NOT GROW, across the whole lane rather than the one file it
+        # would live in -- "an absence asserted in one file is an absence nobody guards"
+        # (#261 r1). IN CODE AND AS A WORD: `iou` is a substring of `previous`, `obvious` and
+        # `various`, and these files are half prose, so a plain `in` test reddens the offline
+        # tier on a comment saying "grew an IoU step". Stripping comments is also what lets
+        # `associator.h` stay in the list while its prose names `attribution_iou`.
+        for path in sorted((ROOT / "csrc" / "shipinfer" / "pipeline" / "tracking").iterdir()):
+            if path.suffix not in (".h", ".cpp"):
+                continue
+            code = re.sub(
+                r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", path.read_text(), flags=re.S)
+            )
+            assert not re.search(r"(?<![A-Za-z])iou", code, re.I), (
+                f"{path.name} grew an IoU step. The ruling under CSRC-TRACKER-ATTRIBUTION is "
+                "that this lane maps by recorded provenance and must not re-derive it"
+            )
 
     def test_the_lanes_key_table_still_mirrors_bytetracks_struct(self) -> None:
         """The drift channel #259's review named, closed by #261.
