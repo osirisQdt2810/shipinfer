@@ -276,7 +276,8 @@ class ShipvisionMtmc(Element):
     """Cross-camera identity over ``shipvision.mtmc``, one group per element.
 
     Reads ``meta["tracks"]`` — the ``shipvision`` ``Track`` objects the ``track`` element
-    files — and ``meta["frame_hw"]``, and writes ``meta["global_ids"]``.
+    files — and ``meta["frame_hw"]``, and writes ``meta["global_ids"]`` and
+    ``meta["global_id_group"]``.
 
     **``meta["global_ids"]`` is a list, aligned with this item's ``meta["tracks"]``**, one
     entry per track, ``int`` or ``None``. That is the shape ``meta['tracks']`` has and
@@ -682,7 +683,9 @@ class ShipvisionMtmc(Element):
 
         Returns:
             The successor item: same tag, same caps, same payload, plus
-            ``meta["global_ids"]`` — one entry per track in ``meta["tracks"]``.
+            ``meta["global_ids"]`` — one entry per track in ``meta["tracks"]`` — and
+            ``meta["global_id_group"]``, this element's SLOT, so the event can say whose
+            counter minted them.
 
             A frame the tracker never answered for, and a frame that missed its instant for
             any of the barrier's reasons, come back with the same shape and ``mtmc`` in
@@ -759,7 +762,10 @@ class ShipvisionMtmc(Element):
         # Keyed, never positional: `results` covers the whole group in one flattened list and
         # this camera's rows are anywhere in it.
         global_ids = [outcome.results.get((camera_id, track.track_id)) for track in tracks]
-        return item.derive(global_ids=global_ids)
+        # WHICH IDENTITY SPACE ANSWERED, beside the ids and never without them. THE SLOT and
+        # not `_group`: a `group:` is a PLACEMENT label two slots may share, so naming it
+        # would give two identity spaces one name -- which is the confusion to remove.
+        return item.derive(global_ids=global_ids, global_id_group=self.name)
 
     def _capture_s(self, item: ChainItem) -> float:
         """When this frame was taken, in seconds, or a typed refusal.

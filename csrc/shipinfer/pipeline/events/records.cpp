@@ -173,7 +173,10 @@ namespace shipinfer::pipeline::events {
             // emits. `pipeline/runner.py:622` passes `result.reason` through verbatim, so a
             // Python shard publishes `evicted` where this one published `failed`, and a
             // consumer alarming on ADR-005's eviction signal saw nothing from a C++ shard.
-            to_string(reason));
+            to_string(reason),
+            // The two clocks stay DEFAULTED -- `0` is `build`'s "read it yourself", which is
+            // what production wants; only the parity gate injects them.
+            0, 0, inputs.global_id_group);
     }
 
 }  // namespace shipinfer::pipeline::events

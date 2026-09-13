@@ -192,7 +192,10 @@ namespace shipinfer {
                   //: roster -- "a defaulted roster would be a silent trapdoor with nobody to
                   //: justify it" -- and `routes_` false is exactly the semantics a defaulted
                   //: empty roster used to mean, so spelling it is the point (#258 r1).
-                  std::vector<std::string> roster, bool routes);
+                  std::vector<std::string> roster, bool routes,
+                  //: This slot's name, which is the identity space's name: two slots may
+                  //: share a `group:`, and that is a placement label rather than a counter.
+                  std::string slot);
 
       protected:
         size_t do_run(FrameState& state) override;
@@ -225,6 +228,9 @@ namespace shipinfer {
         //: that are every chain in this repository, and then the roster is not consulted at
         //: all -- see `do_run`.
         bool routes_ = false;
+        //: WHICH IDENTITY SPACE this stage's ids come from, published on the event so a
+        //: reader can tell north's 7 from south's 7. Filed only when this stage associated.
+        std::string slot_;
     };
 
     class ObjectStage : public ModelStage {

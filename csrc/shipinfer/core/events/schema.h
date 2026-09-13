@@ -23,9 +23,9 @@ namespace shipinfer::events {
     //: The `type` field every consumer switches on. Unchanged from v1 on purpose.
     inline const char* const kMessageType = "Det2MOT";
     //: 1 was `DetectionMOTFrameData`; 2 adds ships, timing and completeness; 3 the track id
-    //: and its state; 4 the cross-camera `global_id`. Additive, and bumped so a consumer can
-    //: branch on it instead of probing for a key.
-    constexpr int kSchemaVersion = 4;
+    //: and its state; 4 the cross-camera `global_id`; 5 which group minted it. Additive, and
+    //: bumped so a consumer can branch on it instead of probing for a key.
+    constexpr int kSchemaVersion = 5;
 
     // One detected object and everything the DAG learned about it. An optional is empty when
     // the stage that fills it did not run -- a person has no `ship_id` and never will, and a
@@ -75,6 +75,11 @@ namespace shipinfer::events {
         std::vector<std::string> missing_stages;
         //: `complete`, `timeout`, `failed` or `shutdown`.
         std::string reason = "complete";
+        //: WHICH IDENTITY SPACE minted this frame's `global_id`s (v5): the `mtmc` SLOT that
+        //: answered -- not its `group:`, which is a placement label two slots may share. One
+        //: string, not four more vectors, because a frame's camera is in exactly one group.
+        //: Empty when no cross-camera stage answered.
+        std::string global_id_group;
         //: Free-form additions a deployment needs and the schema should not grow a field for.
         //:
         //: A VECTOR of pairs, not a map, and for the reason `to_json` gives about every other
@@ -102,6 +107,6 @@ namespace shipinfer::events {
                           int64_t captured_unix_ns,
                           const std::vector<std::string>& missing_stages,
                           const std::string& reason, int64_t now_ns = 0,
-                          int64_t now_unix_ns = 0);
+                          int64_t now_unix_ns = 0, const std::string& global_id_group = "");
 
 }  // namespace shipinfer::events

@@ -34,7 +34,7 @@ MESSAGE_TYPE = "Det2MOT"
 #: track id and its state; 4 adds the cross-camera ``global_id``. Every step is additive, and
 #: the number is bumped rather than left alone precisely so a consumer can branch on it
 #: instead of probing for a key.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +128,11 @@ class PerceptionEvent:
     #: ``pipeline/runner.py``. It used to say ``failed``, which nothing emits -- and the C++
     #: port read this line and wrote it for two of the five (fixed with P5-A).
     reason: str = "complete"
+    #: WHICH IDENTITY SPACE minted this frame's ``global_id``s (v5): the ``mtmc`` SLOT that
+    #: answered -- not its ``group:``, which is a placement label two slots may share. One
+    #: string, not four more vectors, because a frame's camera is in exactly one group.
+    #: ``None`` when no cross-camera stage answered.
+    global_id_group: str | None = None
     schema_version: int = SCHEMA_VERSION
     type: str = MESSAGE_TYPE
     #: Free-form additions a deployment needs and the schema should not grow a field for.
@@ -150,6 +155,7 @@ class PerceptionEvent:
         captured_unix_ns: int = 0,
         missing_stages: Sequence[str] = (),
         reason: str = "complete",
+        global_id_group: str | None = None,
     ) -> PerceptionEvent:
         """Stamp an event with both clocks read at the moment of emission.
 
@@ -170,6 +176,7 @@ class PerceptionEvent:
             latency_us=max(0, (now_ns - captured_ns) // 1000) if captured_ns else 0,
             missing_stages=tuple(missing_stages),
             reason=reason,
+            global_id_group=global_id_group,
         )
 
     # -- views -------------------------------------------------------------------------
@@ -251,6 +258,11 @@ class PerceptionEvent:
                 "reason": self.reason,
             }
         )
+        # OMITTED WHEN ABSENT, not written as null: every chain here has one group, so a key
+        # on every event of every deployment would be bytes on the broker for a fact only a
+        # two-group fleet has. A consumer reads its absence as "one identity space".
+        if self.global_id_group is not None:
+            payload["global_id_group"] = self.global_id_group
         if self.extra:
             payload["extra"] = dict(self.extra)
         return payload

@@ -94,6 +94,13 @@ namespace shipinfer {
             std::lock_guard<std::mutex> lock(mutex_);
             batches_[batch.name] = std::move(batch);
         }
+        // WHICH GROUP ANSWERED, from the `mtmc` stage that associated this frame. Under the
+        // same lock as the batches and for the same reason: the sweeper captures while the
+        // owning worker may be writing.
+        void note_global_id_group(std::string group) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            global_id_group_ = std::move(group);
+        }
         // A crop set (or any per-object device tensor) under its name, for the stages that read
         // it.
         void attach_payload(DevicePayload payload) {
@@ -168,6 +175,7 @@ namespace shipinfer {
             std::lock_guard<std::mutex> lock(mutex_);
             inputs.detections = detections_;
             inputs.batches = batches_;
+            inputs.global_id_group = global_id_group_;
             return inputs;
         }
 
@@ -220,9 +228,10 @@ namespace shipinfer {
         int priority_ = 2;
         int64_t deadline_ns_ = 0;
         std::map<std::string, DevicePayload> payloads_;  // the owning worker's, never captured
-        mutable std::mutex mutex_;  // guards the two containers below, and only them
+        mutable std::mutex mutex_;  // guards the three members below, and only them
         std::vector<Detection> detections_;
         std::map<std::string, ObjectBatch> batches_;
+        std::string global_id_group_;
         std::shared_ptr<DeviceBuffer> image_;
         DeviceSurface surface_;
     };
