@@ -481,8 +481,6 @@ class ShipvisionMtmc(Element):
                 accept; or a ``calibration`` entry is not a homography. All of them stop the
                 deploy rather than surfacing identically on every frame from a worker thread.
         """
-        mtmc = load_mtmc()
-        types = load_types()
         # WHETHER THERE IS ANYWHERE TO ROUTE TO. A roster is the FLEET's placement hint, so
         # with one group it is not a filter and `camera_added` warns and associates. Two in
         # ONE process both taking every camera is two contradictory sets of ids for one
@@ -492,12 +490,17 @@ class ShipvisionMtmc(Element):
         # exactly as `stages.cpp` does. `_check_every_group_is_rostered` refuses this chain at
         # load; a hand-built element would otherwise claim EVERY camera where the other plane
         # claims none, silently.
+        # BEFORE THE BRIDGE LOADS, because it is a question about the chain file and not about
+        # the library: asked after `load_mtmc()` it could only be tested where the submodule
+        # is checked out, which is not what CI has.
         if self._routes and not self._roster_set:
             raise ConfigurationError(
                 f"mtmc element {self.name!r} shares this process with another cross-camera "
                 f"group and declares no `cameras:`. An unrostered group means every camera, "
                 f"so it would take the other group's too and give one object two global ids"
             )
+        mtmc = load_mtmc()
+        types = load_types()
         self._TrackingError = load_errors().TrackingError
         self._CameraTracks = mtmc.CameraTracks
         self._FrameTrackCluster = mtmc.FrameTrackCluster
@@ -927,14 +930,25 @@ class ShipvisionMtmc(Element):
         if not silent:
             return
         self._warned_silent = True
+        # AND WHAT THIS GROUP TURNED AWAY, in the same line. `silent` names the cameras the
+        # roster PROMISED and never got, which on a routing mistake is the declared four while
+        # the twelve that were dropped go unnamed -- so the one set points away from the cause
+        # and the other points at it. Printed together on the other plane too (`cli/bench.cpp`).
+        taken = sorted(self._barrier.cameras_not_mine)
         _LOG.warning(
             "mtmc element %r: an instant closed on its window while %s in `params: cameras:` "
             "has never sent a frame. A declared camera is waited for whether it exists or not, "
             "so a roster that names cameras this fleet does not have makes a complete instant "
-            "unreachable: %s",
+            "unreachable: %s.%s",
             self.name,
             "camera(s) " + ", ".join(silent),
             "either correct the roster or remove it and let the group close on evidence",
+            (
+                f" This group also passed over {', '.join(taken)} as another group's, which is"
+                " where to look if the roster is the half that is wrong"
+                if taken
+                else ""
+            ),
         )
 
     def _note_cameras(self) -> None:

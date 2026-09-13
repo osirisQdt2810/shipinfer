@@ -1069,6 +1069,48 @@ class TestTheCameraLifecycle:
             built.close()
 
 
+class TestARosterIsRequiredOfASlotThatMustRoute:
+    """The chain-file half of the routing guard, and NOT `@needs_shipvision`.
+
+    `_do_open` asks this before `load_mtmc()`, because it is a question about the chain and
+    not about the library — so it is answerable on a runner with no submodule, which is what
+    CI has and where the rest of this file skips.
+    """
+
+    def test_a_slot_that_must_route_and_names_no_cameras_is_refused(self) -> None:
+        """What lets `_do_process` spell its test exactly as `stages.cpp` does.
+
+        The Python test used to carry a third term, `and self._roster_set`, that the C++ twin
+        has no trace of: an unrostered slot there claims NO camera while here it claimed EVERY
+        one. `chain.py::_check_every_group_is_rostered` refuses such a chain at load, so this
+        is unreachable through `Topology.from_spec` -- and a silent divergence is worth a loud
+        refusal rather than a conjunct that hides it.
+        """
+        element = create_element(ElementKind.MTMC, "shipvision", "mtmc-north", {})
+
+        with pytest.raises(ConfigurationError, match="declares no `cameras:`"):
+            element.open(ElementContext(workers=4, camera_groups=2))
+
+    def test_one_group_may_still_name_no_cameras(self) -> None:
+        """The other half, and every chain in this repository: with nowhere to route to, a
+        roster is the fleet's placement hint and an absent one is not a fault.
+
+        Written as "not THIS refusal" rather than "opens cleanly", so it runs on a checkout
+        with no submodule too: without one `load_mtmc()` refuses a line later, and that is a
+        different complaint about a different thing.
+        """
+        element = create_element(ElementKind.MTMC, "shipvision", "mtmc", {})
+        try:
+            element.open(ElementContext(workers=4, camera_groups=1))
+        except ConfigurationError as exc:
+            assert "declares no `cameras:`" not in str(exc), (
+                "the roster guard fired for a lone group, where a roster is the fleet's "
+                "placement hint and never a requirement"
+            )
+        else:
+            element.close()
+
+
 @needs_shipvision
 class TestTwoGroupsInOneProcessRouteByRoster:
     """`MTMC-PYTHON-ROUTES-BY-SHARD-ONLY`: the C++ plane routed and this one could not.
@@ -1190,27 +1232,6 @@ class TestTwoGroupsInOneProcessRouteByRoster:
             assert element.barrier.silent_cameras == frozenset({"cam-north"})
         finally:
             element.close()
-
-    def test_a_slot_that_must_route_and_names_no_cameras_is_refused_at_open(self) -> None:
-        """What lets `_do_process` spell its test exactly as `stages.cpp` does.
-
-        The Python test used to carry a third term, `and self._roster_set`, that the C++ twin
-        has no trace of: an unrostered slot there claims NO camera while here it claimed EVERY
-        one. `chain.py::_check_every_group_is_rostered` refuses such a chain at load, so this
-        is unreachable through `Topology.from_spec` -- and a silent divergence is worth a loud
-        refusal rather than a conjunct that hides it.
-        """
-        element = create_element(ElementKind.MTMC, "shipvision", "mtmc-north", {})
-
-        with pytest.raises(ConfigurationError, match="declares no `cameras:`"):
-            element.open(ElementContext(workers=4, camera_groups=2))
-
-    def test_one_group_may_still_name_no_cameras(self) -> None:
-        """The other half, and every chain in this repository: with nowhere to route to a
-        roster is the fleet's placement hint and an absent one is not a fault."""
-        element = create_element(ElementKind.MTMC, "shipvision", "mtmc", {})
-        element.open(ElementContext(workers=4, camera_groups=1))
-        element.close()
 
     def test_the_ownership_test_comes_before_the_frame_is_read(self) -> None:
         """The order `stages.cpp::do_run` has, and asking second was three wrongs.
@@ -1339,6 +1360,57 @@ class TestARosterNobodyAnswersIsSaidOutLoud:
         assert "cam-ghost" in warned[0], "it names the camera"
         assert "cam-a" not in warned[0], "and only the silent one"
         assert "complete instant" in warned[0], "and says what the fault costs"
+
+    def test_it_also_names_what_this_group_turned_away(self, caplog, monkeypatch) -> None:
+        """The half that points AT the cause rather than away from it.
+
+        `silent_cameras` names what the roster promised and never got, so on a routing mistake
+        it lists the declared cameras while the ones actually dropped go unnamed -- which is
+        the wrong half of a two-group fault. The other plane prints both per slot
+        (`cli/bench.cpp`); this line carries both too.
+        """
+        monkeypatch.setattr(mtmc_module, "_SILENT_AFTER_WINDOW_CLOSES", 1)
+        with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
+            element = opened(
+                {"group": "north", "cameras": ["cam-a", "cam-ghost"], "sync_window_ms": 20.0},
+                camera_groups=2,
+            )
+            try:
+                element.camera_added("cam-a")
+                element.camera_added("cam-ghost")
+                # A frame from the OTHER group's camera, so this slot passes it over and
+                # remembers it -- then its own camera's frames close instants on the window.
+                element.process(item("cam-south", 0, tracks=[]))
+                for frame in range(3):
+                    element.process(item("cam-a", frame, instant=frame * 1.0, tracks=[]))
+            finally:
+                element.close()
+
+        warned = self._warnings(caplog)
+        assert len(warned) == 1, warned
+        assert "cam-ghost" in warned[0], "the camera that was promised and never sent"
+        assert "cam-south" in warned[0], "AND the one this group turned away"
+        assert "another group" in warned[0], "said as what it is, not as a second fault"
+
+    def test_a_one_group_run_is_told_nothing_about_cameras_it_turned_away(
+        self, caplog, monkeypatch
+    ) -> None:
+        """Because it turned none away. A clause that appeared regardless would be noise on
+        every chain in this repository."""
+        monkeypatch.setattr(mtmc_module, "_SILENT_AFTER_WINDOW_CLOSES", 1)
+        with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
+            element = self.built(["cam-a", "cam-ghost"])
+            try:
+                element.camera_added("cam-a")
+                element.camera_added("cam-ghost")
+                for frame in range(3):
+                    element.process(item("cam-a", frame, instant=frame * 1.0, tracks=[]))
+            finally:
+                element.close()
+
+        warned = self._warnings(caplog)
+        assert len(warned) == 1, warned
+        assert "passed over" not in warned[0], "nothing was, so the line does not say it was"
 
     def test_a_healthy_run_asks_the_barrier_once_per_window_and_not_once_per_frame(
         self,
