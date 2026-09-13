@@ -47,15 +47,6 @@ namespace shipinfer::tracking {
                               value + "'");
         }
 
-        // doc: long the key table, and why an unknown key is refused rather than dropped
-        // THE LANE OWNS ITS KEYS, which is why the conversion is here and not in the plan
-        // reader: the reader would have to drop what it does not recognise, and a dropped
-        // `max_age` is a chain that loads, reports `track` as having run, and emits different
-        // ids from the other plane -- exactly the divergence this closes.
-        //
-        // REFUSED, not ignored, mirroring `TrackerShard.__init__` on the other plane: a
-        // `max_ago: 90` typo is a tracker running 30 with nothing said, and the failure is
-        // invisible because every frame still gets an id.
         // doc: long why an algorithm this lane has not is refused rather than approximated
         // THE LANE HAS ONE TRACKER, and says so. `impl: shipvision` is the registry key on
         // both planes, but the ALGORITHM inside it is the library's: the other plane resolves
@@ -84,6 +75,15 @@ namespace shipinfer::tracking {
             }
         }
 
+        // doc: long the key table, and why an unknown key is refused rather than dropped
+        // THE LANE OWNS ITS KEYS, which is why the conversion is here and not in the plan
+        // reader: the reader would have to drop what it does not recognise, and a dropped
+        // `max_age` is a chain that loads, reports `track` as having run, and emits different
+        // ids from the other plane -- exactly the divergence this closes.
+        //
+        // REFUSED, not ignored, mirroring `TrackerShard.__init__` on the other plane: a
+        // `max_ago: 90` typo is a tracker running 30 with nothing said, and the failure is
+        // invisible because every frame still gets an id.
         shipvision::mot::ByteTrackTracker::Options byte_track_options(
             const TrackerOptions& options) {
             // THE ALGORITHM FIRST: a chain naming another tracker is not one whose keys are
@@ -139,9 +139,10 @@ namespace shipinfer::tracking {
             TrackerShard shard_;
         };
 
-        // `impl: shipvision` in the chain, which is the name the plan carries. The algorithm
-        // inside it (`params: algorithm: bytetrack`) is the only one this lane has, so the plan
-        // writer does not emit it and this does not read it.
+        // `impl: shipvision` in the chain, which is the name the plan carries. The ALGORITHM
+        // inside it is carried too and is refused above when this lane does not have it --
+        // this comment used to say the writer did not emit it and this did not read it, which
+        // is the mechanism #261 replaced and the first thing anyone porting BoT-SORT reads.
         const AssociatorRegistrar kShipvision("shipvision", [](const TrackerOptions& options) {
             return std::make_shared<ShardAssociator>(options);
         });

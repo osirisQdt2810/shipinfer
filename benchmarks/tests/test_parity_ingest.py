@@ -429,11 +429,11 @@ class TestKnownDivergences:
         text = text[text.index("class ByteTrackTracker") :]
         body = text[text.index("struct Options") :]
         body = body[: body.index("};")]
-        # ANY TYPE, not `float|int|bool`. Enumerating the types this test knows would give it
-        # the PR's own failure mode: a `size_t` or a `std::string` added upstream is forwarded
-        # by the other plane and refused at load here, while this stays green because the
-        # field never entered the set. Doc comments start `///` and cannot be read as one.
-        declared = set(re.findall(r"^\s*[A-Za-z_][\w:]*\s+(\w+)\s*(?:=|;)", body, re.M))
+        # NOT MATCHING THE TYPE AT ALL -- the third attempt, and the first that is not a list
+        # of types this test happens to know: `float|int|bool` missed `size_t`, then one token
+        # of `[\w:]*` missed `unsigned int` and `std::vector<int>`. Take the identifier that
+        # TERMINATES the declaration; `void reset();` is skipped because `)` breaks the match.
+        declared = set(re.findall(r"(\w+)\s*(?:=[^;]*)?;", body))
         assert declared, f"no fields parsed out of {header}; the struct's shape changed"
 
         lane = (
