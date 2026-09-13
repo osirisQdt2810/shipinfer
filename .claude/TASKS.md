@@ -3959,6 +3959,14 @@ hook down, for when the operator asked to see something before it is executed.
       a value no production caller produces. There is a test for the ORDER now, and a control
       asserting the old one refuses -- so the order is a decision rather than an accident of
       how the loop happens to be written.
+      ROUND 3 FOUND THE MIXED REPOSITORY AGAIN, by a third route: the copy sat INSIDE the
+      per-model loop, and `_ENGINE_PAIRS` puts the two that install cleanly first and the two
+      that most often fail last -- so an abort on the embedders left the repository half fp16
+      and half fp32, permanently, from a run the operator asked to measure. Worse than r1's,
+      whose mixed state came from a run that measured nothing of ours.
+      SO IT IS TWO PASSES: the loop COLLECTS what it has earned and every raise in it is a
+      reason to write nothing at all; the copies happen after all four models clear. "All four
+      or none" is the invariant `--precision` already claims, and now the one it keeps.
 
 - [x] BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE · **MERGED as #218 (squash `1054479`, 10 Sep),
       APPROVE on round 3 after two BLOCKING rounds.** Round 2's five findings, and the first is a

@@ -531,6 +531,9 @@ class BenchConfig:
             return
         #: Which pairs the baseline has a stake in. Anything else is our side's attribution.
         cross_system = ("ship_detector", "ship_segmenter")
+        #: Installs this call has earned but not made. Every raise in the loop is a reason to
+        #: write nothing at all, so the copies wait until all four models have cleared it.
+        pending: list[tuple[str, Path, Path]] = []
         for model, attribute in self._ENGINE_PAIRS:
             if system == "baseline" and model not in cross_system:
                 continue
@@ -593,40 +596,25 @@ class BenchConfig:
             if _digest(flat) == _digest(plan):
                 continue
             if self.precision is not None and system != "baseline":
-                # doc: long why a named precision INSTALLS rather than refuses
-                # THE SELECTION HALF (`BENCH-PRECISION-SELECTS-NO-PLAN`). `--precision` named
-                # the BASELINE's flat engine and nothing else: our side loaded
-                # `<model>/1/model.plan` whatever precision it held, so the flag decided which
-                # file the digest was compared against and never which file ran.
+                # doc: long why this collects, why it installs at all, and who is excluded
+                # COLLECTED, NOT COPIED: three of this loop's raises sit after models that
+                # would already be written, and `_ENGINE_PAIRS` puts the two that install
+                # cleanly FIRST -- so an abort on the embedders left the repository half fp16
+                # and half fp32, permanently, from a run the operator asked to measure
+                # (#262 r3). All four models or none, which `--precision` already claims.
                 #
-                # INSTALLING rather than resolving the plan path by precision, which was the
-                # other candidate: `parameters.engine_file` is ONE value read off
-                # `config.yaml`, so a precision-aware path needs a config per precision or an
-                # override that teaches the REPOSITORY layer about precision -- and then
-                # `serve` loads a different file from `bench` on one repository, which is the
-                # divergence this item is about. This is also what the refusal below already
-                # told the operator to do by hand: `build_engines.py` "also installs the plan".
+                # WHY INSTALL rather than resolve the plan path by precision:
+                # `parameters.engine_file` is ONE value off `config.yaml`, so a
+                # precision-aware path needs a config per precision or an override teaching
+                # the REPOSITORY layer about precision -- and then `serve` loads a different
+                # file from `bench` on one repository, the divergence this closes. It is also
+                # what the refusal below already told the operator to run by hand.
                 #
-                # THE COST, stated: the bench writes into the model repository before
-                # measuring. `--install` is the documented workflow and does this today.
-                #
-                # NEVER ON A BASELINE-ONLY RUN. The scoping above skips only the embedder
-                # PAIR, so `--systems baseline` fell through here and rewrote the detector and
-                # segmenter while leaving both embedders -- a MIXED repository, on a run where
-                # nothing of ours loads a plan. This method already holds that acting on an
-                # artefact such a run does not load is a defect; overwriting one is worse.
-                print(
-                    f"{model}: installing {flat.name} as "
-                    f"{plan.relative_to(repository.parent)} for --precision "
-                    f"{self.precision}",
-                    file=sys.stderr,
-                )
-                # THROUGH A TEMPORARY AND A RENAME: `write_bytes` truncates first, so a
-                # Ctrl-C mid-copy leaves a truncated plan and no original. The parent exists
-                # by construction -- the branch above raised unless `plan.is_file()`.
-                staged = plan.with_name(plan.name + ".installing")
-                staged.write_bytes(flat.read_bytes())
-                staged.replace(plan)
+                # NEVER ON A BASELINE-ONLY RUN: the scoping above skips only the embedder
+                # PAIR, so `--systems baseline` fell through and rewrote the detector and
+                # segmenter while leaving both embedders, on a run where nothing of ours
+                # loads a plan (#262 r1).
+                pending.append((model, flat, plan))
                 continue
             raise RuntimeError(
                 f"{model}: the baseline loads {flat.name} and the server loads "
@@ -634,6 +622,22 @@ class BenchConfig:
                 f"A comparison across two engines measures the engines. Rebuild both "
                 f"from one ONNX with `python scripts/build_engines.py --force`."
             )
+
+        # THE WRITE, once every model has cleared the loop. A partial install is not a weaker
+        # version of "both sides load one precision" -- it is the mixed repository r1 called a
+        # defect. THE COST: this writes into the model repository before measuring, which is
+        # what `build_engines.py --install` does today.
+        for model, flat, plan in pending:
+            print(
+                f"{model}: installing {flat.name} as {plan.relative_to(repository.parent)} "
+                f"for --precision {self.precision}",
+                file=sys.stderr,
+            )
+            # STAGED AND RENAMED: `write_bytes` truncates first, so a Ctrl-C would leave a
+            # truncated plan and no original.
+            staged = plan.with_name(plan.name + ".installing")
+            staged.write_bytes(flat.read_bytes())
+            staged.replace(plan)
 
     # -- reporting ----------------------------------------------------------------------
 

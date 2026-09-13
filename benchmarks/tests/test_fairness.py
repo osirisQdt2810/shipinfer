@@ -306,6 +306,40 @@ class TestBothSidesLoadTheSameEngine:
         with pytest.raises(RuntimeError, match="measures the engines"):
             config.require_same_engines("baseline")
 
+    def test_an_abort_partway_installs_nothing_at_all(self, tmp_path: Path) -> None:
+        """ALL FOUR MODELS OR NONE, which is the invariant `--precision` already claims.
+
+        `_ENGINE_PAIRS` puts the two that install cleanly FIRST, so a copy inside the loop
+        left the repository half fp16 and half fp32 -- permanently, from a run the operator
+        asked to measure and which then aborted (#262 r3). The fixture is this file's own
+        `_repository_without_embedder_plans`, "the state of the box immediately after a build".
+        """
+        engine = tmp_path / "yolo26n_fp32.engine"
+        engine.write_bytes(b"PLAN-FP16")
+        repository = self._repository_without_embedder_plans(tmp_path, b"PLAN-FP32-INSTALLED")
+        config = BenchConfig(
+            det_engine=engine,
+            seg_engine=engine,
+            emb_engine=engine,
+            model_repository=repository,
+            precision="fp16",
+        )
+        installable = {
+            model: (repository / model / "1" / "model.plan")
+            for model in ("ship_detector", "ship_segmenter")
+        }
+
+        # The embedders have no plan to hold the precision to, so the loop raises -- AFTER the
+        # two above have already cleared it.
+        with pytest.raises(RuntimeError, match="no plan at"):
+            config.require_same_engines("shipinfer")
+
+        for model, plan in installable.items():
+            assert plan.read_bytes() == b"PLAN-FP32-INSTALLED", (
+                f"{model} was installed before the run aborted, leaving a repository that is "
+                f"half one precision and half the other"
+            )
+
     def test_a_baseline_only_run_installs_nothing(self, tmp_path: Path) -> None:
         """`--systems baseline` loads no plan of ours, so it may not rewrite one.
 
