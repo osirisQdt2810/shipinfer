@@ -111,10 +111,9 @@ namespace {
         tag.camera_id = camera;
         tag.frame_id = frame_id;
         tag.captured_ns = 1'000'000'000LL * frame_id;
-        // BOTH STAMPS, the way `ingest/frame.h` sets them: the instant is keyed on the
-        // CAPTURE (wall) clock, because the other plane keys the same barrier on
-        // `captured_unix_ns` and two planes bucketing one clip differently is two different
-        // sets of global ids.
+        // BOTH STAMPS, the way `ingest/frame.h` sets them. The instant is keyed on the
+        // MONOTONIC one (ADR-022) and the other plane keys on the same field; the wall pair
+        // is what the arrival-lag diagnostic reads.
         // OVERRIDABLE, because the arrival-lag tests need a stamp near TODAY: this fixed
         // 2023 epoch is ~2 years of microseconds from now, which saturates at `UINT32_MAX`
         // and would make those tests pass for the wrong reason.
@@ -457,7 +456,8 @@ namespace {
         FrameTag tag;
         tag.camera_id = "cam0";
         tag.frame_id = 1;
-        tag.captured_ns = 1'000'000'000LL;  // the STEADY stamp is set; the capture one is not
+        tag.captured_unix_ns = 1'700'000'000'000'000'000LL;  // the WALL stamp is set
+        // ... and the KEY is not, which is the mis-wiring: `captured_ns` stays 0.
         auto state = std::make_unique<FrameState>(tag, 1080, 1920, 20.0f);
         state->set_detections({box(0, 0, 0)});
         state->set_detected(true);
