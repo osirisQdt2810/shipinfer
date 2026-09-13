@@ -3588,10 +3588,13 @@ hook down, for when the operator asked to see something before it is executed.
       The other candidate -- ids minted from a per-group base -- was rejected for the reason
       the item states: it spends id space and HIDES the group, so a reader still cannot name
       the space it is holding.
-      WRITTEN ONLY WHEN A GROUP ANSWERED, unlike the v4 arrays, which are always present: an
-      array is indexed by row and a missing one breaks the join, while this is a scalar and
-      every chain here has one group -- a key on 1000 events a second would be broker bytes
-      for a fact they do not have. Absence reads as "one identity space".
+      WRITTEN ONLY WHEN A SLOT ANSWERED FOR THAT FRAME, unlike the v4 arrays, which are always
+      present: an array is indexed by row and a missing one breaks the join, while this is a
+      scalar with nothing to stay aligned with. NOT a per-deployment saving -- a one-group
+      chain writes it on every frame its slot associates -- so absence is the frame-level fact
+      `missing_stages` carries. The "every chain here has one group, so the key costs bytes
+      for nothing" reasoning was wrong and is recorded here because it was written into four
+      files before a review round caught it.
       EVIDENCE: `mixed_frame.scn` names a slot and the other three event goldens do not, so
       the byte gate compares BOTH readings -- with the directive ignored on the C++ side it
       reports `differs at column 854`. The end-to-end is

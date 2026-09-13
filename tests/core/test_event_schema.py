@@ -365,13 +365,13 @@ class TestTheIdentitySpaceIsAnExtension:
         assert set(payload) >= V4_KEYS, f"v5 dropped: {sorted(V4_KEYS - set(payload))}"
         assert set(payload) - V4_KEYS == {"global_id_group"}
 
-    def test_a_fleet_with_one_group_carries_no_such_key_at_all(self):
+    def test_a_frame_no_tier_answered_for_carries_no_such_key(self):
         """Omitted, where every v4 array is present-and-null — and the difference is real.
 
         An array is indexed by row, so a missing one would break the join every consumer
-        does. This is a scalar with nothing to stay aligned with, and every chain in this
-        repository has one group: writing it on all 1000 events a second would be broker
-        bytes for a fact only a two-group fleet has. Absence reads as "one identity space".
+        does. This is a scalar with nothing to stay aligned with. NOT a per-deployment
+        saving: a one-group chain writes it on every frame its slot associates, so absence
+        means *this frame* got no cross-camera answer — a missed instant, or no tier at all.
         """
         assert set(self.identified().as_dict()) == V4_KEYS
 

@@ -215,8 +215,8 @@ namespace shipinfer::events {
         out += ",\"reason\":";
         append_string(out, reason);
         // OMITTED WHEN EMPTY, and AFTER `reason` because that is where the other plane
-        // appends it: a key on every event would be broker bytes for a fact only a
-        // two-group fleet has. Absence reads as "one identity space".
+        // appends it. Present exactly when a cross-camera tier answered for THIS frame, so
+        // absence is the frame-level fact `missing_stages` carries.
         if (!global_id_group.empty()) {
             out += ",\"global_id_group\":";
             append_string(out, global_id_group);

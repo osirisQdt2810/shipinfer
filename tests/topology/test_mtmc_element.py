@@ -665,7 +665,10 @@ class TestTheSlotTravelsWithTheIdsItMinted:
         return built.process(item("cam-a", 0, tracks=[track(1, "cam-a", 0, TALL, SAME_A)]))
 
     def test_the_slot_is_what_reaches_the_meta(self) -> None:
-        built = opened(name="mtmc-south")
+        """A `group:` that DIFFERS from the slot, or this passes on either answer: an
+        undeclared group falls back to the slot name (`parse_group`), so the two are equal
+        and a test built that way discriminates nothing."""
+        built = opened({"group": "quay"}, name="mtmc-south")
         try:
             emitted = self.emitted(built)
         finally:
@@ -673,6 +676,7 @@ class TestTheSlotTravelsWithTheIdsItMinted:
 
         assert emitted.meta["global_id_group"] == "mtmc-south"
         assert emitted.meta["global_ids"], "a name with no ids names nothing"
+        assert built.group == "quay", "and the declared group is untouched"
 
     def test_the_declared_group_is_not_what_reaches_it(self) -> None:
         """A ``group:`` is a PLACEMENT label and two slots may share one (`test_chain.py`:

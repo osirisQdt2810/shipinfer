@@ -15,10 +15,11 @@ ON THE EVENT and not on `ObjectRecord`: the wire format is per-class vectors and
 camera is in exactly one group, so it is one string rather than four more arrays. The rejected
 alternative, ids minted from a per-group base, needs no schema change but spends id space and
 hides the group.
-It is also the first key here written CONDITIONALLY -- the v4 arrays are always present
-because a consumer indexes them by row, while a scalar has nothing to stay aligned with and
-every chain here has one group. So the gate had to compare both readings: `mixed_frame.scn`
-gained a `global_id_group` directive and the other three goldens deliberately did not.
+It is written CONDITIONALLY -- the v4 arrays are always present because a consumer indexes
+them by row, while a scalar has nothing to stay aligned with. Present exactly when a tier
+answered for that frame, which a one-group chain does on every frame; absence is the fact
+`missing_stages` carries. So the gate had to compare both readings: `mixed_frame.scn` gained
+a `global_id_group` directive and the other three goldens deliberately did not.
 
 ---
 
