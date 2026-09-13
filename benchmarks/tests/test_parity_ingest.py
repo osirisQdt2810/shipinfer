@@ -397,12 +397,13 @@ class TestKnownDivergences:
                 f"nothing reproduces is a suppression, not a decision"
             )
 
-    def test_the_cpp_plane_has_no_attribution_step(self) -> None:
+    def test_each_plane_attributes_a_row_its_own_way(self) -> None:
         """The `tracker_options` entry's reproducing case, read off both trees.
 
-        NARROWED twice: `options`/`regression_reset` crossed in #259 and `algorithm` became a
-        loud refusal in #261, so what is left is the one knob whose absence is a MISSING STEP
-        rather than a missing line -- this plane has nothing to tune.
+        NARROWED twice (#259, #261) and then CORRECTED: the entry used to say this lane had no
+        attribution step, and it has one -- an exact one. What is left is two different rules
+        for which rows go null, so the guards below are positive reads of the step that exists
+        plus one narrow negative for the step that must not be built.
         """
         python = (ROOT / "src" / "shipinfer" / "topology" / "elements" / "track.py").read_text()
         assert 'self.params.get("attribution_iou"' in python, (
@@ -418,18 +419,29 @@ class TestKnownDivergences:
             "delete this test with it"
         )
 
-        # AND NO STEP TO FEED IT, checked across every file one could land in rather than
-        # `shard.h` alone -- an absence asserted in one file is an absence nobody guards
-        # (#261 r1). `associator.h` is excluded: it MENTIONS attribution today, in the comment
-        # saying this plane has none.
-        for path in (
-            ROOT / "csrc" / "shipinfer" / "pipeline" / "tracking" / "shard.h",
-            ROOT / "csrc" / "shipinfer" / "pipeline" / "tracking" / "bytetrack.cpp",
-            ROOT / "csrc" / "shipinfer" / "pipeline" / "graph" / "stages.cpp",
-        ):
-            assert (
-                "attribution" not in path.read_text().lower()
-            ), f"{path.name} grew an attribution step; the divergence has changed shape"
+        # THE STEP THIS LANE HAS, read positively. An absence-grep was the wrong guard and
+        # passed while the step existed: its file list named `shard.h` and the mapping is in
+        # `shard.cpp`. These two lines ARE the entry's C++ half.
+        shard = (
+            ROOT / "csrc" / "shipinfer" / "pipeline" / "tracking" / "shard.cpp"
+        ).read_text()
+        assert "track.last_match" in shard, (
+            "shard.cpp no longer maps tracks onto rows by `last_match`; the tracker_options "
+            "entry describes a divergence that has changed shape"
+        )
+        stages = (ROOT / "csrc" / "shipinfer" / "pipeline" / "graph" / "stages.cpp").read_text()
+        assert "if (ids[row] < 0) continue;" in stages, (
+            "stages.cpp no longer drops an unclaimed row, so the two planes no longer agree "
+            "on the wire value for one"
+        )
+
+        # AND THE STEP IT MUST NOT GROW. Narrow on purpose: a cost matrix or an IoU cut in
+        # `shard.cpp` would be the re-derivation the 13 Sep ruling refuses, and the positive
+        # reads above would not notice it.
+        assert "iou" not in shard.lower(), (
+            "shard.cpp grew an IoU step. The ruling under CSRC-TRACKER-ATTRIBUTION is that "
+            "this lane maps by recorded provenance and must not re-derive it geometrically"
+        )
 
     def test_the_lanes_key_table_still_mirrors_bytetracks_struct(self) -> None:
         """The drift channel #259's review named, closed by #261.
