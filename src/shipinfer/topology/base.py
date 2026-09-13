@@ -342,6 +342,7 @@ class CameraGroup:
 
 
 @dataclass(frozen=True, slots=True)
+# doc: long every field a runner resolves for an element, each with the reason it exists
 class ElementContext:
     """Everything the surrounding runner tells an element at :meth:`Element.open`.
 
@@ -369,13 +370,15 @@ class ElementContext:
             process**. ``workers`` alone is not enough: each element counts only its own
             waiters, so two ``mtmc`` slots would each admit ``workers - 1`` and park every
             worker between them.
-        camera_groups: how many distinct cross-camera groups this PROCESS holds, counted
-            through :meth:`Element.camera_group` with no test of what kind an element is --
-            the same collection ``runners/fleet.py::_camera_groups`` makes, for the same
-            reason. More than one means a group's element must route: two of them taking
-            every camera the process sees would issue two contradictory sets of global ids
-            for one object. ``1`` is every chain here and the fleet's every shard, and there
-            the roster is a placement hint rather than a filter.
+        camera_groups: how many distinct cross-camera groups this PROCESS holds, from
+            :func:`~shipinfer.topology.chain.camera_groups` -- the same collection the fleet
+            places by, so there is one implementation and one refusal. More than one means a
+            group's element must route: two of them taking every camera would issue two
+            contradictory sets of global ids for one object. ``1`` is every chain in this
+            repository, and then a roster is a placement hint rather than a filter. NOT "one
+            per shard": the count is of the TOPOLOGY and every shard holds the whole chain,
+            so a two-group chain answers ``2`` on each -- which is what stops the non-owning
+            slot swallowing that shard's cameras into a second identity space.
         ops: batched image preprocessing bound to this shard's device, in the shape
             ``models=`` has. What arrives is a ``ThreadLocalImageOps``, because one shared
             element is walked by many threads. An element that needs it and finds ``None``

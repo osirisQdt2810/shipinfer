@@ -3509,6 +3509,29 @@ hook down, for when the operator asked to see something before it is executed.
       never routing turns 2 red, routing for one group turns the compatibility case red. The
       `mtmc_group_routing` register entry and its reproducing case are DELETED rather than
       narrowed, which is what the register asks for when a divergence is closed by converging.
+      ROUND 1 FOUND THREE DEFECTS, all in the configuration this PR newly declares supported,
+      and all invisible to the first four tests because every one opened a SINGLE element and
+      never built a chain or drove the lifecycle:
+        (1) the routed-away camera was still ANNOUNCED, so it sat in the barrier's live set and
+            was never submitted -- completeness is `live <= reported`, so not one instant could
+            close `complete` for the process's life, every one paid the full window holding a
+            waiter permit, and `_note_silent_roster` then reported the OTHER group's cameras as
+            this group's configuration fault. `camera_added` routes on the same predicate now.
+        (2) the count was of declared group NAMES, and `camera_group()` answers `None` for a
+            slot that named no `cameras:` -- so one rostered slot beside one bare one counted
+            1, neither element routed, and both claimed every camera. The count comes from the
+            shared `camera_groups` (hoisted out of `fleet.py` into `topology/chain.py`, where
+            it is pure and both runners can reach it), and a chain with two `mtmc` slots where
+            either declares no roster is REFUSED at load -- the fleet cannot place that chain
+            either, and the other plane already refuses it.
+        (3) the pass-over marked the KIND, so this slot marking a frame it does not own said
+            the mtmc stage was missing on the very event the other slot filled with ids --
+            `is_partial()` true on every frame of a two-group deployment. The not-mine path
+            returns the item UNCHANGED: this process did answer the frame, from another slot.
+      A CAMERA IN NO ROSTER AT ALL is the residue of (3) and is recorded rather than solved:
+      every slot returns it unchanged, so the event carries no global id and no marker saying
+      why. The load-time refusal makes it the only remaining shape, and naming it needs a
+      slot-scoped marker that `missing_stages` (a tuple of KINDS) cannot express today.
 
 - [ ] MTMC-TWO-GROUPS-SHARE-AN-ID-SPACE-DOWNSTREAM · group north's global id 7 and group
       south's id 7 are the same number and a reader cannot tell them apart. Each group gets its

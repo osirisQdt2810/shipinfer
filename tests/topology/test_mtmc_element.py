@@ -1064,11 +1064,16 @@ class TestTwoGroupsInOneProcessRouteByRoster:
                 item("cam-south", 0, tracks=[track(7, "cam-south", 0, TALL, SAME_A)])
             )
 
-            assert emitted.meta["missing_stages"] == ("mtmc",), (
-                "published with no global ids rather than refused: a camera nobody grouped "
-                "is a configuration fact"
+            assert "mtmc" not in emitted.meta.get("missing_stages", ()), (
+                "UNCHANGED, not marked missing: the marker is the KIND, so marking here would "
+                "say the mtmc stage is missing on the very event the OTHER slot fills with "
+                "global ids -- `is_partial()` true on every frame of a two-group deployment"
             )
-            assert emitted.meta.get("global_ids") in (None, (), []), "and no ids"
+            assert emitted.meta.get("global_ids") in (
+                None,
+                (),
+                [],
+            ), "and this element added no ids, because it is not the one that answers"
         finally:
             element.close()
 
@@ -1082,6 +1087,40 @@ class TestTwoGroupsInOneProcessRouteByRoster:
             )
 
             assert "mtmc" not in emitted.meta.get("missing_stages", ())
+        finally:
+            element.close()
+
+    def test_the_other_groups_camera_is_never_announced(self) -> None:
+        """THE LIFECYCLE, which none of the cases above drive -- and where the real defect was.
+
+        The runner announces every camera to every node, so with the skip in `_do_process`
+        alone a foreign camera landed in this barrier's LIVE set and was never submitted:
+        completeness is `live <= reported`, so not one instant could EVER close `complete`,
+        every one paid the full window holding a waiter permit, and `_note_silent_roster` then
+        reported the other group's cameras as this group's configuration fault (#263 r1).
+        """
+        element = opened({"group": "north", "cameras": ["cam-north"]}, camera_groups=2)
+        try:
+            element.camera_added("cam-north")
+            element.camera_added("cam-south")
+
+            assert element.barrier.live == frozenset({"cam-north"}), (
+                "the other group's camera is not in this barrier's live set, so an instant "
+                "can still close on evidence"
+            )
+        finally:
+            element.close()
+
+    def test_one_group_still_announces_a_camera_off_its_roster(self) -> None:
+        """The compatibility half of the same hook: with one group the roster is the fleet's
+        placement hint, so an unlisted camera is warned about and waited for, exactly as
+        `camera_added`'s own docstring argues."""
+        element = opened({"group": "quay", "cameras": ["cam-01"]}, camera_groups=1)
+        try:
+            element.camera_added("cam-01")
+            element.camera_added("cam09")
+
+            assert element.barrier.live == frozenset({"cam-01", "cam09"})
         finally:
             element.close()
 

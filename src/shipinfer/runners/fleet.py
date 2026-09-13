@@ -66,6 +66,7 @@ from shipinfer.runners.base import Runner
 from shipinfer.runners.registry import RUNNERS
 from shipinfer.scheduling.sharding import Shard, ShardPlan, plan_shards
 from shipinfer.topology import ChainItem, ImageOpsLike, ModelResolver, Topology
+from shipinfer.topology.chain import camera_groups
 
 __all__ = ["FleetRunner"]
 
@@ -197,7 +198,7 @@ class FleetRunner(Runner):
         #: this class is the only thing that places a camera. Empty for a chain whose elements
         #: declare no group, which is every chain that does not do cross-camera association
         #: and costs nothing to carry.
-        self._group_of: dict[str, str] = _camera_groups(topology)
+        self._group_of: dict[str, str] = camera_groups(topology)
         #: How many camera threads this cycle has had to abandon — a lifetime signal, not a
         #: statistic (``launch/control.py``). Non-zero means a detached thread on some shard
         #: still references buffers nobody may unwind. **Accumulated**, never assigned: a
@@ -1003,42 +1004,6 @@ def _lost_in(placed: dict[str, int], dead: frozenset[int], pending: set[str]) ->
         for camera, shard in placed.items()
         if shard in dead and camera not in pending
     }
-
-
-def _camera_groups(topology: Topology) -> dict[str, str]:
-    """``{camera_id: group}`` for every camera an element of this chain says must stay together.
-
-    Asked of every node through :meth:`~shipinfer.topology.base.Element.camera_group`, with
-    **no test of what kind the element is**. That matters more than it looks: a launcher that
-    checked ``node.kind is ElementKind.MTMC`` would import an element implementation module,
-    re-parse a ``params:`` key the element had already parsed, and grow an ``elif`` for the
-    next kind that needs co-located cameras — the switch statement ADR-017 §2's registry
-    exists to delete. The element declares; this function only collects.
-
-    An element that declares no group contributes nothing: the fleet then places its cameras
-    by load and the group is whatever ended up together, which is the honest answer for a
-    chain that did not say. Declaring the roster is what buys the invariant.
-
-    Raises:
-        ConfigurationError: one camera is claimed by two different groups. That is a chain
-            nobody can place — the camera would have to be on two shards — so it is refused
-            when the fleet is built rather than on the camera that happens to be added second.
-    """
-    groups: dict[str, str] = {}
-    for node in topology.nodes:
-        declared = node.element.camera_group()
-        if declared is None:
-            continue
-        for camera_id in declared.cameras:
-            existing = groups.get(camera_id)
-            if existing is not None and existing != declared.name:
-                raise ConfigurationError(
-                    f"camera {camera_id!r} is claimed by camera groups {existing!r} and "
-                    f"{declared.name!r}. A group is an atomic unit of placement, so a camera "
-                    f"in two of them would have to be on two shards at once"
-                )
-            groups[camera_id] = declared.name
-    return groups
 
 
 def _placed_on(

@@ -1708,6 +1708,60 @@ class TestClassesAreCheckedAgainstWhatTheDetectorEmits:
             )
 
 
+class TestEveryGroupSaysWhichCamerasAreItsOwn:
+    """`MTMC-PYTHON-ROUTES-BY-SHARD-ONLY`: an unrostered group means EVERY camera.
+
+    Right for the single-group chains written before rosters existed, and exactly the old
+    failure with two -- both slots take every camera the process sees and issue two
+    contradictory sets of global ids for one object. The other plane refuses the same chain
+    and the fleet cannot place it either, since an unrostered group names nothing to
+    co-locate.
+    """
+
+    def _two_groups(self, south: str) -> str:
+        return (
+            "name: groups\nelements:\n"
+            "  decode: {impl: replay}\n"
+            "  detect: {impl: pool, model: ship_detector}\n"
+            "  track:  {impl: shipvision, per: camera}\n"
+            "  mtmc_north: {kind: mtmc, impl: shipvision, scope: global, "
+            "params: {group: north, cameras: [cam-n1]}}\n"
+            f"  mtmc_south: {south}\n"
+            "  output: {impl: none}\n"
+        )
+
+    def test_a_second_group_with_no_roster_is_refused(self) -> None:
+        chain = self._two_groups(
+            "{kind: mtmc, impl: shipvision, scope: global, params: {group: south}}"
+        )
+
+        with pytest.raises(ConfigurationError, match="declares no `cameras:`"):
+            load(chain)
+
+    def test_two_rostered_groups_load(self) -> None:
+        """The compatibility half, and the configuration this PR declares supported."""
+        chain = self._two_groups(
+            "{kind: mtmc, impl: shipvision, scope: global, "
+            "params: {group: south, cameras: [cam-s1]}}"
+        )
+
+        assert load(chain) is not None
+
+    def test_one_group_may_still_name_no_cameras(self) -> None:
+        """Every chain in this repository: one group, no roster, every camera. A rule that
+        refused it would refuse `ship_person_cpu.yaml` as it stood before rosters."""
+        chain = (
+            "name: one\nelements:\n"
+            "  decode: {impl: replay}\n"
+            "  detect: {impl: pool, model: ship_detector}\n"
+            "  track:  {impl: shipvision, per: camera}\n"
+            "  mtmc:   {impl: shipvision, scope: global}\n"
+            "  output: {impl: none}\n"
+        )
+
+        assert load(chain) is not None
+
+
 class TestTheDetectOnlyChainFile:
     """``topology/detect_only.yaml``: one model per image, for measurement only.
 

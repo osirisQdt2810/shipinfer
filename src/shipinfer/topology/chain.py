@@ -62,6 +62,7 @@ from shipinfer.core.errors import (
     ChainSpecError,
     ChainStructureError,
     ConditionSyntaxError,
+    ConfigurationError,
     UnknownElementError,
 )
 from shipinfer.topology.base import ChainItem, Element, ElementKind
@@ -495,6 +496,7 @@ class Topology:
         _check_row_selection(nodes)
         _check_row_indexed_meta(nodes)
         _check_one_filler_per_row(nodes)
+        _check_every_group_is_rostered(nodes)
         edges = _negotiate_edges(nodes)
         return cls(spec.name, nodes, edges)
 
@@ -892,6 +894,82 @@ def _resolve_produced(node: ElementNode, arrivals: Sequence[_Arrival]) -> tuple[
     # Two declared caps can resolve to the same thing (`*@gpu, nv12@*` behind an nv12@gpu
     # producer). Dedupe, preserving preference order, so the error messages stay readable.
     return tuple(dict.fromkeys(resolved))
+
+
+# doc: long the placement invariant a group buys, and why this asks no element its kind
+def camera_groups(topology: Topology) -> dict[str, str]:
+    """``{camera_id: group}`` for every camera an element of this chain says must stay together.
+
+    Asked of every node through :meth:`~shipinfer.topology.base.Element.camera_group`, with
+    **no test of what kind the element is**. That matters more than it looks: a launcher that
+    checked ``node.kind is ElementKind.MTMC`` would import an element implementation module,
+    re-parse a ``params:`` key the element had already parsed, and grow an ``elif`` for the
+    next kind that needs co-located cameras — the switch statement ADR-017 §2's registry
+    exists to delete. The element declares; this function only collects.
+
+    An element that declares no group contributes nothing: the fleet then places its cameras
+    by load and the group is whatever ended up together, which is the honest answer for a
+    chain that did not say. Declaring the roster is what buys the invariant.
+
+    HERE rather than in `runners/fleet.py`, where it began: it is pure topology and BOTH
+    runners need it -- the fleet to place cameras, the in-process runner to know whether a
+    slot must route (`ElementContext.camera_groups`). A second way of counting groups is a
+    second place the refusal below can be missing from.
+
+    Raises:
+        ConfigurationError: one camera is claimed by two different groups. That is a chain
+            nobody can place — the camera would have to be on two shards — so it is refused
+            when the fleet is built rather than on the camera that happens to be added second.
+    """
+    groups: dict[str, str] = {}
+    for node in topology.nodes:
+        declared = node.element.camera_group()
+        if declared is None:
+            continue
+        for camera_id in declared.cameras:
+            existing = groups.get(camera_id)
+            if existing is not None and existing != declared.name:
+                raise ConfigurationError(
+                    f"camera {camera_id!r} is claimed by camera groups {existing!r} and "
+                    f"{declared.name!r}. A group is an atomic unit of placement, so a camera "
+                    f"in two of them would have to be on two shards at once"
+                )
+            groups[camera_id] = declared.name
+    return groups
+
+
+def _check_every_group_is_rostered(nodes: Sequence[ElementNode]) -> None:
+    """With more than one cross-camera group, each must say which cameras are its own.
+
+    An unrostered group means EVERY camera: right for the single-group chains written before
+    rosters existed, and exactly the old failure with two -- both slots take every camera and
+    give one object two global ids. The other plane refuses the same chain, and the fleet
+    cannot place it either.
+
+    Raises:
+        ConfigurationError: two or more `mtmc` slots, one of them with no roster.
+    """
+    # BY KIND HERE, unlike `camera_groups` above: that one is asked by a RUNNER placing
+    # cameras and must not test kinds. This is a chain-file rule, where `_check_row_selection`
+    # next door already reads `node.kind`, and it must count SLOTS -- `camera_group()` answers
+    # `None` for the very slot this refuses (#263 r1).
+    slots = [node for node in nodes if node.kind is ElementKind.MTMC]
+    if len(slots) < 2:
+        return
+    bare = [
+        node
+        for node in slots
+        if not (declared := node.element.camera_group()) or not declared.cameras
+    ]
+    if bare:
+        raise ConfigurationError(
+            f"chain has {len(slots)} `mtmc` slots "
+            f"({', '.join(sorted(node.name for node in slots))}) and "
+            f"{', '.join(sorted(node.name for node in bare))} declares no `cameras:`. An "
+            f"unrostered group is EVERY camera, so two of them would each claim the whole "
+            f"fleet and give one object two global ids. Give every group its roster, or run "
+            f"one group."
+        )
 
 
 def _check_row_selection(nodes: Sequence[ElementNode]) -> None:

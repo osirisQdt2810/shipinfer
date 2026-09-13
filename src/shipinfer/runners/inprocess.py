@@ -73,6 +73,7 @@ from shipinfer.topology import (
     Topology,
     WaiterBudget,
 )
+from shipinfer.topology.chain import camera_groups
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; `ingest` is imported inside `_ingest`
     from shipinfer.ingest import IngestManager, SourceFactory
@@ -326,16 +327,13 @@ class InprocessRunner(Runner):
     def _camera_group_count(self) -> int:
         """How many distinct cross-camera groups this process holds.
 
-        THROUGH `camera_group()` with no kind test, which is `_camera_groups`' argument one
-        process down: an element declares, this counts. At least 1, because a chain with no
-        group still has one element's worth of "everything here".
+        THROUGH THE SHARED `camera_groups`, not a second count of its own: that one carries
+        the "one camera, two groups" refusal, and a second implementation is a second place
+        that refusal can be missing from. Counting declared NAMES rather than slots was the
+        first version's bug -- a slot declaring no roster contributes none, so a chain with
+        one rostered and one bare slot counted 1 and neither element routed (#263 r1).
         """
-        named = {
-            declared.name
-            for node in self._topology.nodes
-            if (declared := node.element.camera_group()) is not None
-        }
-        return max(1, len(named))
+        return max(1, len(set(camera_groups(self._topology).values())))
 
     @property
     def cameras(self) -> tuple[str, ...]:
