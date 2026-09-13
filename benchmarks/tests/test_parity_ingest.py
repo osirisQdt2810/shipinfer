@@ -330,6 +330,36 @@ class TestTheBackoffColumnIsReadFromThePlane:
         assert [r.numbers[1] for r in retries] == expected
 
 
+def _struct_fields(text: str, cls: str, struct: str) -> set[str]:
+    """The member names of ``struct <struct>`` inside ``class <cls>``.
+
+    A REWRITE rather than a fourth widening: three review rounds each widened one dimension of
+    a regex over C++ -- the type list, the token shape, then the delimiter -- and each fix left
+    the next open. So strip comments, find the braces by COUNTING, and take the identifier that
+    terminates a declaration; a member function is excluded by its `)`.
+    """
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    text = re.sub(r"//[^\n]*", "", text)
+    text = text[text.index(f"class {cls}") :]
+    start = text.index("{", text.index(f"struct {struct}"))
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                body = text[start + 1 : index]
+                break
+    else:  # pragma: no cover - a header that does not close its own struct
+        raise AssertionError(f"unbalanced braces in {cls}::{struct}")
+    return {
+        name
+        for name in re.findall(r"(\w+)\s*(?:=[^;]*|\{[^;]*\})?;", body)
+        if name not in {"const", "override", "final", "default", "delete"}
+    }
+
+
 class TestKnownDivergences:
     """The register is a register: cited, ledgered, reproduced, and mirrored in C++."""
 
@@ -367,38 +397,79 @@ class TestKnownDivergences:
                 f"nothing reproduces is a suppression, not a decision"
             )
 
-    def test_the_cpp_plane_has_one_tracker_and_no_attribution_step(self) -> None:
+    def test_the_cpp_plane_has_no_attribution_step(self) -> None:
         """The `tracker_options` entry's reproducing case, read off both trees.
 
-        NARROWED in #259: `options` and `regression_reset` now cross on the plan, so this
-        reproduces only what is left. Documentary rather than differential -- the difference
-        is in what each plane READS from a chain, so no golden here contains it. It fails,
-        and should, the moment either half lands.
+        NARROWED twice: `options`/`regression_reset` crossed in #259 and `algorithm` became a
+        loud refusal in #261, so what is left is the one knob whose absence is a MISSING STEP
+        rather than a missing line -- this plane has nothing to tune.
         """
         python = (ROOT / "src" / "shipinfer" / "topology" / "elements" / "track.py").read_text()
-        for param in ("algorithm", "attribution_iou"):
-            assert f'self.params.get("{param}"' in python, (
-                f"track.py no longer reads {param!r}; the tracker_options entry describes a "
-                f"divergence that has changed shape"
-            )
+        assert 'self.params.get("attribution_iou"' in python, (
+            "track.py no longer reads attribution_iou; the tracker_options entry describes a "
+            "divergence that has changed shape"
+        )
 
-        # THE PLAN, because that is where a knob crosses. `regression_reset` and
-        # `tracker_option` are deliberately NOT in this list any more -- they are there now.
+        # THE PLAN, because that is where a knob crosses. `algorithm` is deliberately NOT in
+        # this list any more -- it is there now, and the lane refuses what it cannot run.
         plan = (ROOT / "csrc" / "shipinfer" / "pipeline" / "graph" / "plan.h").read_text()
-        for absent in ("algorithm", "attribution_iou"):
-            assert absent not in plan, (
-                f"PlanNode now carries {absent!r}, so the C++ plane can read it -- narrow the "
-                f"tracker_options entry again, or close it and delete this test with it"
-            )
+        assert "attribution_iou" not in plan, (
+            "PlanNode now carries attribution_iou -- close the tracker_options entry and "
+            "delete this test with it"
+        )
 
-        # ONE TRACKER IN THE LANE. A chain naming `botsort` runs ByteTrack here with nothing
-        # said, and `made.impl` would not show it: the impl is `shipvision` either way.
+        # AND NO STEP TO FEED IT, checked across every file one could land in rather than
+        # `shard.h` alone -- an absence asserted in one file is an absence nobody guards
+        # (#261 r1). `associator.h` is excluded: it MENTIONS attribution today, in the comment
+        # saying this plane has none.
+        for path in (
+            ROOT / "csrc" / "shipinfer" / "pipeline" / "tracking" / "shard.h",
+            ROOT / "csrc" / "shipinfer" / "pipeline" / "tracking" / "bytetrack.cpp",
+            ROOT / "csrc" / "shipinfer" / "pipeline" / "graph" / "stages.cpp",
+        ):
+            assert (
+                "attribution" not in path.read_text().lower()
+            ), f"{path.name} grew an attribution step; the divergence has changed shape"
+
+    def test_the_lanes_key_table_still_mirrors_bytetracks_struct(self) -> None:
+        """The drift channel #259's review named, closed by #261.
+
+        `bytetrack.cpp` hand-keeps a table of the keys `ByteTrackTracker::Options` has; the
+        other plane forwards `**options` and never enumerates them, so a knob added to the
+        submodule works there the day it lands and becomes a hard load refusal here. Loud is
+        right -- silently dropping it is what #259 fixed -- but nothing noticed the drift.
+        """
+        header = (
+            ROOT
+            / "3rdparty"
+            / "shipvision"
+            / "csrc"
+            / "shipvision"
+            / "mot"
+            / "trackers"
+            / "bytetrack"
+            / "tracker.h"
+        )
+        if not header.is_file():
+            pytest.skip("3rdparty/shipvision is not checked out")
+
+        declared = _struct_fields(
+            header.read_text(encoding="utf-8"), "ByteTrackTracker", "Options"
+        )
+        assert declared, f"no fields parsed out of {header}; the struct's shape changed"
+
         lane = (
             ROOT / "csrc" / "shipinfer" / "pipeline" / "tracking" / "bytetrack.cpp"
-        ).read_text()
-        assert lane.count("AssociatorRegistrar k") == 1, (
-            "the lane registers more than one tracker; if the plan now names which, the "
-            "algorithm half of the tracker_options entry is closed"
+        ).read_text(encoding="utf-8")
+        table = lane[lane.index("byte_track_options") :]
+        table = table[: table.index("return built;")]
+        known = set(re.findall(r'key == "(\w+)"', table))
+
+        assert known == declared, (
+            f"bytetrack.cpp's key table and ByteTrackTracker::Options have drifted. "
+            f"Only in the struct: {sorted(declared - known)}. "
+            f"Only in the table: {sorted(known - declared)}. A key the struct gained is one "
+            f"the other plane already accepts and this lane refuses at load."
         )
 
     def test_python_mtmc_has_no_roster_routing(self) -> None:

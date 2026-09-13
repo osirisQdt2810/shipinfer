@@ -1185,6 +1185,30 @@ class TestTheTrackerReadsTheChainsParams:
         assert "tracker_option max_age 90" in text
         assert "tracker_option track_threshold 0.4" in text
 
+    def test_the_chains_algorithm_reaches_the_plan(
+        self, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """`impl` is the registry key; the ALGORITHM inside it is the library's, and the two
+        planes do not have the same set. The goldens only ever carry `bytetrack`, so without
+        this a writer that returned the default unconditionally would keep every golden
+        byte-identical and the whole suite green -- while a chain naming `botsort` wrote
+        `algorithm bytetrack` and the lane ran ByteTrack under another name (#261's review).
+        """
+        text = self.resolved("{impl: shipvision, params: {algorithm: botsort}}", dims)
+
+        assert "algorithm botsort" in text
+        assert parse_plan(text).node("track").algorithm == "botsort"
+
+    def test_an_unstated_algorithm_is_written_out_rather_than_left_absent(
+        self, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """Absence would mean "the lane's own default", and the two lanes do not have the same
+        one -- which is the divergence. So the chain's answer is always on the plan."""
+        text = self.resolved("{impl: shipvision}", dims)
+
+        assert "algorithm bytetrack" in text
+        assert parse_plan(text).node("track").algorithm == "bytetrack"
+
     def test_zero_is_carried_because_zero_is_the_operators_refusal(
         self, dims: dict[str, tuple[int, int]]
     ) -> None:

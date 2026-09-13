@@ -288,6 +288,7 @@ namespace shipinfer {
             // is a chain that runs the default with nothing said.
             spec.options.regression_reset = node->regression_reset;
             spec.options.options = node->tracker_options;
+            spec.options.algorithm = node->algorithm;
             built.tracks.push_back(std::move(spec));
             built.stage_names.push_back(node->slot);
         }

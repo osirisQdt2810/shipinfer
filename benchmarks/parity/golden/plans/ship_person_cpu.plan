@@ -54,6 +54,7 @@ artefact ship_embedder/1/model.plan
 
 node track track shipvision
 per camera
+algorithm bytetrack
 
 node mtmc mtmc shipvision
 scope global

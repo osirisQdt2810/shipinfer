@@ -339,6 +339,22 @@ namespace {
         check(options.options.count("track_threshold") == 1 &&
                   options.options.at("track_threshold") == "0.4",
               "including one whose value is not an integer: the LANE converts");
+        check(options.algorithm.empty(),
+              "and no algorithm, because this plan did not name one");
+    }
+
+    void the_algorithm_inside_the_impl_reaches_the_lane() {
+        // `impl` is the registry key and `algorithm` is the library's tracker inside it. The
+        // two planes do not have the same SET, so the name has to cross for the lane to refuse
+        // one it cannot run (`CSRC-TRACKER-ALGORITHM`).
+        const PlanStages built = plan_stages(
+            plan_of(kDetect + "node track track plan-test\nper camera\nalgorithm botsort\n"),
+            kLoaded);
+
+        check(built.tracks.size() == 1, "one tracker slot");
+        check(!built.tracks.empty() && built.tracks[0].options.algorithm == "botsort",
+              "the chain's algorithm reaches the stage spec unchanged -- the PLAN does not "
+              "judge it, because a lane-less build has no trackers to judge against");
     }
 
     void an_unstated_tracker_stays_absent_rather_than_becoming_a_number_here() {
@@ -510,6 +526,7 @@ int main() {
         // INSIDE the try, like every other case: the four cross-camera ones were added
         // outside it, so an unexpected throw aborted instead of reporting (#222's review).
         a_track_slot_carries_the_chains_tracker_params();
+        the_algorithm_inside_the_impl_reaches_the_lane();
         an_unstated_tracker_stays_absent_rather_than_becoming_a_number_here();
         a_tracker_option_stated_twice_is_refused();
         a_negative_frame_count_is_refused();

@@ -55,6 +55,7 @@ artefact ship_embedder/1/model.plan
 
 node track track shipvision
 per camera
+algorithm bytetrack
 regression_reset 0
 tracker_option max_age 90
 tracker_option track_threshold 0.4

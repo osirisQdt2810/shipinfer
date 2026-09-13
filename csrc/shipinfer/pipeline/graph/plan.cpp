@@ -228,6 +228,13 @@ namespace shipinfer {
                                       "admits nothing at all rather than thresholding");
                 }
                 node.min_height_fraction = fraction;
+            } else if (verb == "algorithm") {
+                want(args, 1, where, "algorithm <name>");
+                // NOT CHECKED HERE. The reader knows the format, not which trackers a build
+                // has -- a lane-less `--offline` build has none at all and would refuse every
+                // plan. `create_associator` is where the registry lives and where the refusal
+                // belongs, the same division `impl` already follows.
+                node.algorithm = args[0];
             } else if (verb == "regression_reset") {
                 want(args, 1, where, "regression_reset <frames>");
                 // ZERO IS THE INTERESTING VALUE -- "never recover from a stream restart", an
@@ -600,6 +607,7 @@ namespace shipinfer {
             if (node.max_instants) {
                 out += "max_instants " + std::to_string(*node.max_instants) + "\n";
             }
+            if (!node.algorithm.empty()) out += "algorithm " + node.algorithm + "\n";
             if (node.regression_reset) {
                 out += "regression_reset " + std::to_string(*node.regression_reset) + "\n";
             }

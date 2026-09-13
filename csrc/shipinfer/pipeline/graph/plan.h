@@ -68,6 +68,12 @@ namespace shipinfer {
         //: could only drop a key it did not know.
         std::optional<int64_t> regression_reset;
         std::map<std::string, std::string> tracker_options;
+        //: WHICH TRACKER, inside the `impl`. `impl` is the registry key and the same on both
+        //: planes; the algorithm is the library's, and the two planes do not have the same
+        //: SET -- Python resolves any name in `shipvision.mot.TRACKERS`, this lane has
+        //: ByteTrack alone. Carried so the lane can REFUSE one it cannot run rather than
+        //: running ByteTrack under another name in silence (`CSRC-TRACKER-ALGORITHM`).
+        std::string algorithm;
         std::optional<double> fold_score;
         std::optional<double> fold_mask;
         // Which of the engine's outputs the fold reads. Which slot a YOLO-seg export puts its
