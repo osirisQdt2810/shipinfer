@@ -766,7 +766,7 @@ class TestACameraGroupIsAnAtomicUnitOfPlacement:
         assert clients[1].cameras == ["q-1", "q-3"]
 
     def test_the_launcher_asks_every_element_and_never_what_kind_it_is(self, clients) -> None:
-        """The seam, asserted directly. ``_camera_groups`` walks ``Element.camera_group()``
+        """The seam, asserted directly. ``camera_groups`` walks ``Element.camera_group()``
         with no ``ElementKind`` test and no import of an element implementation module, so a
         *second* kind that needs co-located cameras is a method override rather than an
         ``elif`` in ``runners/`` (ADR-017 §2). ``grouped-track`` is that second kind, invented

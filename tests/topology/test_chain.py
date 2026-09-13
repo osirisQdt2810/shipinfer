@@ -1747,6 +1747,31 @@ class TestEveryGroupSaysWhichCamerasAreItsOwn:
 
         assert load(chain) is not None
 
+    def test_two_slots_may_share_one_group_name(self) -> None:
+        """Legal, and the reason the ROUTING count is of slots and not of names.
+
+        Two slots are two `IdentityMap`s whatever the chain calls them, so a count of
+        distinct names answers 1 here -- and with `_routes` false both slots take every
+        camera and the second overwrites the first's ids (#263 r2).
+        """
+        chain = self._two_groups(
+            "{kind: mtmc, impl: shipvision, scope: global, "
+            "params: {group: north, cameras: [cam-s1]}}"
+        )
+
+        assert load(chain) is not None
+
+    def test_a_camera_claimed_by_two_groups_is_refused_at_load(self) -> None:
+        """A camera is in exactly one identity space. The fleet refused this when it placed
+        cameras; a single process never asked, so the rule now runs at load (#263 r2)."""
+        chain = self._two_groups(
+            "{kind: mtmc, impl: shipvision, scope: global, "
+            "params: {group: south, cameras: [cam-n1]}}"
+        )
+
+        with pytest.raises(ConfigurationError, match="claimed by camera groups"):
+            load(chain)
+
     def test_one_group_may_still_name_no_cameras(self) -> None:
         """Every chain in this repository: one group, no roster, every camera. A rule that
         refused it would refuse `ship_person_cpu.yaml` as it stood before rosters."""

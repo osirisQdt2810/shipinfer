@@ -1032,7 +1032,7 @@ class TestTheCameraLifecycle:
 class TestTwoGroupsInOneProcessRouteByRoster:
     """`MTMC-PYTHON-ROUTES-BY-SHARD-ONLY`: the C++ plane routed and this one could not.
 
-    A roster is the FLEET's placement hint -- `runners/fleet.py::_camera_groups` reads it to
+    A roster is the FLEET's placement hint -- `topology/chain.py::camera_groups` reads it to
     decide which shard a camera goes to -- so with one group it is not a filter, which is why
     `camera_added` warns and associates. The `inprocess` runner does not shard, so two mtmc
     slots there had both elements take every camera and issue two contradictory sets of ids

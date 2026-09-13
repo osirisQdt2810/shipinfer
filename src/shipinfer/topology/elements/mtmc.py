@@ -98,6 +98,7 @@ __all__ = [
     "DEFAULT_MAX_INSTANTS",
     "DEFAULT_SYNC_WINDOW_MS",
     "MISSED_LATE",
+    "MISSED_NOT_MINE",
     "MISSED_UNASSIGNABLE",
     "MISSED_WOULD_STARVE",
     "MISSING_TRACKS",
@@ -117,8 +118,8 @@ _SILENT_AFTER_WINDOW_CLOSES = 100
 #
 # The barrier owns the rest of it: what happened to an *instant* (`complete`, `window`,
 # `advanced`, `evicted`, `expired`, `shutdown`, `failed`) and what happened to a *frame* that
-# missed one (`late`, `duplicate`, `backward`, `would_starve`). Those live in
-# `topology/barrier.py` and four of them are re-exported here because they are the `reason=`
+# missed one (`late`, `duplicate`, `backward`, `would_starve`, `not_mine`). Those live in
+# `topology/barrier.py` and five of them are re-exported here because they are the `reason=`
 # labels this element's metrics carry. The two below are the element's own, because only an
 # element that knows what a track is can produce them.
 
@@ -627,10 +628,13 @@ class ShipvisionMtmc(Element):
         holding the runner's lifecycle lock, behind which every other lifecycle call queues,
         so the bound is worth stating rather than assuming.
 
-        Warns, but does not refuse, when the camera is outside a declared roster: a roster is
-        written once and cameras are added by API at run time, so refusing here would make a
-        stale list able to reject a live camera. The warning is the record that the two
-        disagree.
+        A camera outside the declared roster is never refused, and which of the two things
+        happens to it depends on whether the chain has somewhere else to put it. With ANOTHER
+        group in the process it is ignored here, silently, because that group owns it and this
+        barrier must not wait on a camera it will never be submitted. With no other group the
+        roster is a placement hint rather than a filter, so the camera is associated and the
+        disagreement is recorded as a warning -- a roster is written once while cameras are
+        added by API at run time, and a stale list must not be able to reject a live camera.
         """
         if self._barrier is None:
             return

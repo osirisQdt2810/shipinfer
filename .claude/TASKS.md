@@ -3533,6 +3533,13 @@ hook down, for when the operator asked to see something before it is executed.
       why. The load-time refusal makes it the only remaining shape, and naming it needs a
       slot-scoped marker that `missing_stages` (a tuple of KINDS) cannot express today.
 
+- [ ] MTMC-PYTHON-HAS-NO-NOT-MINE-DIAGNOSTIC · the C++ barrier remembers WHICH cameras a group
+      passed over (`cameras_not_mine()`, printed per slot by `cli/bench.cpp`). The Python
+      barrier has the counter and not the names, so a routing mistake there is a number with
+      nothing to point at -- and `silent_cameras()` answers the opposite question, naming the
+      declared roster rather than what was dropped. Found by #263's review; out of scope there
+      because the counter is what the PR needed and the names are a second seam.
+
 - [ ] MTMC-TWO-GROUPS-SHARE-AN-ID-SPACE-DOWNSTREAM · group north's global id 7 and group
       south's id 7 are the same number and a reader cannot tell them apart. Each group gets its
       own `IdentityMap` with its own `counter_++` (`mtmc/identity.h`), which is correct -- two

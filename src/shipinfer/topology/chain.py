@@ -498,7 +498,11 @@ class Topology:
         _check_one_filler_per_row(nodes)
         _check_every_group_is_rostered(nodes)
         edges = _negotiate_edges(nodes)
-        return cls(spec.name, nodes, edges)
+        built = cls(spec.name, nodes, edges)
+        # AT LOAD, so both runners inherit it. `runners/fleet.py` was the only caller, so a
+        # single process never checked that a camera is in exactly one group (#263 r2).
+        camera_groups(built)
+        return built
 
     @classmethod
     def from_file(cls, path: str | Path) -> Topology:
