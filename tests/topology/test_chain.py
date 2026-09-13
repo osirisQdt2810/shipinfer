@@ -1708,6 +1708,112 @@ class TestClassesAreCheckedAgainstWhatTheDetectorEmits:
             )
 
 
+class TestEveryGroupSaysWhichCamerasAreItsOwn:
+    """`MTMC-PYTHON-ROUTES-BY-SHARD-ONLY`: an unrostered group means EVERY camera.
+
+    Right for the single-group chains written before rosters existed, and exactly the old
+    failure with two -- both slots take every camera the process sees and issue two
+    contradictory sets of global ids for one object. The other plane refuses the same chain
+    and the fleet cannot place it either, since an unrostered group names nothing to
+    co-locate.
+    """
+
+    def _two_groups(self, south: str) -> str:
+        return (
+            "name: groups\nelements:\n"
+            "  decode: {impl: replay}\n"
+            "  detect: {impl: pool, model: ship_detector}\n"
+            "  track:  {impl: shipvision, per: camera}\n"
+            "  mtmc_north: {kind: mtmc, impl: shipvision, scope: global, "
+            "params: {group: north, cameras: [cam-n1]}}\n"
+            f"  mtmc_south: {south}\n"
+            "  output: {impl: none}\n"
+        )
+
+    def test_a_second_group_with_no_roster_is_refused(self) -> None:
+        chain = self._two_groups(
+            "{kind: mtmc, impl: shipvision, scope: global, params: {group: south}}"
+        )
+
+        with pytest.raises(ConfigurationError, match="declares no `cameras:`"):
+            load(chain)
+
+    def test_two_rostered_groups_load(self) -> None:
+        """The compatibility half, and the configuration this PR declares supported."""
+        chain = self._two_groups(
+            "{kind: mtmc, impl: shipvision, scope: global, "
+            "params: {group: south, cameras: [cam-s1]}}"
+        )
+
+        assert load(chain) is not None
+
+    def test_two_slots_may_share_one_group_name(self) -> None:
+        """Legal, and the reason the ROUTING count is of slots and not of names.
+
+        Two slots are two `IdentityMap`s whatever the chain calls them, so a count of
+        distinct names answers 1 here -- and with `_routes` false both slots take every
+        camera and the second overwrites the first's ids (#263 r2).
+        """
+        chain = self._two_groups(
+            "{kind: mtmc, impl: shipvision, scope: global, "
+            "params: {group: north, cameras: [cam-s1]}}"
+        )
+
+        assert load(chain) is not None
+
+    def test_a_camera_claimed_by_two_slots_is_refused_at_load(self) -> None:
+        """A camera is in exactly one identity space. The fleet refused this when it placed
+        cameras; a single process never asked, so the rule now runs at load (#263 r2)."""
+        chain = self._two_groups(
+            "{kind: mtmc, impl: shipvision, scope: global, "
+            "params: {group: south, cameras: [cam-n1]}}"
+        )
+
+        with pytest.raises(ConfigurationError, match="claimed by mtmc slots"):
+            load(chain)
+
+    def test_two_slots_sharing_a_group_name_may_not_share_a_camera(self) -> None:
+        """The SLOT is the key, not the name -- two slots are two `IdentityMap`s either way.
+
+        A name-keyed check compares `"quay" != "quay"`, finds no contradiction, and lets both
+        slots claim the camera: two global ids for one object, last slot to run wins. The
+        sibling above only covers the differently-named case and so passed for the wrong
+        reason (#263 r4).
+        """
+        chain = self._two_groups(
+            "{kind: mtmc, impl: shipvision, scope: global, "
+            "params: {group: north, cameras: [cam-n1]}}"
+        )
+
+        with pytest.raises(ConfigurationError, match="claimed by mtmc slots"):
+            load(chain)
+
+    def test_one_slot_listing_a_camera_twice_is_named_for_what_it_is(self) -> None:
+        """`plan_stages.cpp` refuses this by name and said why: reported as "two slots
+        ('quay' and 'quay')" it reads as a bug in the checker rather than in the chain."""
+        chain = self._two_groups(
+            "{kind: mtmc, impl: shipvision, scope: global, "
+            "params: {group: south, cameras: [cam-s1, cam-s1]}}"
+        )
+
+        with pytest.raises(ConfigurationError, match="lists camera 'cam-s1' twice"):
+            load(chain)
+
+    def test_one_group_may_still_name_no_cameras(self) -> None:
+        """Every chain in this repository: one group, no roster, every camera. A rule that
+        refused it would refuse `ship_person_cpu.yaml` as it stood before rosters."""
+        chain = (
+            "name: one\nelements:\n"
+            "  decode: {impl: replay}\n"
+            "  detect: {impl: pool, model: ship_detector}\n"
+            "  track:  {impl: shipvision, per: camera}\n"
+            "  mtmc:   {impl: shipvision, scope: global}\n"
+            "  output: {impl: none}\n"
+        )
+
+        assert load(chain) is not None
+
+
 class TestTheDetectOnlyChainFile:
     """``topology/detect_only.yaml``: one model per image, for measurement only.
 

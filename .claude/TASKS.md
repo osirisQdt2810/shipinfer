@@ -3475,7 +3475,7 @@ hook down, for when the operator asked to see something before it is executed.
       `cam00..cam11` running), which is the diagnostic that survives and the reason the chain's
       own roster should be fixed or dropped -- a separate question from this PR.
 
-- [ ] MTMC-PYTHON-ROUTES-BY-SHARD-ONLY · the C++ plane routes two groups on one shard and the
+- [x] MTMC-PYTHON-ROUTES-BY-SHARD-ONLY · the C++ plane routes two groups on one shard and the
       Python plane cannot. Opened by #258, which landed the C++ half: with more than one `mtmc`
       slot `MtmcStage` routes by roster, while `MtmcElement._do_process` has no roster test at
       all and `camera_added` warns-and-associates. That is right for Python TODAY because its
@@ -3487,6 +3487,70 @@ hook down, for when the operator asked to see something before it is executed.
       `test_python_mtmc_has_no_roster_routing`. THE FIX is one of two, and the choice is the
       item: give `MtmcElement` the same route-when-more-than-one-group test, or refuse two
       mtmc slots in the `inprocess` runner and say the fleet is the only way to have two.
+      DONE 12 Sep, #263, on the FIRST -- the planes converge rather than one documenting what
+      the other cannot do. Refusing would have left a permanent divergence and this register
+      entry open forever, which is what V88 is against; converging closes both.
+      THE HOOK ALREADY EXISTED, which is what made the choice cheap: `ElementContext` carries
+      `waiter_budget` precisely because "two `mtmc` slots would each admit `workers - 1` and
+      park every worker between them" -- a process-wide fact the runner resolves and hands
+      down. `camera_groups` lands beside it for the same reason, counted through
+      `Element.camera_group()` with NO KIND TEST, which is `_camera_groups`' own argument one
+      process down: the element declares, the runner collects.
+      SO THE ELEMENT ROUTES WHEN `camera_groups > 1` and not otherwise -- the same guard as
+      the other plane's `routes_`, and for the same reason. With one group a roster stays the
+      FLEET's placement hint and `camera_added` warns-and-associates, which is what every
+      chain here relies on; `ship_person_cpu.yaml` declares `cam-01..04` against a
+      `cam00..11` fleet, and filtering on that is what dropped every frame on the C++ side
+      before #258's review caught it.
+      COUNTED, not silent: `MISSED_NOT_MINE` ("not_mine") on both planes, because #258's
+      review showed a pass-over with no counter reads as a healthy run that simply issued no
+      ids.
+      EVIDENCE: four cases in `TestTwoGroupsInOneProcessRouteByRoster`, probed BOTH ways --
+      never routing turns 2 red, routing for one group turns the compatibility case red. The
+      `mtmc_group_routing` register entry and its reproducing case are DELETED rather than
+      narrowed, which is what the register asks for when a divergence is closed by converging.
+      ROUND 1 FOUND THREE DEFECTS, all in the configuration this PR newly declares supported,
+      and all invisible to the first four tests because every one opened a SINGLE element and
+      never built a chain or drove the lifecycle:
+        (1) the routed-away camera was still ANNOUNCED, so it sat in the barrier's live set and
+            was never submitted -- completeness is `live <= reported`, so not one instant could
+            close `complete` for the process's life, every one paid the full window holding a
+            waiter permit, and `_note_silent_roster` then reported the OTHER group's cameras as
+            this group's configuration fault. `camera_added` routes on the same predicate now.
+        (2) the count was of declared group NAMES, and `camera_group()` answers `None` for a
+            slot that named no `cameras:` -- so one rostered slot beside one bare one counted
+            1, neither element routed, and both claimed every camera. The count comes from the
+            shared `camera_groups` (hoisted out of `fleet.py` into `topology/chain.py`, where
+            it is pure and both runners can reach it), and a chain with two `mtmc` slots where
+            either declares no roster is REFUSED at load -- the fleet cannot place that chain
+            either, and the other plane already refuses it.
+        (3) the pass-over marked the KIND, so this slot marking a frame it does not own said
+            the mtmc stage was missing on the very event the other slot filled with ids --
+            `is_partial()` true on every frame of a two-group deployment. The not-mine path
+            returns the item UNCHANGED: this process did answer the frame, from another slot.
+      A HEALTHY TWO-GROUP DEPLOYMENT TICKS `not_mine` AT FULL FRAME RATE per non-owning slot,
+      on both planes -- `frames_missing` rising at 1000/s with nothing wrong. The counter is
+      the C++ one's twin and stays; it is a sentence the runbook owes the first two-group
+      deployment, not a defect.
+      A CAMERA IN NO ROSTER AT ALL is the residue of (3), and it has its own line below
+      (`MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED`) rather than prose inside a closed item.
+
+- [ ] MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED · with two groups, a camera NEITHER roster names
+      is returned unchanged by every slot, so its event carries no `global_ids`, no marker
+      saying why, and `is_partial()` false. Reachable: add a camera by API that the chain
+      file never listed. It IS counted -- twice, as `not_mine`, once per slot -- so a run says
+      something is wrong without saying which camera. Naming it on the event needs a
+      slot-scoped marker, and `missing_stages` is a tuple of KINDS: the other slot fills that
+      same event with ids, so a kind marker would read as "mtmc did not run" on a frame where
+      it did. Found by #263's review; recorded rather than solved because the marker is a
+      schema question and the PR was a routing one.
+
+- [ ] MTMC-PYTHON-HAS-NO-NOT-MINE-DIAGNOSTIC · the C++ barrier remembers WHICH cameras a group
+      passed over (`cameras_not_mine()`, printed per slot by `cli/bench.cpp`). The Python
+      barrier has the counter and not the names, so a routing mistake there is a number with
+      nothing to point at -- and `silent_cameras()` answers the opposite question, naming the
+      declared roster rather than what was dropped. Found by #263's review; out of scope there
+      because the counter is what the PR needed and the names are a second seam.
 
 - [ ] MTMC-TWO-GROUPS-SHARE-AN-ID-SPACE-DOWNSTREAM · group north's global id 7 and group
       south's id 7 are the same number and a reader cannot tell them apart. Each group gets its

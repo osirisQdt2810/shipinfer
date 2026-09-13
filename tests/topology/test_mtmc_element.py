@@ -46,7 +46,11 @@ from shipinfer.launch.control import CameraSpec
 from shipinfer.runners.inprocess import InprocessRunner
 from shipinfer.topology import ChainSpec, Topology
 from shipinfer.topology import bridge as bridge_module
-from shipinfer.topology.barrier import DEFAULT_MAX_INSTANTS, WaiterBudget
+from shipinfer.topology.barrier import (
+    DEFAULT_MAX_INSTANTS,
+    MISSED_NOT_MINE,
+    WaiterBudget,
+)
 from shipinfer.topology.base import (
     CameraGroup,
     ChainItem,
@@ -261,6 +265,7 @@ def opened(
     registry: MetricsRegistry | None = None,
     name: str = "mtmc",
     budget: WaiterBudget | None = None,
+    camera_groups: int = 1,
 ) -> ShipvisionMtmc:
     """A ``ShipvisionMtmc`` over a real tracker, wide window, eager gate."""
     declared: dict[str, Any] = {
@@ -269,7 +274,14 @@ def opened(
         **(params or {}),
     }
     element = create_element(ElementKind.MTMC, "shipvision", name, declared)
-    element.open(ElementContext(workers=workers, metrics=registry, waiter_budget=budget))
+    element.open(
+        ElementContext(
+            workers=workers,
+            metrics=registry,
+            waiter_budget=budget,
+            camera_groups=camera_groups,
+        )
+    )
     return element  # type: ignore[return-value]
 
 
@@ -1014,6 +1026,122 @@ class TestTheCameraLifecycle:
             assert value(metrics, "shipinfer_mtmc_cameras", element="mtmc") == 1
         finally:
             built.close()
+
+
+@needs_shipvision
+class TestTwoGroupsInOneProcessRouteByRoster:
+    """`MTMC-PYTHON-ROUTES-BY-SHARD-ONLY`: the C++ plane routed and this one could not.
+
+    A roster is the FLEET's placement hint -- `topology/chain.py::camera_groups` reads it to
+    decide which shard a camera goes to -- so with one group it is not a filter, which is why
+    `camera_added` warns and associates. The `inprocess` runner does not shard, so two mtmc
+    slots there had both elements take every camera and issue two contradictory sets of ids
+    for one object: the bug the other plane's refusal used to prevent, and #258's `routes_`
+    is the shape this mirrors.
+    """
+
+    def test_one_group_associates_a_camera_its_roster_never_named(self) -> None:
+        """The chain this repository ships. `ship_person_cpu.yaml` declares `cam-01..04` and
+        every bench fleet is `cam00..11`; making the roster a filter for a lone group is what
+        dropped every frame on the other plane before its review caught it."""
+        element = opened({"group": "quay", "cameras": ["cam-01", "cam-02"]}, camera_groups=1)
+        try:
+            emitted = element.process(
+                item("cam09", 0, tracks=[track(7, "cam09", 0, TALL, SAME_A)])
+            )
+
+            assert "mtmc" not in emitted.meta.get("missing_stages", ()), (
+                "the unlisted camera was associated, which is what a one-group chain has "
+                "always done"
+            )
+        finally:
+            element.close()
+
+    def test_two_groups_pass_over_a_camera_that_is_not_theirs(self) -> None:
+        element = opened({"group": "north", "cameras": ["cam-north"]}, camera_groups=2)
+        try:
+            emitted = element.process(
+                item("cam-south", 0, tracks=[track(7, "cam-south", 0, TALL, SAME_A)])
+            )
+
+            assert "mtmc" not in emitted.meta.get("missing_stages", ()), (
+                "UNCHANGED, not marked missing: the marker is the KIND, so marking here would "
+                "say the mtmc stage is missing on the very event the OTHER slot fills with "
+                "global ids -- `is_partial()` true on every frame of a two-group deployment"
+            )
+            assert emitted.meta.get("global_ids") in (
+                None,
+                (),
+                [],
+            ), "and this element added no ids, because it is not the one that answers"
+        finally:
+            element.close()
+
+    def test_two_groups_still_associate_their_own_camera(self) -> None:
+        """The control. Without it "passed over" could be the roster turning everything away,
+        which is a different defect and the one the other plane shipped first."""
+        element = opened({"group": "north", "cameras": ["cam-north"]}, camera_groups=2)
+        try:
+            emitted = element.process(
+                item("cam-north", 0, tracks=[track(7, "cam-north", 0, TALL, SAME_A)])
+            )
+
+            assert "mtmc" not in emitted.meta.get("missing_stages", ())
+        finally:
+            element.close()
+
+    def test_the_other_groups_camera_is_never_announced(self) -> None:
+        """THE LIFECYCLE, which none of the cases above drive -- and where the real defect was.
+
+        The runner announces every camera to every node, so with the skip in `_do_process`
+        alone a foreign camera landed in this barrier's LIVE set and was never submitted:
+        completeness is `live <= reported`, so not one instant could EVER close `complete`,
+        every one paid the full window holding a waiter permit, and `_note_silent_roster` then
+        reported the other group's cameras as this group's configuration fault (#263 r1).
+        """
+        element = opened({"group": "north", "cameras": ["cam-north"]}, camera_groups=2)
+        try:
+            element.camera_added("cam-north")
+            element.camera_added("cam-south")
+
+            assert element.barrier.live == frozenset({"cam-north"}), (
+                "the other group's camera is not in this barrier's live set, so an instant "
+                "can still close on evidence"
+            )
+        finally:
+            element.close()
+
+    def test_one_group_still_announces_a_camera_off_its_roster(self) -> None:
+        """The compatibility half of the same hook: with one group the roster is the fleet's
+        placement hint, so an unlisted camera is warned about and waited for, exactly as
+        `camera_added`'s own docstring argues."""
+        element = opened({"group": "quay", "cameras": ["cam-01"]}, camera_groups=1)
+        try:
+            element.camera_added("cam-01")
+            element.camera_added("cam09")
+
+            assert element.barrier.live == frozenset({"cam-01", "cam09"})
+        finally:
+            element.close()
+
+    def test_the_pass_over_is_counted_rather_than_silent(self) -> None:
+        """#258's review on the other plane: every frame was passed over and no counter moved,
+        so the run read as healthy and simply issued no ids."""
+        registry = MetricsRegistry()
+        element = opened(
+            {"group": "north", "cameras": ["cam-north"]}, registry=registry, camera_groups=2
+        )
+        try:
+            element.process(
+                item("cam-south", 0, tracks=[track(7, "cam-south", 0, TALL, SAME_A)])
+            )
+
+            counted = value(
+                registry, "shipinfer_mtmc_frames_missing_total", reason=MISSED_NOT_MINE
+            )
+            assert counted == 1.0, "the frame this group did not take is counted as not_mine"
+        finally:
+            element.close()
 
 
 @needs_shipvision
