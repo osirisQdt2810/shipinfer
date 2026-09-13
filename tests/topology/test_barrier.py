@@ -53,6 +53,7 @@ from shipinfer.topology.barrier import (
     MISSED_BACKWARD,
     MISSED_DUPLICATE,
     MISSED_LATE,
+    MISSED_NOT_MINE,
     MISSED_WOULD_STARVE,
     InstantBarrier,
     InstantEntry,
@@ -1061,6 +1062,59 @@ class TestAnInstantSaysHowMuchOfTheFleetItHeld:
 
         cameras, instants, largest = held.instant_sizes
         assert instants == 4 and cameras == 4 and largest == 1
+
+
+class TestTheCamerasThisGroupPassedOver:
+    """`cameras_not_mine`: the opposite question to `silent_cameras`, and `not_mine_`'s twin.
+
+    A routing mistake is a number with nothing to point at otherwise, and `silent_cameras`
+    answers the wrong half of it — it names the cameras this group was PROMISED and never saw,
+    so on a bad roster it lists the declared ones and points away from the cause.
+    """
+
+    def test_a_one_group_process_never_names_anything(self) -> None:
+        """The element only calls this when it has somewhere to route to, so an empty set is
+        the healthy answer and the one every chain in this repository gives."""
+        held = barrier()
+        held.submit("cam-a", 100.0, "p", associate=flat)
+
+        assert held.cameras_not_mine == frozenset()
+        assert MISSED_NOT_MINE not in held.frame_stats()
+
+    def test_it_counts_and_names_in_one_call(self) -> None:
+        """Both halves, because they are one fact: how many, and which."""
+        held = barrier()
+        held.note_not_mine("cam-south")
+        held.note_not_mine("cam-south")
+        held.note_not_mine("cam-west")
+
+        assert held.cameras_not_mine == frozenset({"cam-south", "cam-west"})
+        assert held.frame_stats()[MISSED_NOT_MINE] == 3, "every frame counted, each camera once"
+
+    def test_it_answers_the_opposite_question_to_silent_cameras(self) -> None:
+        """Told apart on one barrier, because reading the wrong one is the failure mode."""
+        held = barrier()
+        held.camera_added("cam-north")
+        held.note_not_mine("cam-south")
+
+        assert held.silent_cameras == frozenset({"cam-north"}), "promised, never sent"
+        assert held.cameras_not_mine == frozenset({"cam-south"}), "sent, another group's"
+
+    def test_dropping_a_camera_does_not_unsay_it(self) -> None:
+        """A RECORD, not a membership -- `drop_camera` clears what a camera IS and not what
+        happened to it, which is what `mtmc/barrier.cpp` does and why it has no erase."""
+        held = barrier()
+        held.note_not_mine("cam-south")
+
+        held.drop_camera("cam-south")
+
+        assert held.cameras_not_mine == frozenset({"cam-south"})
+
+    def test_the_set_it_hands_out_cannot_be_mutated_into_the_barrier(self) -> None:
+        held = barrier()
+        held.note_not_mine("cam-south")
+
+        assert isinstance(held.cameras_not_mine, frozenset)
 
 
 class TestARosterNobodyAnswers:

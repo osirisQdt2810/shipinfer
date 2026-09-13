@@ -330,6 +330,41 @@ namespace {
               "nothing was routed away: there is no other group to route to");
     }
 
+    void a_routing_slot_that_names_no_cameras_is_refused() {
+        // THE TWIN of `elements/mtmc.py::_do_open`'s refusal, added with it. `plan_stages.cpp`
+        // refuses such a plan, so this is unreachable from a chain file -- but a stage built
+        // directly would pass over EVERY camera in silence where the other plane's element
+        // took every camera, and a silent divergence is worth a loud refusal.
+        auto barrier = std::make_shared<InstantBarrier>(options());
+        auto tracker = std::make_shared<ScriptedTracker>();
+        std::string message;
+        try {
+            MtmcStage stage(kSlot, "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {},
+                            true);
+            check(false, "an unrostered routing slot was built");
+        } catch (const ConfigError& error) {
+            message = error.what();
+        }
+        check(message.find("names no cameras") != std::string::npos,
+              "refused, saying what is wrong: " + (message.empty() ? "(no throw)" : message));
+        check(message.find(kSlot) != std::string::npos,
+              "and naming the slot, because a fleet has several");
+    }
+
+    void a_lone_slot_may_name_no_cameras() {
+        // The other half, and every chain in this repository: with nowhere to route to a
+        // roster is the fleet's placement hint, so an absent one is not a fault.
+        auto barrier = std::make_shared<InstantBarrier>(options());
+        auto tracker = std::make_shared<ScriptedTracker>();
+        MtmcStage stage(kSlot, "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {},
+                        false);
+        auto state = frame_with("cam0", 1, {box(0, 0, 0)});
+        attach(*state, "track_out", 1, {0}, {7.0f});
+        attach(*state, "embed_out", 2, {0}, {1.0f, 0.0f});
+
+        check(stage.run(*state).rows == 1, "and it associates the camera it was handed");
+    }
+
     void routing_counts_and_names_the_camera_it_passed_over() {
         // The pass-over must not be silent either. `silent_cameras()` answers the OPPOSITE
         // question -- the cameras this group was promised and never saw -- so on a routing
@@ -533,6 +568,8 @@ int main() {
     a_frame_stamped_in_the_future_is_clamped_and_counted();
     one_group_associates_a_camera_its_roster_never_named();
     routing_counts_and_names_the_camera_it_passed_over();
+    a_routing_slot_that_names_no_cameras_is_refused();
+    a_lone_slot_may_name_no_cameras();
     a_camera_with_nothing_to_report_still_reports();
     the_answer_is_read_out_by_key_and_never_by_position();
     a_frame_with_no_capture_stamp_is_refused_rather_than_bucketed_at_zero();

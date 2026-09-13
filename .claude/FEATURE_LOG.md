@@ -5,6 +5,24 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-13 — the non-owning mtmc slot is quiet, and the owning one names what it dropped
+
+Three findings from #263's review, all one seam. The two planes asked the routing question in
+OPPOSITE ORDER: Python read the frame for tracks and then asked whose camera it was, C++ asked
+first. That is not just noise on `missing_stages` -- a foreign frame the tracker never answered
+for was `no_tracks` on one plane and `not_mine` on the other, and a non-owning slot's
+`ValidationError` on `meta['tracks']` failed the frame for the slot that DOES own the camera,
+because the runner fails an item's future on any exception. Hoisted.
+Python's test also carried a third term the C++ twin has no trace of, `and self._roster_set`:
+with it an unrostered routing slot claims EVERY camera where the other plane claims none. The
+term is gone and both planes now REFUSE that slot instead -- `_do_open` and the `MtmcStage`
+constructor -- which is the loud version of what the conjunct was hiding.
+And `InstantBarrier` grew `note_not_mine` / `cameras_not_mine`, `not_mine_`'s twin: a routing
+mistake was a number with nothing to point at, while `silent_cameras` answers the opposite
+question and names the cameras the group was PROMISED, pointing away from the cause.
+
+---
+
 ## 2026-09-13 — a global id says which group minted it (event schema v5)
 
 Two `mtmc` groups are two `IdentityMap`s with their own counters, so north's global id 7 and
