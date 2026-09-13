@@ -259,7 +259,7 @@ class TestBothSidesLoadTheSameEngine:
         plan = repository / "ship_detector" / "1" / "model.plan"
         assert plan.read_bytes() == b"PLAN-FP32-INSTALLED", "the wrong precision, to start"
 
-        config.require_same_engines()
+        config.require_same_engines("shipinfer")
 
         assert plan.read_bytes() == b"PLAN-FP16", "the named precision is what is installed"
 
@@ -267,8 +267,44 @@ class TestBothSidesLoadTheSameEngine:
         # identical bytes would pass a bytes check identically, so that check was not the
         # evidence it read as (#262's review).
         before = plan.stat().st_mtime_ns
-        config.require_same_engines()
+        config.require_same_engines("shipinfer")
         assert plan.stat().st_mtime_ns == before, "the second call copies nothing"
+
+    def test_the_default_run_installs_before_the_baseline_arm_checks(
+        self, tmp_path: Path
+    ) -> None:
+        """THE SEQUENCE, which is what nothing drove before (#262 r2).
+
+        `run_bench.py`'s pre-flight calls one arm then the other, and `--systems` defaults to
+        both. With `baseline` first, its digest check refused the very mismatch the install
+        exists to resolve -- so the flag selected only on `--systems shipinfer`, and the
+        `--help` promising "which precision BOTH sides load" was false in the mode it named.
+        The unit tests missed it because they called one arm in isolation, and one of them
+        passed the `"both"` default no production caller ever produces.
+        """
+        config = replace(
+            self._config(tmp_path, b"PLAN-FP16", b"PLAN-FP32-INSTALLED"), precision="fp16"
+        )
+        repository = config.model_repository
+        assert repository is not None
+        plan = repository / "ship_detector" / "1" / "model.plan"
+
+        # The pre-flight's order, as `run_bench.py` runs it.
+        for system in ("shipinfer", "baseline"):
+            config.require_same_engines(system)
+
+        assert plan.read_bytes() == b"PLAN-FP16", "installed by our arm"
+
+    def test_the_old_order_is_what_refused(self, tmp_path: Path) -> None:
+        """The control: baseline first sees the mismatch before anything installs, which is
+        the abort this reordering removes. Kept as a test so the order is a DECISION rather
+        than an accident of how the loop happens to be written."""
+        config = replace(
+            self._config(tmp_path, b"PLAN-FP16", b"PLAN-FP32-INSTALLED"), precision="fp16"
+        )
+
+        with pytest.raises(RuntimeError, match="measures the engines"):
+            config.require_same_engines("baseline")
 
     def test_a_baseline_only_run_installs_nothing(self, tmp_path: Path) -> None:
         """`--systems baseline` loads no plan of ours, so it may not rewrite one.

@@ -3948,6 +3948,17 @@ hook down, for when the operator asked to see something before it is executed.
       AND THE IDEMPOTENCE TEST DID NOT TEST IT -- a second call rewriting identical bytes
       passed the bytes check identically. It asserts on `st_mtime_ns` now, and goes red when
       the digest skip is removed.
+      ROUND 2 FOUND THAT ROUND 1'S GATE BROKE THE DEFAULT RUN, which is the more useful
+      finding of the two: `run_bench.py`'s pre-flight called `baseline` first, so on
+      `--systems baseline,shipinfer` -- the default -- the baseline arm's digest check refused
+      the very mismatch the install exists to resolve, and the flag selected only on
+      `--systems shipinfer`. The pre-flight runs the arm that WRITES first now; the
+      measurement loop keeps the baseline's order, because only the pre-flight has a writer.
+      AND NOTHING DROVE THE SEQUENCE, which is why two rounds of unit tests missed it: each
+      called one arm in isolation, and one passed `require_same_engines()`'s `"both"` default,
+      a value no production caller produces. There is a test for the ORDER now, and a control
+      asserting the old one refuses -- so the order is a decision rather than an accident of
+      how the loop happens to be written.
 
 - [x] BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE · **MERGED as #218 (squash `1054479`, 10 Sep),
       APPROVE on round 3 after two BLOCKING rounds.** Round 2's five findings, and the first is a

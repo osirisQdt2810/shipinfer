@@ -954,8 +954,15 @@ def main(argv: list[str] | None = None) -> int:
     # BASELINE arm would measure for warmup + seconds (~80 s of GPU time) and only then would
     # the shipinfer arm refuse, discarding it. A check that fires after the run it was supposed
     # to precede is worse than the absent one it replaced.
+    # SHIPINFER FIRST, and only in this pre-flight -- the measurement loop below keeps the
+    # baseline's order. A named precision INSTALLS the plan on our arm (`require_same_engines`),
+    # and the baseline arm's digest check has to see the installed file rather than refuse
+    # ahead of it: with `baseline` first, the default `--systems baseline,shipinfer` run
+    # aborted on the very mismatch the install exists to resolve, so the flag selected only on
+    # `--systems shipinfer` (#262 r2). The pre-flight is a validation pass and is otherwise
+    # order-free; what is NOT order-free is that one arm writes and the other reads.
     try:
-        for system in ("baseline", "shipinfer"):
+        for system in ("shipinfer", "baseline"):
             if system in systems:
                 cfg.require_inputs(system)
     except (RuntimeError, ValueError, FileNotFoundError) as exc:
