@@ -370,9 +370,11 @@ class ElementContext:
             process**. ``workers`` alone is not enough: each element counts only its own
             waiters, so two ``mtmc`` slots would each admit ``workers - 1`` and park every
             worker between them.
-        camera_groups: how many distinct cross-camera groups this PROCESS holds, from
-            :func:`~shipinfer.topology.chain.camera_groups` -- the same collection the fleet
-            places by, so there is one implementation and one refusal. More than one means a
+        camera_groups: how many cross-camera identity spaces this PROCESS holds -- the
+            ``mtmc`` SLOTS, from :func:`~shipinfer.topology.chain.cross_camera_slots`, which
+            is also what the load-time roster refusal reads. Two slots are two ``IdentityMap``
+            s whatever the chain calls them, so counting declared ``group:`` names is wrong
+            and a runner filling this field must call that one function. More than one means a
             group's element must route: two of them taking every camera would issue two
             contradictory sets of global ids for one object. ``1`` is every chain in this
             repository, and then a roster is a placement hint rather than a filter. NOT "one

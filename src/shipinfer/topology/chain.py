@@ -417,6 +417,10 @@ class Topology:
             CapsMismatchError: two elements that can hand data to each other agree on no
                 format/location — including the *bypass* pair created when a ``when:``
                 element is skipped.
+            ConfigurationError: also the two cross-camera rules, which are chain-file faults
+                and so belong here rather than on the runner that happens to ask first — two
+                or more ``mtmc`` slots with one of them unrostered, and one camera claimed by
+                two groups.
         """
         if not spec.elements:
             raise ChainSpecError(
@@ -942,6 +946,19 @@ def camera_groups(topology: Topology) -> dict[str, str]:
     return groups
 
 
+def cross_camera_slots(nodes: Sequence[ElementNode]) -> tuple[ElementNode, ...]:
+    """The ``mtmc`` slots a chain declares -- one identity space each.
+
+    ONE READER of this count, because two answers are what #263 shipped twice: the load-time
+    refusal counted slots while the routing guard counted declared `group:` NAMES, so two
+    slots sharing one name counted 1 and neither routed. BY KIND, unlike :func:`camera_groups`
+    beside it: that one is asked by a runner PLACING cameras and must not test kinds
+    (ADR-017 §2), while this is a question about identity spaces, and two slots are two
+    `IdentityMap`s whatever the chain calls them.
+    """
+    return tuple(node for node in nodes if node.kind is ElementKind.MTMC)
+
+
 def _check_every_group_is_rostered(nodes: Sequence[ElementNode]) -> None:
     """With more than one cross-camera group, each must say which cameras are its own.
 
@@ -953,11 +970,7 @@ def _check_every_group_is_rostered(nodes: Sequence[ElementNode]) -> None:
     Raises:
         ConfigurationError: two or more `mtmc` slots, one of them with no roster.
     """
-    # BY KIND HERE, unlike `camera_groups` above: that one is asked by a RUNNER placing
-    # cameras and must not test kinds. This is a chain-file rule, where `_check_row_selection`
-    # next door already reads `node.kind`, and it must count SLOTS -- `camera_group()` answers
-    # `None` for the very slot this refuses (#263 r1).
-    slots = [node for node in nodes if node.kind is ElementKind.MTMC]
+    slots = cross_camera_slots(nodes)
     if len(slots) < 2:
         return
     bare = [

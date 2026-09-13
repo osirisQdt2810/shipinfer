@@ -44,10 +44,10 @@ class KnownDivergence:
         return self.explains is not None and self.explains(python_record, cpp_record)
 
 
-#: One entry, documentary (``explains=None``): the difference is in what each plane
-#: READS from a chain, so it reaches no trace field -- it reaches different ``track_id``
-#: streams for one chain file, which no golden here holds yet. P6-D1/D2/D3 were closed by
-#: converging the planes; #259 narrowed `tracker_options`, #258 opened `mtmc_group_routing`.
+#: One entry, documentary (``explains=None``): the difference is in what each plane READS
+#: from a chain, so it reaches no trace field -- it reaches different ``track_id`` streams
+#: for one chain file, which no golden here holds yet. P6-D1/D2/D3 and `mtmc_group_routing`
+#: (#258, closed by #263) were all closed by converging; #259 narrowed `tracker_options`.
 KNOWN: Mapping[str, KnownDivergence] = {
     "tracker_options": KnownDivergence(
         id="tracker_options",

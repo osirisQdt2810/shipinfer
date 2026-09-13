@@ -212,12 +212,11 @@ namespace shipinfer {
                 // placement hint and never was a filter. REFUSED STILL, below, when two
                 // rosters claim one camera: the contradiction the old refusal was about.
                 //
-                // AHEAD OF THE OTHER PLANE, and that is stated rather than glossed: Python has
-                // no roster test anywhere (`elements/mtmc.py::camera_added` warns and
-                // associates), because its fleet puts each group on its own SHARD. Two groups
-                // in one Python process would have both elements take every camera -- the bug
-                // this refusal used to prevent. Registered as `mtmc_group_routing` in
-                // `benchmarks/parity/known.py`, owned by `MTMC-PYTHON-ROUTES-BY-SHARD-ONLY`.
+                // THE OTHER PLANE DOES THE SAME, since #263: `elements/mtmc.py` routes when
+                // `ElementContext.camera_groups > 1` and its `camera_added` ignores a camera
+                // another group owns, so two groups in one Python process no longer both take
+                // every camera. This lane was ahead for a while, registered as
+                // `mtmc_group_routing`; that entry is gone and the divergence with it.
                 groups.push_back(&node);
             } else if (node.kind == "track") {
                 // NOT refused for being a second one. Two trackers over one camera's rows is

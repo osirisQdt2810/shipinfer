@@ -3528,10 +3528,18 @@ hook down, for when the operator asked to see something before it is executed.
             the mtmc stage was missing on the very event the other slot filled with ids --
             `is_partial()` true on every frame of a two-group deployment. The not-mine path
             returns the item UNCHANGED: this process did answer the frame, from another slot.
-      A CAMERA IN NO ROSTER AT ALL is the residue of (3) and is recorded rather than solved:
-      every slot returns it unchanged, so the event carries no global id and no marker saying
-      why. The load-time refusal makes it the only remaining shape, and naming it needs a
-      slot-scoped marker that `missing_stages` (a tuple of KINDS) cannot express today.
+      A CAMERA IN NO ROSTER AT ALL is the residue of (3), and it has its own line below
+      (`MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED`) rather than prose inside a closed item.
+
+- [ ] MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED · with two groups, a camera NEITHER roster names
+      is returned unchanged by every slot, so its event carries no `global_ids`, no marker
+      saying why, and `is_partial()` false. Reachable: add a camera by API that the chain
+      file never listed. It IS counted -- twice, as `not_mine`, once per slot -- so a run says
+      something is wrong without saying which camera. Naming it on the event needs a
+      slot-scoped marker, and `missing_stages` is a tuple of KINDS: the other slot fills that
+      same event with ids, so a kind marker would read as "mtmc did not run" on a frame where
+      it did. Found by #263's review; recorded rather than solved because the marker is a
+      schema question and the PR was a routing one.
 
 - [ ] MTMC-PYTHON-HAS-NO-NOT-MINE-DIAGNOSTIC · the C++ barrier remembers WHICH cameras a group
       passed over (`cameras_not_mine()`, printed per slot by `cli/bench.cpp`). The Python

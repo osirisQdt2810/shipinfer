@@ -360,6 +360,11 @@ class ShipvisionMtmc(Element):
         group, roster = parse_group(self.params, where=f"mtmc element {name!r}")
         self._group = group or name
         self._roster = roster
+        # THE SAME ROSTER as a membership container, because the two tests below are on the
+        # PER-FRAME path: a tuple scan is O(roster) per frame per slot, and the other plane
+        # uses a set for exactly this (`stages.cpp`: `roster_.count`). The tuple stays: it
+        # carries the declared ORDER, which `camera_group()` and `_announce_roster` publish.
+        self._roster_set = frozenset(roster)
         self._window_s = self._positive("sync_window_ms", DEFAULT_SYNC_WINDOW_MS) / 1e3
         # UNSET STAYS UNSET, so the barrier can size the bound to the fleet rather than to a
         # constant. Validated here anyway: a refusal at open() names the element and the key.
@@ -638,7 +643,7 @@ class ShipvisionMtmc(Element):
         """
         if self._barrier is None:
             return
-        if self._roster and camera_id not in self._roster:
+        if self._roster_set and camera_id not in self._roster_set:
             if self._routes:
                 # ANOTHER GROUP OWNS IT, so this barrier must not wait on it. Announcing put
                 # a camera in `live` that `_do_process` never submits: no instant could close
@@ -715,7 +720,7 @@ class ShipvisionMtmc(Element):
 
         assert self._barrier is not None  # `process` refuses before `open`
         camera_id = item.context.camera_id
-        if self._routes and self._roster and camera_id not in self._roster:
+        if self._routes and self._roster_set and camera_id not in self._roster_set:
             # NOT THIS GROUP'S CAMERA. Published with no ids and never submitted: this
             # group's barrier must not wait on it. COUNTED, because #258's review found the
             # other plane passing over every frame with nothing saying so.

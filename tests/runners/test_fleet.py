@@ -802,8 +802,13 @@ class TestACameraGroupIsAnAtomicUnitOfPlacement:
         finally:
             built.stop(timeout_s=5.0)
 
-    def test_one_camera_in_two_groups_is_refused_when_the_fleet_is_built(self) -> None:
-        """A camera that would have to be on two shards at once, refused before a start."""
+    def test_one_camera_in_two_groups_is_refused_before_a_runner_exists(self) -> None:
+        """A camera that would have to be on two shards at once.
+
+        REFUSED AT LOAD now, so the fleet never sees such a chain and no runner has to. The
+        earlier version built the topology INSIDE the `raises` block, which made it pass on
+        whichever refusal came first and cover neither on purpose (#263 r2).
+        """
         chain_yaml = textwrap.dedent("""
             name: overlapping
             elements:
@@ -815,14 +820,7 @@ class TestACameraGroupIsAnAtomicUnitOfPlacement:
             """)
 
         with pytest.raises(ConfigurationError, match="claimed by camera groups"):
-            FleetRunner(
-                Topology.from_spec(ChainSpec.from_yaml(chain_yaml)),
-                ServerSettings(),
-                chain_yaml=chain_yaml,
-                shards=2,
-                gpus=[2, 3],
-                command=sleeps(),
-            )
+            Topology.from_spec(ChainSpec.from_yaml(chain_yaml))
 
 
 class TestTheLockIsNeverHeldAcrossAnRpc:
