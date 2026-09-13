@@ -4836,6 +4836,33 @@ hook down, for when the operator asked to see something before it is executed.
       id per detection already), and `algorithm` needs trackers the lane does not have. Both
       stay registered as `tracker_options` in `known.py`, narrowed from four knobs to two,
       and `CSRC-TRACKER-ALGORITHM` below is the open line the register now cites.
+      SUPERSEDED 13 Sep on one point, left as written because it is the record of what was
+      believed then: "this plane has no such step" is FALSE. `shard.cpp` maps tracks onto rows
+      by `Track::last_match`, exactly. See CSRC-TRACKER-ATTRIBUTION's ruling.
+
+- [ ] SHIPVISION-TRACK-LAST-MATCH · carry the matched detection row onto the Python `Track`,
+      so both planes read ONE exact mapping. Successor to CSRC-TRACKER-ATTRIBUTION (settled
+      13 Sep) and the open line the `tracker_options` register entry cites.
+      THE CHANGE IS IN `3rdparty/shipvision`, not here -- ADR-010: a submodule PR, then a
+      pointer bump in its own commit. Add the field to `shipvision/types.py`'s `Track`, set it
+      where the match column is already in hand (`mot/pool.py::apply_matches`, and on a spawn),
+      clear it in `predict()`, and read the meta column in `mot/backends/native.py::decode`,
+      where the binding already carries it and `_LAST_MATCH` already names it.
+      THEN HERE, and it is TWO call sites rather than one -- the chain element and the
+      pipeline plane csrc actually ports: `topology/elements/track.py::_attribute` and
+      `pipeline/graph/tracking.py`'s `1.0 - _iou_matrix(...)` + `_associate(...)`, whose own
+      knob, validation and `_max_cost` come from `core/settings/pipeline.py`. Both collapse to
+      a lookup, and `attribution_iou` is deleted with them on both. The register entry and its
+      case go too, and this line closes.
+      NOT URGENT and not blocking: both planes emit well-formed events today. What it buys is
+      one rule instead of two, and it removes an inconsistency INSIDE the Python plane -- in
+      the divergence band a track's embedding is blended from the row `last_match` names while
+      its `track_id` is attributed to a different row, or to none.
+      BEFORE BUILDING IT, GET A NUMBER. There is no tracking driver or golden in
+      `benchmarks/parity/` at all, and the only in-tree test of the cut sets it to 1.0 and says
+      in its own docstring that this is not a realistic setting. A parity case over a real
+      tracker -- same frames to both planes, compare the per-row id streams -- is what should
+      decide the priority, and it is the case the register entry deserves.
 
 - [x] CSRC-TRACKER-ALGORITHM · the lane has one tracker and SAYS SO now. DONE 12 Sep, #261. The open
       half of the `tracker_options` register entry after #259 narrowed it. Python's
@@ -4878,7 +4905,7 @@ hook down, for when the operator asked to see something before it is executed.
       a `track` node; a draft of this line said "all six", which was wrong twice over
       (#261 r1).
 
-- [ ] CSRC-TRACKER-ATTRIBUTION · one plane drops a row for a poor overlap and the other has no
+- [x] CSRC-TRACKER-ATTRIBUTION · one plane drops a row for a poor overlap and the other has no
       step to drop it in. The last knob of the `tracker_options` register entry, which #259 and
       #261 narrowed down to this. Python's `track.py` reads `params: attribution_iou:` and maps
       a tracker's published boxes back onto detection ROWS, dropping one whose IoU with every
@@ -4893,6 +4920,40 @@ hook down, for when the operator asked to see something before it is executed.
       plane to undo something `associate()` does there and may simply not apply here. Settle
       that before building, and if the answer is "not needed", the entry closes by saying so
       rather than by converging.
+
+      SETTLED 13 Sep BY RULING, not by converging: the C++ lane must NOT grow the step. The
+      premise above is wrong TWICE and both halves were verified by reading the code.
+      (1) THIS LANE ALREADY MAPS TRACKS ONTO ROWS. `pipeline/tracking/shard.cpp` reads
+      `Track::last_match`, the index of the detection that corrected the track, written by the
+      pool when the measurement is applied (`3rdparty/shipvision/shipvision/csrc/shipvision/
+      mot/pool.cpp`, on a birth too, cleared every `predict()`) and guaranteed to index the
+      list `update` was handed. Its own comment says so: "BACK ONTO THE ROWS, which is the only
+      shape a caller wants". It is exact provenance; an IoU re-derivation here would throw that
+      away to re-guess it, importing two failure modes this plane structurally cannot have -- a
+      real identity refused because the FILTERED box missed the cut, and a globally-optimal
+      assignment landing an id on a neighbour's row.
+      (2) "NO ROW IS EVER DROPPED" IS FALSE. `graph/stages.cpp` skips a `-1` row, which is how
+      `events/records.cpp` leaves that object's `track_id` null. Both planes drop a row for a
+      poor overlap and both write the same `null`.
+      WHY THE OTHER PLANE HAS THE STEP -- not to undo `associate()`, which is the solver
+      `_attribute` calls. `shipvision.types.Track` has no field for the matched row, so the
+      mapping dies at the library's PYTHON boundary. On the native backend the exact column
+      crosses the binding and is spent on the appearance EMA, then dropped by `decode` -- and
+      the element builds its shard with `backend=None`, which resolves to that same native
+      pool. So a normal deployment re-derives by IoU what the C++ pool underneath it computed.
+      WHAT SURVIVES, and why the register entry stays rather than being deleted: two different
+      RULES for which rows go null. C++ decides inside the association, on the PREDICTED box,
+      fused with score (`IoU*score >= 0.2`; stage two 0.5); Python decides after the
+      correction, on the POSTERIOR box, on raw IoU at 0.3. Not comparable numbers, so the
+      nulled sets can differ -- at the DEFAULT, since no chain here states the knob.
+      A separating input was run against the real `shipvision._C.ByteTrackTracker`: a 40x100
+      box held six frames then narrowing to 11x100 gives `last_match = [0]` on one plane while
+      IoU(posterior, detection) = 0.287 < 0.3 nulls it on the other. SYNTHETIC and CPU-only --
+      not field-observed, and there is no tracking golden in the parity harness to catch it.
+      DO NOT REOPEN AS A C++ TASK. Refusing `attribution_iou` on a C++-routed chain is not the
+      fix either: the key cannot reach the plan (`plan.py::_tracker_options` serialises only
+      `params: options:`) and the divergence lives in the default. The convergence runs the
+      other way -- SHIPVISION-TRACK-LAST-MATCH below.
 
 - [x] **CSRC-GRAPH-HAS-NO-TRACKING · COMPLETE 11 Sep. All six PRs merged: #215 (the `track`
       stage), #217 (the instant barrier), #219 (the identity map), #220 (the seam and the
