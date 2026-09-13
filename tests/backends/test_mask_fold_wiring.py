@@ -18,7 +18,7 @@ import pytest
 from shipinfer.backends.tensorrt.backend import TensorRTBackend
 from shipinfer.backends.tensorrt.engine import EngineIO, LoadedEngine
 from shipinfer.core.errors import ConfigurationError
-from shipinfer.core.types import DataType, Device, MemoryKind, Tensor
+from shipinfer.core.types import DataType, MemoryKind, Tensor
 from shipinfer.topology.elements.masks import InstanceMaskArea
 
 torch = pytest.importorskip("torch")
@@ -64,37 +64,6 @@ class FakeBindings:
 
     def stage_input(self, name: str, array: Any, stream: Any, *, async_copy: bool) -> None:
         pass
-
-    def __getitem__(self, name: str) -> Any:
-        """The binding itself, which is a `MemoryHandle` on the real class."""
-        return _FakeBinding(self.tensors[name])
-
-
-@dataclass
-class _FakeBinding:
-    """`Binding`'s `MemoryHandle` half — what `Tensor.from_handle` actually reads."""
-
-    tensor: Any
-
-    @property
-    def ptr(self) -> int:
-        return int(self.tensor.data_ptr())
-
-    @property
-    def nbytes(self) -> int:
-        return int(self.tensor.numel() * self.tensor.element_size())
-
-    @property
-    def kind(self) -> MemoryKind:
-        return MemoryKind.DEVICE
-
-    @property
-    def device(self) -> Device:
-        return Device.cuda(0)
-
-    @property
-    def shape(self) -> tuple[int, ...]:
-        return tuple(self.tensor.shape)
 
 
 class NullStream:
@@ -157,28 +126,29 @@ class TestAnOutputKeptOnTheDevice:
     handed the binding rather than a numpy view of a buffer nothing filled.
     """
 
-    def test_a_kept_output_is_not_fetched_and_arrives_as_device_memory(self) -> None:
+    def test_a_kept_output_is_neither_fetched_nor_advertised(self) -> None:
+        """The two halves are one decision. Advertising it while never filling its host
+        buffer is worse than dropping it: a reader finds the name and gets the last batch."""
         backend, bindings = backend_with_engine()
         backend.keep_on_device("output1")
 
         outputs = backend.execute({"images": Tensor.from_numpy(np.zeros((3,), np.float32))}, 3)
 
         assert bindings.fetched == ["output0"], "the kept output's copy home never happened"
-        kept = outputs["output1"]
-        assert kept.memory_kind is MemoryKind.DEVICE, "it arrives as device memory"
-        assert kept.host is None, "with no host array, which is the whole saving"
-        assert kept.handle is not None and kept.device == Device.cuda(0)
+        assert "output1" not in outputs, "and nothing is published under its name"
+        assert [s.name for s in backend.output_specs] == ["output0"], "nor advertised"
 
     def test_the_other_outputs_are_untouched(self) -> None:
         """Nothing changes for a consumer that never heard of this — the reason the default
         is host and the reason this is per-output rather than per-engine."""
-        backend, _ = backend_with_engine()
+        backend, bindings = backend_with_engine()
         backend.keep_on_device("output1")
 
         outputs = backend.execute({"images": Tensor.from_numpy(np.zeros((3,), np.float32))}, 3)
 
         assert outputs["output0"].memory_kind is MemoryKind.HOST
         assert outputs["output0"].host is not None
+        assert bindings.fetched == ["output0"], "it still comes home as it always did"
 
     def test_without_the_call_every_output_still_comes_home(self) -> None:
         backend, bindings = backend_with_engine()

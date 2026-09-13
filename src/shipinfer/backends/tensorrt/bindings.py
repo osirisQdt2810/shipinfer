@@ -29,7 +29,7 @@ import numpy as np
 
 from shipinfer.core.errors import InferenceError
 from shipinfer.core.logging import get_logger
-from shipinfer.core.types import DataType, Device, MemoryKind
+from shipinfer.core.types import DataType, Device
 from shipinfer.runtime.memory import PinnedStagingPool
 from shipinfer.runtime.platform import require_torch
 from shipinfer.runtime.stream import Stream
@@ -57,17 +57,6 @@ class Binding:
     @property
     def nbytes(self) -> int:
         return int(self.device_tensor.numel() * self.device_tensor.element_size())
-
-    # `ptr`/`nbytes` were already two thirds of `core.types.MemoryHandle`; these two finish it,
-    # so an output kept where the network wrote it can become a `Tensor.from_handle` rather
-    # than needing a parallel notion of device memory (`ENGINE-COPIES-EVERY-OUTPUT-HOME`).
-    @property
-    def kind(self) -> MemoryKind:
-        return MemoryKind.DEVICE
-
-    @property
-    def device(self) -> Device:
-        return Device.cuda(int(self.device_tensor.device.index or 0))
 
 
 class BindingSet:

@@ -214,17 +214,13 @@ namespace shipinfer {
             std::vector<int64_t> dims;
             size_t width = 0;
             const float* base = nullptr;
-            //: Non-null when this output was never copied home, so `base` points at a buffer
-            //: nothing wrote and the response must carry the device pointer instead.
-            const float* device_base = nullptr;
         };
         const size_t out_count = engine_->outputs();
         std::vector<OutputMeta> outputs;
         outputs.reserve(out_count);
         for (size_t o = 0; o < out_count; ++o) {
             outputs.push_back({engine_->output_name(o), engine_->output_dims(o),
-                               engine_->output_row_elems(o), engine_->output(o),
-                               engine_->output_device(o)});
+                               engine_->output_row_elems(o), engine_->output(o)});
         }
         // COUNTED BEFORE ANY WAITER IS RELEASED. `item.complete()` below resolves a future,
         // so a caller can be running the instant it returns -- and with the counters updated
@@ -259,17 +255,8 @@ namespace shipinfer {
                 // each -- at that output's OWN width, which is what makes a segmentation
                 // engine's prototype bank travel beside its detection rows rather than being
                 // read at the rows' width or from the front of the batch.
-                if (meta.device_base != nullptr) {
-                    // KEPT ON THE DEVICE: `data` stays EMPTY because the copy home never
-                    // happened, and the pointer is advanced into this request's slice the
-                    // same way the host path is -- a batch is one allocation and each
-                    // request owns a span of it, on either side of the bus.
-                    tensor.device_data = meta.device_base + spans[i].first * meta.width;
-                    tensor.device = engine_->device();
-                } else {
-                    tensor.data.assign(meta.base + spans[i].first * meta.width,
-                                       meta.base + spans[i].second * meta.width);
-                }
+                tensor.data.assign(meta.base + spans[i].first * meta.width,
+                                   meta.base + spans[i].second * meta.width);
                 response.outputs.push_back(std::move(tensor));
             }
             response.executed_on = engine_->device();

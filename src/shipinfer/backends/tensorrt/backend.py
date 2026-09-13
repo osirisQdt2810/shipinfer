@@ -224,6 +224,10 @@ class TensorRTBackend(ModelBackend):
             return super().output_specs
         strip = self.context.config.max_batch_size > 0
         specs = [t.to_spec(strip) for t in self._loaded.outputs]
+        # A KEPT OUTPUT STOPS BEING ADVERTISED, for the reason the bank does: its host buffer
+        # is one this run never wrote, and a reader that finds it gets the previous batch.
+        # Keeping and hiding are one decision, not two.
+        specs = [spec for spec in specs if spec.name not in self._kept_on_device]
         if self._fold is None:
             return tuple(specs)
         # THE BANK STOPS BEING ADVERTISED and a width-1 output takes its place at the END,
@@ -240,11 +244,12 @@ class TensorRTBackend(ModelBackend):
         return (*kept, area)
 
     def keep_on_device(self, output_name: str) -> None:
-        """Leave one output where the network wrote it, for a consumer that reads it there.
+        """Stop copying one output home, and stop advertising it.
 
-        The C++ twin is `TrtInstance::keep_on_device`. BY NAME, because which position an
-        output occupies is the export's choice; refused when the artefact has no such output,
-        with the list, rather than keeping nothing in silence.
+        The C++ twin is `TrtInstance::keep_on_device`. The two halves are one decision: a host
+        buffer this run never wrote is worse than no output, because a reader finds it and
+        gets the previous batch. NOT "a consumer reads it on the device" -- that needs a
+        lifetime the bindings do not have (`ENGINE-DEVICE-OUTPUT-OUTLIVES-ITS-BATCH`).
         """
         if self._loaded is None:
             raise ConfigurationError(
@@ -331,15 +336,7 @@ class TensorRTBackend(ModelBackend):
                 if fold is not None and spec.name == fold.name:
                     continue  # computed below; the engine has no such output to fetch
                 if spec.name in self._kept_on_device:
-                    # THE COPY HOME NEVER HAPPENS: a `Tensor` over the binding itself, which
-                    # satisfies `MemoryHandle`, rather than a numpy view of bytes that stayed
-                    # on the GPU. Shaped at THIS batch, not the binding's `max_batch_size`, or
-                    # a consumer reads rows the run did not fill.
-                    binding = bindings[spec.name]
-                    outputs[spec.name] = Tensor.from_handle(
-                        binding, spec.dtype, (batch_size, *binding.shape[1:])
-                    )
-                    continue
+                    continue  # kept: never fetched, and `output_specs` no longer names it
                 array = bindings.fetch_output(
                     spec.name, batch_size, stream, async_copy=async_copy
                 )

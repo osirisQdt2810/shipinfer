@@ -107,14 +107,6 @@ namespace {
             return index == 0 ? std::vector<int64_t>{static_cast<int64_t>(width_)}
                               : std::vector<int64_t>{kWide, static_cast<int64_t>(width_)};
         }
-        //: Pretend the wide output never came home. `device_base` is not a real device
-        //: pointer -- nothing dereferences it here -- and that is the point: what is under
-        //: test is that `ModelInstance` carries it through and leaves `data` EMPTY, which a
-        //: real pointer would hide behind a copy this tier cannot make.
-        const float* device_base = nullptr;
-        const float* output_device(size_t index) const override {
-            return index == 1 ? device_base : nullptr;
-        }
         const float* output(size_t index) const override {
             const float* first = IdentityEngine::output(0);
             if (index == 0) return first;
@@ -172,51 +164,6 @@ namespace {
 
     // -- the instance
     // ----------------------------------------------------------------------------
-
-    void test_an_output_kept_on_the_device_arrives_as_a_pointer_not_a_copy() {
-        // `ENGINE-COPIES-EVERY-OUTPUT-HOME`: an engine may skip an output's copy home, and
-        // then `output(index)` is a buffer NOTHING WROTE. `ModelInstance` has to carry the
-        // device pointer instead of slicing that buffer -- which is the branch a real engine
-        // cannot exercise here, because this tier has no device to read back from.
-        //
-        // TWO REQUESTS of different row counts, like the scatter test above, because the
-        // pointer is advanced into each caller's own span: handing both the batch's front is
-        // exactly the bug that test exists for, one bus away.
-        auto engine = std::make_unique<TwoOutputEngine>(Device::cuda(0), 8, 2);
-        static const std::vector<float> pretend(64, 0.f);
-        engine->device_base = pretend.data();
-        const float* base = engine->device_base;
-        ModelInstance instance("m:0", std::move(engine), BatchWindow(8, 20), 16);
-        instance.start();
-        check(instance.wait_ready(2s), "the instance becomes ready");
-
-        const std::vector<float> a{1.f, 2.f};
-        const std::vector<float> b{3.f, 4.f, 5.f, 6.f, 7.f, 8.f};
-        WorkItem first(a_request("cam-a", 1, a, 2));
-        WorkItem second(a_request("cam-b", 2, b, 2));
-        auto fa = first.future();
-        auto fb = second.future();
-        check(instance.enqueue(std::move(first)) == PutStatus::Accepted, "a accepted");
-        check(instance.enqueue(std::move(second)) == PutStatus::Accepted, "b accepted");
-        const InferenceResponse ra = fa.get();
-        const InferenceResponse rb = fb.get();
-
-        const OutputTensor* kept_a = ra.named("negated");
-        const OutputTensor* kept_b = rb.named("negated");
-        check(kept_a != nullptr && kept_b != nullptr, "the kept output is still named");
-        if (kept_a == nullptr || kept_b == nullptr) return;
-
-        check(kept_a->on_device() && kept_b->on_device(), "and both say they are on a device");
-        check(kept_a->data.empty() && kept_b->data.empty(),
-              "with data EMPTY, because the copy home never happened -- a filled `data` here "
-              "would be whatever the unwritten host buffer held");
-        check(kept_a->device == Device::cuda(0), "carrying the device it lives on");
-        // ONE SPAN EACH. `a` is one row and `b` is three, at the wide output's width of 6.
-        check(kept_a->device_data == base, "a's slice starts at the batch's front");
-        check(kept_b->device_data == base + 6, "and b's starts one row of SIX floats past it");
-        check(ra.first().data == a && rb.first().data == b,
-              "while the host-resident output is scattered exactly as it always was");
-    }
 
     void test_every_output_is_scattered_and_named() {
         // The widened contract (CSRC-SEGMENT-FOLD-MISSING): a segmentation engine answers
@@ -653,7 +600,6 @@ namespace {
 int main() {
     test_an_instance_answers_with_the_rows_it_was_given();
     test_every_output_is_scattered_and_named();
-    test_an_output_kept_on_the_device_arrives_as_a_pointer_not_a_copy();
     test_two_requests_are_batched_and_scattered_to_their_own_callers();
     test_occupancy_is_summed_microseconds_and_a_thrown_batch_is_not_charged();
     test_a_failing_engine_fails_the_batch_and_the_instance_serves_the_next();

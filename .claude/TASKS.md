@@ -3031,72 +3031,52 @@ hook down, for when the operator asked to see something before it is executed.
       the adapter needs to distinguish "hidden because folded" from "kept for a reader".
       `instance.cpp:250` then fills `device_data` rather than `data` for those. Then the Python
       `TensorRTBackend` mirror and the parity test.
-      DONE 12 Sep, all four pieces. `Engine::output_device(index)` joined the interface with a
-      `nullptr` default -- the SAFE direction, because forgetting to override it says
-      "everything came home", which is what a backend that skips no copy is in fact doing.
-      `TrtEngineAdapter` overrides it, `ModelInstance` carries the pointer into each request's
-      OWN SPAN and leaves `data` empty, and on the Python side `Binding` already had `ptr` and
-      `nbytes` so `kind` + `device` finished `MemoryHandle` and a kept output is just
-      `Tensor.from_handle`. The adapter needed NO change to `visible_`, which an earlier note
-      here got wrong: it hides the fold's bank deliberately and was never a general mechanism.
-      THE ADAPTER'S `visible_` AND `keep_on_device` ARE DIFFERENT QUESTIONS -- "nothing above
-      reads this" versus "something above reads it on the device" -- and conflating them is
-      what would have hidden a kept output from its own consumer.
-      EVIDENCE, each probed red by removing what it guards: `test_engine` 65 checks (two
-      batched requests of DIFFERENT row counts, so the pointer is advanced per span -- handing
-      both the batch's front is the host scatter test's bug one bus away; 5 red),
-      `test_fold_wiring` 12 checks on the real plan with the kept output copied home BY THE
-      TEST and compared float for float (1 red), and four Python cases in
-      `tests/backends/test_mask_fold_wiring.py` (1 red). 36 C++ binaries green in the
+      DONE 12 Sep, and NARROWED by #260's review to the half that is safe. `kept_on_device_`
+      is a set, `set_fold` inserts into it, and `keep_on_device(name)` is the general door --
+      by NAME, refused with the artefact's own output list, on both planes.
+      KEEPING AND HIDING ARE ONE DECISION, which is the correction the review forced. The
+      first draft advertised a kept output and carried a device pointer on `OutputTensor` so a
+      consumer could read it. That is UNSAFE BY CONSTRUCTION: `output_buffers_` belongs to the
+      next batch the moment this one ends -- `bindings.py` already states the rule for the host
+      side -- and a response OUTLIVES its batch. Camera A's response resolves, the worker
+      dequeues batch B into the same binding, and A's frame carries B's numbers with the
+      `(camera_id, frame_id)` tag intact. Silent cross-camera misattribution, which is the
+      failure class this project exists to eliminate.
+      SO A KEPT OUTPUT IS ONE NOTHING ABOVE READS: the copy is skipped AND the output stops
+      being advertised, which is exactly the fold's arrangement without the fold. A host buffer
+      this run never wrote is worse than no output, because a reader finds the name.
+      WHAT THE REVIEW ALSO CAUGHT, and it is the sharper half: the Python tests never reached
+      `StackingBatcher.scatter`, so a batch of two would have failed on
+      `Tensor.slice_batch`'s refusal to slice a device tensor -- the SAME test gap this item
+      had already found on the C++ side one round earlier, on the other plane. The narrowed
+      feature has no device tensor to slice, so the gap closes with the design.
+      EVIDENCE: `test_fold_wiring` on the real plan -- the kept output is advertised under no
+      index and the remaining one matches the run that copied both home, float for float;
+      `tests/backends/test_mask_fold_wiring.py` -- neither fetched nor advertised, the others
+      untouched, an unknown name refused with the list. 36 C++ binaries green in the
       container; offline Python 4376 passed.
-      NOT WIRED TO A CHAIN YET, and that is deliberate: nothing declares `keep_on_device` in
-      `config.yaml` or a chain file, so no deployment behaviour changes. The door is open and
-      the first consumer that wants an output on the device -- a crop-from-mask, anything
-      fused -- brings its own declaration with it.
 
-- [x] PROFILE-DIES-AT-THE-DESIGN-LOAD · FIXED 12 Sep: it is nsys 2025.1.3. NARROWED to one sentence: **a binary that loads
-      a TensorRT plan segfaults under this Nsight Systems; a binary that only uses CUDA does
-      not.** `deploy/rootless/profile.sh --cpp` prints `loading engines...`, ends ~1.2 s later
-      with an empty `threads: {}`, and writes a report holding only the driver's context calls.
-      THE PROBES, each in the container, each one variable:
-
-      | under nsys | loads a plan | exit |
-      |---|---|---|
-      | `test_mask_area_kernel` (CUDA kernels) | no | **0**, 11 checks |
-      | `test_dataplane` (CUDA, no engine) | no | **0**, 53 checks |
-      | `test_fold_wiring` (one plan) | yes | **139** (SIGSEGV) |
-      | `bench`, 12 cameras | yes | 139 |
-      | `bench`, 50 cameras | yes | 139 |
-      | `bench`, `SHIPINFER_DEVICE_FOLD=0` | yes | 139 |
-      | `bench`, `--trace=cuda` / `osrt` / `nvtx` alone | yes | 139 / 1 / 1, all dead at load |
-      | `bench`, `--cuda-event-trace=false` | yes | 139 |
-
-      SO IT IS NOT: the fleet size, the mask fold (#239), the tracer, nsys's device-side event
-      trace, or the bench -- and the SAME binary at the same load exits 0 with 2 341 frames
-      without nsys. It is engine deserialisation under nsys's injection, with the image's nsys
-      2025.1.3 against the host TensorRT mounted at `/tensorrt`.
-      THE NEXT PROBE is `trtexec --loadEngine` under nsys, which decides whether anything of
-      ours is involved at all.
-      AND THE NOTE THIS LINE USED TO CARRY WAS WRONG, which cost a review round: it said the
-      hook "refuses that command by TEXT even inside `deploy/rootless/run.sh`". It does not --
-      `_is_containerised` matches the segment's own executable and exempts the whole segment,
-      so `run.sh trtexec ...` was always allowed. Measured with the hook's own `verdict()`.
-      WHAT IS TRUE is the opposite hazard: putting `trtexec` in a shell file HIDES it from a
-      deny-list over command text, which is how #257 briefly shipped a host-GPU entry point
-      the hook could not see. `probe_nsys_trtexec.sh` is in `BLOCKED_SCRIPTS` now AND calls
-      `containment.require_container` itself -- the gate that cannot be spelled around.
-      IT IS nsys x TensorRT, AND IT IS ONE VERSION. `scripts/probe_nsys_trtexec.sh` runs
-      NVIDIA's OWN `trtexec --loadEngine` -- none of our code -- under each nsys on this box,
-      same container, same plan, same flags: 2024.5.1 exit 0, 2024.6.2 exit 0, **2025.1.3 exit
-      139**. So nothing of ours is involved and no NVTX rewrite is needed.
-      WHY IT KEPT HAPPENING: `profile.sh` picked `ls -d ... | sort -V | tail -1`, the NEWEST,
-      which is exactly how it chose the broken one and went on choosing it. It now skips a
-      version measured to segfault on engine load, says so on stderr, and `SHIPINFER_NSYS_DIR`
-      still overrides. `SHIPINFER_NSYS_BROKEN` carries the list -- one entry, a recorded
-      measurement rather than a guess. Re-run the probe when a new Nsight lands.
-      VERIFIED END TO END: the design load profiles under 2024.6.2 -- 50 cameras x 20 fps over
-      GStreamer RTSP, 4 GPUs, 40 s, 37 572 frames read, 32 445 accepted, a 584 MB report with
-      real counters instead of the 1.2 s death and the empty `threads: {}`.
+- [ ] ENGINE-DEVICE-OUTPUT-OUTLIVES-ITS-BATCH · a consumer that wants to READ an output on the
+      device needs a lifetime, and the bindings do not have one. Opened by #260's review, which
+      is what stopped that PR shipping the unsafe half. `ENGINE-COPIES-EVERY-OUTPUT-HOME` now
+      lets an output stop coming home when NOTHING reads it; the remaining case is a stage that
+      reads one on the device -- a crop-from-mask, anything fused -- and that cannot be a raw
+      pointer into `output_buffers_`, because the next batch writes there and a response
+      outlives its batch.
+      THREE SHAPES, from the review: (a) double-buffer kept outputs, which costs VRAM and the
+      bookkeeping is per instance; (b) the response holds a LEASE the instance waits on before
+      reusing the binding, which is correct and puts a wait on the batch path -- the thing
+      `EXECUTE-BLOCKS-THE-INSTANCE-THREAD` is trying to get rid of; (c) restrict the contract
+      to consumers that run INSIDE the batch, like the fold, and say so in `request.h` and the
+      docstring. (c) is free and is what the fold already is; the question is whether any real
+      consumer can live with it.
+      AND TWO THINGS THAT COME WITH IT: nothing synchronises the stream before a kept output
+      would be handed out (`fetch_output` is the only call that reaches `stream.synchronize()`,
+      so an all-kept engine would return while the network still runs), and
+      `OutputTensor::row()` is UB rather than an error on a device-resident output -- `data` is
+      empty, so `data.data() + i * row_elems` is a bogus pointer that `graph/stages.cpp` and
+      `mask_area.cpp` dereference. Both are free to fix ONCE there is a device-resident output
+      in a response at all; today there is not.
 
 - [ ] EXECUTE-BLOCKS-THE-INSTANCE-THREAD · PRICED 12 Sep at the design load: ~14% of instance-thread wall. PROFILED 11 Sep: `cudaStreamSynchronize` is **32.2%
       of all CUDA API time** -- 9.64 s over 5 564 calls, 1.73 ms average -- because
