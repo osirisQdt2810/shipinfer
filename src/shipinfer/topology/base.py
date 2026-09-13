@@ -369,6 +369,13 @@ class ElementContext:
             process**. ``workers`` alone is not enough: each element counts only its own
             waiters, so two ``mtmc`` slots would each admit ``workers - 1`` and park every
             worker between them.
+        camera_groups: how many distinct cross-camera groups this PROCESS holds, counted
+            through :meth:`Element.camera_group` with no test of what kind an element is --
+            the same collection ``runners/fleet.py::_camera_groups`` makes, for the same
+            reason. More than one means a group's element must route: two of them taking
+            every camera the process sees would issue two contradictory sets of global ids
+            for one object. ``1`` is every chain here and the fleet's every shard, and there
+            the roster is a placement hint rather than a filter.
         ops: batched image preprocessing bound to this shard's device, in the shape
             ``models=`` has. What arrives is a ``ThreadLocalImageOps``, because one shared
             element is walked by many threads. An element that needs it and finds ``None``
@@ -391,6 +398,7 @@ class ElementContext:
     workers: int | None = None
     ops: ImageOpsLike | None = None
     waiter_budget: WaiterBudget | None = None
+    camera_groups: int = 1
 
 
 class Element(abc.ABC):

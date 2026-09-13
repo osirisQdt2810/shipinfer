@@ -72,6 +72,7 @@ from shipinfer.topology.barrier import (
     DROPPED_FAILED,
     DROPPED_SHUTDOWN,
     MISSED_LATE,
+    MISSED_NOT_MINE,
     MISSED_WOULD_STARVE,
     InstantBarrier,
     InstantEntry,
@@ -468,6 +469,11 @@ class ShipvisionMtmc(Element):
         """
         mtmc = load_mtmc()
         types = load_types()
+        # WHETHER THERE IS ANYWHERE TO ROUTE TO. A roster is the FLEET's placement hint, so
+        # with one group it is not a filter and `camera_added` warns and associates. Two in
+        # ONE process both taking every camera is two contradictory sets of ids for one
+        # object -- the other plane's `routes_`, same guard.
+        self._routes = context.camera_groups > 1
         self._TrackingError = load_errors().TrackingError
         self._CameraTracks = mtmc.CameraTracks
         self._FrameTrackCluster = mtmc.FrameTrackCluster
@@ -695,6 +701,12 @@ class ShipvisionMtmc(Element):
 
         assert self._barrier is not None  # `process` refuses before `open`
         camera_id = item.context.camera_id
+        if self._routes and self._roster and camera_id not in self._roster:
+            # NOT THIS GROUP'S CAMERA. Published with no ids and never submitted: this
+            # group's barrier must not wait on it. COUNTED, because #258's review found the
+            # other plane passing over every frame with nothing saying so.
+            self._metrics.frame_missing(MISSED_NOT_MINE)
+            return self._missing(item)
         capture_s = self._capture_s(item)
         view = self._view(item, camera_id, capture_s, tracks)
         # HOW LATE THIS FRAME IS: here, because only this place holds both stamps on one
