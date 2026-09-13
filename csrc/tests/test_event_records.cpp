@@ -229,8 +229,9 @@ namespace {
 
         check(line.find("\"global_id_group\":\"mtmc_north\"") != std::string::npos,
               "the group reaches the JSON: " + line.substr(0, 200));
-        // AND OMITTED when no group answered, which is every single-group chain here: a key
-        // on all 1000 events a second would be broker bytes for a fact they do not have.
+        // AND OMITTED when no slot answered for the frame -- a missed instant, or a chain
+        // with no cross-camera tier. A chain that HAS one writes it on every frame it
+        // associates, single-group or not.
         const std::string plain =
             event_of(a_frame(), FinishReason::Complete, {}, "shard-1", kLabels, {}).to_json();
         check(plain.find("global_id_group") == std::string::npos,

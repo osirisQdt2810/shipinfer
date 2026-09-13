@@ -1,9 +1,10 @@
 """The perception event: one frame's finished answer, as the wire and the file see it.
 
-Schema v4: per-object parallel arrays (``*_bbox_vec``, ``*_track_id_vec``,
+Schema v5: per-object parallel arrays (``*_bbox_vec``, ``*_track_id_vec``,
 ``*_global_id_vec``, ``*_feature_vec``) split by class, plus frame identity (``camera_id``,
-``image_id``, ``sub_id``), geometry (``img_width/height/fps``) and ``missing_stages`` — a partial frame
-says so instead of reading as an empty complete one. Why every v1 key keeps its name, type
+``image_id``, ``sub_id``), geometry (``img_width/height/fps``), ``missing_stages`` — a partial
+frame says so instead of reading as an empty complete one — and ``global_id_group``, which
+names the identity space the frame's ``global_id``s came from. Why every v1 key keeps its name, type
 and people-only meaning (a deployed ``motservice`` must need no rebuild):
 ``docs/design/event-schema.md``. Stdlib only, by construction and by test
 (``TestTheSchemaIsPortable``): a consumer may copy this module out wholesale.
@@ -30,10 +31,10 @@ __all__ = [
 #: part of the contract, and a new one would be routed nowhere by a deployed consumer.
 MESSAGE_TYPE = "Det2MOT"
 
-#: 1 was ``DetectionMOTFrameData``. 2 adds ships, timing and completeness; 3 adds the
-#: track id and its state; 4 adds the cross-camera ``global_id``. Every step is additive, and
-#: the number is bumped rather than left alone precisely so a consumer can branch on it
-#: instead of probing for a key.
+#: 1 was ``DetectionMOTFrameData``. 2 adds ships, timing and completeness; 3 adds the track
+#: id and its state; 4 the cross-camera ``global_id``; 5 which identity space minted it.
+#: Every step is additive, and the number is bumped rather than left alone precisely so a
+#: consumer can branch on it instead of probing for a key.
 SCHEMA_VERSION = 5
 
 
@@ -258,9 +259,10 @@ class PerceptionEvent:
                 "reason": self.reason,
             }
         )
-        # OMITTED WHEN ABSENT, not written as null: every chain here has one group, so a key
-        # on every event of every deployment would be bytes on the broker for a fact only a
-        # two-group fleet has. A consumer reads its absence as "one identity space".
+        # OMITTED WHEN ABSENT, not written as null. Present exactly when a cross-camera
+        # tier answered for THIS frame -- a one-group chain writes it on every frame its slot
+        # associates -- so absence is the frame-level fact `missing_stages` carries, and
+        # never "this deployment has one identity space".
         if self.global_id_group is not None:
             payload["global_id_group"] = self.global_id_group
         if self.extra:

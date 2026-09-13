@@ -328,7 +328,7 @@ namespace shipinfer {
                          std::vector<std::string> embedding_sources,
                          std::shared_ptr<mtmc::InstantBarrier> barrier,
                          std::shared_ptr<mtmc::ClusterTracker> tracker,
-                         std::vector<std::string> roster, bool routes, std::string slot)
+                         std::vector<std::string> roster, bool routes)
         // CONSUMES the track ids and does NOT need them, for the reason `TrackStage` does not
         // need the detections: a camera with nothing to report still has to REPORT, or the
         // instant it belongs to waits for it until the window runs out and every other camera
@@ -340,8 +340,7 @@ namespace shipinfer {
           barrier_(std::move(barrier)),
           roster_(roster.begin(), roster.end()),
           routes_(routes),
-          tracker_(std::move(tracker)),
-          slot_(std::move(slot)) {}
+          tracker_(std::move(tracker)) {}
 
     namespace {
 
@@ -515,7 +514,10 @@ namespace shipinfer {
             // WHOSE COUNTER, filed only here -- beside the ids and never without them, which
             // is where `elements/mtmc.py` files it too. A frame that missed its instant
             // carries no ids, so naming a slot for it would name one that answered nothing.
-            state.note_global_id_group(slot_);
+            // `name()` IS the slot (`from_plan.cpp` passes `spec.slot` as it), so this reads
+            // the one that exists rather than carrying a second copy -- which is also the
+            // mechanism the other plane uses (`self.name`).
+            state.note_global_id_group(name());
             const auto& ids =
                 *std::static_pointer_cast<const std::map<mtmc::TrackKey, int64_t>>(
                     outcome.results);
