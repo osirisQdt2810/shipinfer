@@ -114,6 +114,11 @@ class PlanNode:
     #: `benchmarks/parity/known.py`.
     regression_reset: int | None = None
     tracker_options: tuple[tuple[str, str], ...] = ()
+    #: WHICH TRACKER, inside the `impl`. `impl` is the registry key on both planes; the
+    #: algorithm is the library's, and the two planes do not have the same SET -- so the lane
+    #: can REFUSE one it cannot run rather than running ByteTrack under another name
+    #: (`CSRC-TRACKER-ALGORITHM`).
+    algorithm: str = ""
 
 
 class SettingsLike(Protocol):
@@ -448,6 +453,9 @@ def resolve_plan(
                 tracker_options=(
                     _tracker_options(node.spec.params, where) if node.kind == "track" else ()
                 ),
+                algorithm=(
+                    _tracker_algorithm(node.spec.params, where) if node.kind == "track" else ""
+                ),
             )
         )
         if (event_field := ROW_FIELD_KINDS.get(node.kind)) is not None:
@@ -696,6 +704,18 @@ def _tracker_reset(params: Mapping[str, Any], where: str) -> int | None:
     return parse_regression_reset(value, where=where)
 
 
+def _tracker_algorithm(params: Mapping[str, Any], where: str) -> str:
+    """Which tracker inside the `impl`, as the chain spells it.
+
+    ALWAYS EMITTED, defaulted rather than left absent, because absence here would mean "the
+    lane's own default" and the two lanes do not have the same one -- which is the divergence.
+    """
+    from shipinfer.topology.elements.track import DEFAULT_ALGORITHM
+
+    stated = str(params.get("algorithm", DEFAULT_ALGORITHM))
+    return _speakable(stated, f"{where}: `algorithm`")
+
+
 def _tracker_options(params: Mapping[str, Any], where: str) -> tuple[tuple[str, str], ...]:
     """``params: options:`` as the plan spells it, sorted so one chain writes one plan.
 
@@ -842,6 +862,8 @@ def plan_text(plan: ResolvedPlan) -> str:
             lines.append(f"sync_window_ms {node.sync_window_ms!r}")
         if node.max_instants is not None:
             lines.append(f"max_instants {node.max_instants}")
+        if node.algorithm:
+            lines.append(f"algorithm {node.algorithm}")
         if node.regression_reset is not None:
             lines.append(f"regression_reset {node.regression_reset}")
         for key, value in node.tracker_options:
@@ -1320,6 +1342,7 @@ _ATTRIBUTES = {
     "camera": _camera,
     "min_hits": _min_hits,
     "min_height_fraction": _min_height_fraction,
+    "algorithm": _word_attr("algorithm"),
     "regression_reset": _regression_reset,
     "tracker_option": _tracker_option,
 }

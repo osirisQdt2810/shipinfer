@@ -53,21 +53,21 @@ KNOWN: Mapping[str, KnownDivergence] = {
         id="tracker_options",
         seam="track.track_id",
         python=(
-            "src/shipinfer/topology/elements/track.py reads params `algorithm` (any name in "
-            "shipvision.mot.TRACKERS: sort, bytetrack, ocsort, botsort, deepsortv2) and "
-            "`attribution_iou` (which drops a detection row whose IoU with every published "
-            "track is below it, so the row serialises with a null track_id)"
+            "src/shipinfer/topology/elements/track.py reads `params: attribution_iou:`, which "
+            "drops a detection row whose IoU with every published track is below it -- so the "
+            "row serialises with a null track_id rather than somebody else's"
         ),
         cpp=(
-            "csrc/shipinfer/pipeline/tracking/bytetrack.cpp is the lane's only tracker, so a "
-            "chain naming another algorithm silently runs ByteTrack; and TrackerShard::update "
-            "returns an id per detection with no attribution step, so no row is ever dropped "
-            "for a poor overlap. `options` and `regression_reset` no longer diverge -- they "
-            "cross on the plan as `tracker_option <key> <value>` and `regression_reset N`"
+            "csrc/shipinfer/pipeline/tracking/bytetrack.cpp has no attribution step at all: "
+            "TrackerShard::update returns an id per detection, so no row is ever dropped for a "
+            "poor overlap and a chain stating attribution_iou gets it on one plane only. "
+            "`options`, `regression_reset` and `algorithm` no longer diverge -- the first two "
+            "cross on the plan, and an algorithm this lane has not is now REFUSED by name "
+            "rather than run as bytetrack"
         ),
-        decided_in="PR #215 review round 3, finding 2; narrowed in #259",
-        ledger="[ ] CSRC-TRACKER-ALGORITHM the lane has one tracker and the plan says nothing",
-        case="test_the_cpp_plane_has_one_tracker_and_no_attribution_step",
+        decided_in="PR #215 review round 3, finding 2; narrowed in #259 and again in #261",
+        ledger="[ ] CSRC-TRACKER-ATTRIBUTION one plane drops a row for a poor overlap",
+        case="test_the_cpp_plane_has_no_attribution_step",
     ),
     "mtmc_group_routing": KnownDivergence(
         id="mtmc_group_routing",

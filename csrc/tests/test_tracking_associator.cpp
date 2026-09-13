@@ -183,6 +183,33 @@ namespace {
         check(refused, "and so is a value the key's type cannot take");
     }
 
+    void an_algorithm_this_lane_does_not_have_is_refused() {
+        // `CSRC-TRACKER-ALGORITHM`. The other plane resolves any name in
+        // `shipvision.mot.TRACKERS`; this lane has ByteTrack. Until the plan carried the name
+        // a chain asking for `botsort` ran ByteTrack here with nothing said -- and `made.impl`
+        // could not show it, because the impl is `shipvision` on both paths.
+        tracking::TrackerOptions elsewhere;
+        elsewhere.algorithm = "botsort";
+
+        bool refused = false;
+        try {
+            tracking::create_associator("shipvision", "slot_botsort", elsewhere);
+        } catch (const ConfigError& error) {
+            refused = std::string(error.what()).find("botsort") != std::string::npos;
+        }
+
+        check(refused, "an algorithm this lane has not is a ConfigError naming it");
+
+        // THE ONE IT DOES HAVE still builds, and so does an unstated one -- the chain did not
+        // say, the lane's default stands, and both planes default to ByteTrack.
+        tracking::TrackerOptions named;
+        named.algorithm = "bytetrack";
+        check(tracking::create_associator("shipvision", "slot_named", named) != nullptr,
+              "bytetrack by name builds");
+        check(tracking::create_associator("shipvision", "slot_unstated") != nullptr,
+              "and so does a chain that did not say");
+    }
+
     void a_factory_that_threw_leaves_no_entry_behind() {
         // `made()[key]` default-INSERTED before the factory ran, so a constructor that threw
         // cached a null under that key. `made_associators()` publishes it and `bench.cpp`'s
@@ -291,6 +318,7 @@ int main() {
     an_options_value_of_the_wrong_type_is_refused_by_name();
     two_callers_that_disagree_about_one_slot_are_refused();
     a_factory_that_threw_leaves_no_entry_behind();
+    an_algorithm_this_lane_does_not_have_is_refused();
     the_registry_refuses_an_absent_name_with_its_own_error();
     made_associators_lists_what_was_built();
     an_unknown_impl_is_refused_by_name();
