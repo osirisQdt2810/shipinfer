@@ -59,9 +59,8 @@ Resolution = str
 TOPOLOGIES = ("single", "fleet", "service")
 
 #: What a BENCH RUN can ask for -- one short of ``build_engines.py``'s, which also builds
-#: ``int8``. The bench cannot, and no longer because of the engine checks: our side loads
-#: ``model_repository/<name>/1/model.plan`` whatever precision it holds, so the flag would
-#: select nothing. ``BENCH-PRECISION-SELECTS-NO-PLAN`` is what earns it back.
+#: ``int8``. The flag SELECTS now (a named precision installs its plan), so what int8 waits
+#: on is the builder rather than this: the segmenter does not build at int8 on this box.
 PRECISIONS = ("fp32", "fp16")
 
 #: And the flag ``build_engines.py`` actually takes for each. A map rather than an f-string
@@ -263,15 +262,15 @@ class BenchConfig:
     #: detections, and their plans were outside every check.
     emb_engine: Path | None = None
     # doc: long what `None` means here, and why it is not the same as "fp32"
-    #: Which precision BOTH sides load when neither engine is named. `require_same_engines`
-    #: below is what makes this a knob rather than a hazard: point it at fp16 without
-    #: installing fp16 plans and the run is REFUSED, which is what that guard exists for.
+    #: Which precision BOTH sides load. `require_same_engines` below is what makes it a knob
+    #: rather than a hazard, and it now SELECTS: naming one INSTALLS the matching flat engine
+    #: at `model_repository/<name>/1/` before the run, so the two sides cannot load different
+    #: files. Named with no flat engine to install is still REFUSED -- a claim the run cannot
+    #: keep -- and a BASELINE-only run installs nothing, because it loads no plan of ours.
     #:
-    #: ``None`` is "nobody asked", and it is not the same claim as ``"fp32"``. Our side loads
-    #: `model_repository/<name>/1/model.plan` whatever precision it holds, so on a run with no
-    #: flat engine to compare it against, a NAMED precision is a claim the run cannot keep --
-    #: it is refused (`require_same_engines`) rather than reported. Unnamed measures whatever
-    #: is installed and says so, which is what every chain run here does.
+    #: ``None`` is "nobody asked", and it is not the same claim as ``"fp32"``: it measures
+    #: whatever is installed, says so, and never writes. That is what every chain run here
+    #: does.
     precision: str | None = None
     model_repository: Path | None = None
     #: Where JSONL logs, console captures and ``summary.json`` land.
@@ -532,6 +531,9 @@ class BenchConfig:
             return
         #: Which pairs the baseline has a stake in. Anything else is our side's attribution.
         cross_system = ("ship_detector", "ship_segmenter")
+        #: Installs this call has earned but not made. Every raise in the loop is a reason to
+        #: write nothing at all, so the copies wait until all four models have cleared it.
+        pending: list[tuple[str, Path, Path]] = []
         for model, attribute in self._ENGINE_PAIRS:
             if system == "baseline" and model not in cross_system:
                 continue
@@ -591,13 +593,51 @@ class BenchConfig:
                     f"its own from ONNX, and a run across two engines measures the engines. "
                     f"Run `python scripts/build_engines.py --force` to put one file in both."
                 )
-            if _digest(flat) != _digest(plan):
-                raise RuntimeError(
-                    f"{model}: the baseline loads {flat.name} and the server loads "
-                    f"{plan.relative_to(repository.parent)}, and they are different files. "
-                    f"A comparison across two engines measures the engines. Rebuild both "
-                    f"from one ONNX with `python scripts/build_engines.py --force`."
-                )
+            if _digest(flat) == _digest(plan):
+                continue
+            if self.precision is not None and system != "baseline":
+                # doc: long why this collects, why it installs at all, and who is excluded
+                # COLLECTED, NOT COPIED: three of this loop's raises sit after models that
+                # would already be written, and `_ENGINE_PAIRS` puts the two that install
+                # cleanly FIRST -- so an abort on the embedders left the repository half fp16
+                # and half fp32, permanently, from a run the operator asked to measure
+                # (#262 r3). All four models or none, which `--precision` already claims.
+                #
+                # WHY INSTALL rather than resolve the plan path by precision:
+                # `parameters.engine_file` is ONE value off `config.yaml`, so a
+                # precision-aware path needs a config per precision or an override teaching
+                # the REPOSITORY layer about precision -- and then `serve` loads a different
+                # file from `bench` on one repository, the divergence this closes. It is also
+                # what the refusal below already told the operator to run by hand.
+                #
+                # NEVER ON A BASELINE-ONLY RUN: the scoping above skips only the embedder
+                # PAIR, so `--systems baseline` fell through and rewrote the detector and
+                # segmenter while leaving both embedders, on a run where nothing of ours
+                # loads a plan (#262 r1).
+                pending.append((model, flat, plan))
+                continue
+            raise RuntimeError(
+                f"{model}: the baseline loads {flat.name} and the server loads "
+                f"{plan.relative_to(repository.parent)}, and they are different files. "
+                f"A comparison across two engines measures the engines. Rebuild both "
+                f"from one ONNX with `python scripts/build_engines.py --force`."
+            )
+
+        # THE WRITE, once every model has cleared the loop. A partial install is not a weaker
+        # version of "both sides load one precision" -- it is the mixed repository r1 called a
+        # defect. THE COST: this writes into the model repository before measuring, which is
+        # what `build_engines.py --install` does today.
+        for model, flat, plan in pending:
+            print(
+                f"{model}: installing {flat.name} as {plan.relative_to(repository.parent)} "
+                f"for --precision {self.precision}",
+                file=sys.stderr,
+            )
+            # STAGED AND RENAMED: `write_bytes` truncates first, so a Ctrl-C would leave a
+            # truncated plan and no original.
+            staged = plan.with_name(plan.name + ".installing")
+            staged.write_bytes(flat.read_bytes())
+            staged.replace(plan)
 
     # -- reporting ----------------------------------------------------------------------
 
