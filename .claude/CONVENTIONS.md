@@ -22,7 +22,10 @@ what makes *this* codebase work; Part 3 is how to approach a task here.
   above the symbol exempts it. Check: `python3 scripts/hooks/check_docs.py [paths]`.
   Markdown too: a `FEATURE_LOG.md` entry **≤ 15 lines**, an ADR **≤ 30**, a PR body section
   **≤ 20** — forward-only, and unchecked by any tool: `check_docs.py` reads Python ASTs, so
-  these four are prose rules. Accepted ADRs stay as written (ADR-001 is ~40 lines); a trim
+  these four are prose rules. **`csrc/` is a fifth**: the same caps, the same
+  `// doc: long <reason>` marker (74 of them today), and the same absence of a tool —
+  `check_docs.py::main` refuses a non-`.py` path outright. Write the marker meaning "a human
+  read this and kept it", never "a hook approved it". Accepted ADRs stay as written (ADR-001 is ~40 lines); a trim
   wave shortens new prose, never an accepted decision's reasoning. Cut history, apologetics
   and anything a test already proves.
 - **Errors are typed.** Raise from `shipinfer.core.errors`. Never return `None`, `[]` or

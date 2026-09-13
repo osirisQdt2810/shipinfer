@@ -67,13 +67,17 @@ class FakeBindings:
 
 
 class NullStream:
-    #: Counted, because `execute`'s post-condition is that the network is retired when it
-    #: returns -- the C++ twin's unconditional `gpuStreamSynchronize`. A double with no such
-    #: method would make that promise untestable here rather than merely unmodelled.
-    synchronised: int = 0
+    """A stream that records what was asked of it. Per INSTANCE, not per class: a counter on
+    the class is shared by every test in the file, and one that forgets to read a baseline
+    first then passes or fails on what ran before it."""
+
+    def __init__(self) -> None:
+        #: Counted, because `execute`'s post-condition is that the network is retired when it
+        #: returns -- the C++ twin's unconditional `gpuStreamSynchronize`.
+        self.synchronised = 0
 
     def synchronize(self) -> None:
-        type(self).synchronised += 1
+        self.synchronised += 1
 
     def activate(self) -> Any:
         class _Ctx:
@@ -181,12 +185,11 @@ class TestAnOutputKeptOnTheDevice:
     def test_execute_returns_with_the_network_retired(self) -> None:
         """`engine.cpp` ends `execute` with an unconditional `gpuStreamSynchronize` and this
         plane did not: every path happened to block, so the promise held by accident."""
-        before = NullStream.synchronised
         backend, _ = backend_with_engine()
 
         backend.execute({"images": Tensor.from_numpy(np.zeros((3,), np.float32))}, 3)
 
-        assert NullStream.synchronised == before + 1
+        assert backend._stream.synchronised == 1
 
     def test_a_name_the_engine_lacks_is_refused_with_the_list(self) -> None:
         """The same refusal `set_fold` makes, for the same reason: unchecked it would keep
