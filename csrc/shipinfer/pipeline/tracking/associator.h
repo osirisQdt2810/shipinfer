@@ -62,11 +62,15 @@ namespace shipinfer::tracking {
     //: that ownership into the plan reader -- where an unknown key could only be dropped.
     //: `bytetrack.cpp` converts and REFUSES a key it does not have, which is what
     //: `TrackerShard` does at `open()` on the other plane.
-    //: NO `attribution_iou`, and its absence is the decision rather than an omission: that
-    //: knob maps a tracker's answers back onto detection ROWS, and this plane has no such
-    //: step -- `TrackerShard::update` returns ids per detection already. A plan line nothing
-    //: reads is the same trap as a reader that drops what it does not know, so the remaining
-    //: divergence stays named in `benchmarks/parity/known.py` instead.
+    //: NO `attribution_iou`, and its absence is the decision rather than an omission -- but
+    //: NOT because this plane lacks the step, which is what this comment used to say and what
+    //: the 13 Sep ruling under CSRC-TRACKER-ATTRIBUTION found false. `shard.cpp` maps tracks
+    //: onto rows EXACTLY, by `Track::last_match`, the row the pool recorded when it applied
+    //: the measurement. There is nothing here for a threshold to tune, and a knob that
+    //: re-derived the mapping geometrically would discard that provenance to re-guess it. A
+    //: plan line nothing reads is the same trap as a reader that drops what it does not know,
+    //: so what survives -- two different rules for which rows go null -- stays named in
+    //: `benchmarks/parity/known.py` instead.
     struct TrackerOptions {
         std::optional<int64_t> regression_reset;
         std::map<std::string, std::string> options;
