@@ -328,7 +328,7 @@ namespace shipinfer {
                          std::vector<std::string> embedding_sources,
                          std::shared_ptr<mtmc::InstantBarrier> barrier,
                          std::shared_ptr<mtmc::ClusterTracker> tracker,
-                         std::vector<std::string> roster, bool routes)
+                         std::vector<std::string> roster, bool routes, std::string slot)
         // CONSUMES the track ids and does NOT need them, for the reason `TrackStage` does not
         // need the detections: a camera with nothing to report still has to REPORT, or the
         // instant it belongs to waits for it until the window runs out and every other camera
@@ -340,7 +340,8 @@ namespace shipinfer {
           barrier_(std::move(barrier)),
           roster_(roster.begin(), roster.end()),
           routes_(routes),
-          tracker_(std::move(tracker)) {}
+          tracker_(std::move(tracker)),
+          slot_(std::move(slot)) {}
 
     namespace {
 
@@ -372,7 +373,7 @@ namespace shipinfer {
         //
         // ONLY WHEN THE PLAN BUILT MORE THAN ONE GROUP (`routes_`), and that is the whole
         // guard rather than a refinement of it. A roster has always been a statement to the
-        // FLEET about which shard a camera belongs on -- `runners/fleet.py::_camera_groups`
+        // FLEET about which shard a camera belongs on -- `topology/chain.py::camera_groups`
         // reads it to place cameras, and the element itself associates every camera it is
         // handed (`elements/mtmc.py::camera_added` warns and carries on). Making it a filter
         // for a lone group silently dropped every frame of `ship_person_cpu.yaml`, whose
@@ -511,6 +512,10 @@ namespace shipinfer {
         batch.name = output_;
         batch.width = 1;
         if (outcome.associated && outcome.results) {
+            // WHOSE COUNTER, filed only here -- beside the ids and never without them, which
+            // is where `elements/mtmc.py` files it too. A frame that missed its instant
+            // carries no ids, so naming a slot for it would name one that answered nothing.
+            state.note_global_id_group(slot_);
             const auto& ids =
                 *std::static_pointer_cast<const std::map<mtmc::TrackKey, int64_t>>(
                     outcome.results);

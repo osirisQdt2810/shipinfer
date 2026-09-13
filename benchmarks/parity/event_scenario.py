@@ -4,7 +4,8 @@ Line-oriented so the C++ half needs no JSON parser -- the rule `scenario.py` and
 `queue_scenario.py` follow. An event is a *value*, so a scenario is its arguments::
 
     scenario mixed_frame   # then: camera, frame, source, size, fps, captured_ns,
-    camera cam0            #   captured_unix_ns, emitted_unix_ns, missing, reason
+    camera cam0            #   captured_unix_ns, emitted_unix_ns, missing, reason,
+                           #   global_id_group
     person <det_id> <score> <x1> <y1> <x2> <y2> [track <id> <state>] [global <id>] [emb v...]
     ship   <det_id> <score> <x1> <y1> <x2> <y2> [ship <id> <similarity>] [mask <area>]
 
@@ -85,6 +86,9 @@ class EventScenario:
     emitted_unix_ns: int = 0
     missing: tuple[str, ...] = ()
     reason: str = "complete"
+    #: The `mtmc` slot that answered, or `None` for a scenario with no cross-camera tier.
+    #: Both readings are golden: the key is written only when a slot is named.
+    global_id_group: str | None = None
     objects: tuple[ObjectSpec, ...] = field(default_factory=tuple)
 
 
@@ -173,7 +177,7 @@ def load_event_scenario(path: Path) -> EventScenario:
             objects.append(_object(directive, words, where))
         elif directive == "scenario":
             fields["name"] = words[0]
-        elif directive in ("camera", "source"):
+        elif directive in ("camera", "source", "global_id_group"):
             fields[directive] = words[0]
         elif directive == "reason":
             # The word, for a scenario that wants one directly.

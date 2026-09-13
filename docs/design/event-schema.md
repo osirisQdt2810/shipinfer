@@ -1,4 +1,4 @@
-# The perception event's compatibility rationale (v1 → v3)
+# The perception event's compatibility rationale (v1 → v5)
 
 The event keeps the old Kafka contract and extends it, because the downstream services
 already exist: `motservice` consumes per-frame detections and `mtmcservice` consumes
@@ -24,6 +24,19 @@ event is built, so it travels with the object — `body_track_id_vec` beside
 is untouched, so a deployed `motservice` that ignores the new keys keeps working, and one
 that reads them can stop doing its own association.
 
+**v4 adds the cross-camera identity.** `body_global_id_vec` and `ship_global_id_vec`, one
+entry per object beside the per-camera `track_id` rather than replacing it: a consumer that
+joins two cameras reads these, one that follows a single camera keeps reading the pair above.
+`null` means this object has no fleet identity, which is not the same as having no track.
+
+**v5 names the identity space.** Two `mtmc` slots in one fleet are two counters, so north's
+global id 7 and south's 7 are different objects wearing one number. `global_id_group` is the
+**slot** that answered, not its `group:` — a group is a placement label and two slots may
+share one, so naming it would give two identity spaces one name.
+**Written only when a group answered**, unlike the arrays above, which are always present:
+an array is indexed by row and a missing one would break the join, while this is a scalar,
+and every chain here has one group. Absence reads as "one identity space".
+
 The module itself (`src/shipinfer/core/events/schema.py`) is stdlib-only so a consumer may
 copy it out wholesale; `TestTheSchemaIsPortable` enforces that.
 
@@ -44,6 +57,7 @@ embedder timed out have to be different events, which is what `missing_stages` i
 | `tracks` | `track` (`elements/track.py`) | `track_id` / `track_state` |
 | `track_rows` | `track` | which detection row each track came from |
 | `global_ids` | `mtmc` (`elements/mtmc.py`) | `global_id` |
+| `global_id_group` | `mtmc`, beside the ids — its slot | `global_id_group` |
 | `missing_stages` | whichever stage had a gap | `missing_stages` |
 
 The event's rows are the frame's *detections*: `det_id`, `bbox`, `score`, the embedding and

@@ -116,7 +116,11 @@ namespace shipinfer {
             dag.add(std::make_unique<MtmcStage>(
                 spec.slot, spec.output, spec.track_source, spec.embedding_sources,
                 barrier->second, mtmc::create_cluster_tracker(spec.impl, spec.slot, spec.gate),
-                spec.cameras, planned.mtmcs.size() > 1));
+                spec.cameras, planned.mtmcs.size() > 1,
+                // THE SLOT for the event's `global_id_group`, not `spec.group`: a `group:` is
+                // a placement label and two slots may share one, so naming it would give two
+                // identity spaces one name.
+                spec.slot));
         }
         return dag;
     }

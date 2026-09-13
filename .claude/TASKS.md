@@ -3535,6 +3535,21 @@ hook down, for when the operator asked to see something before it is executed.
       A CAMERA IN NO ROSTER AT ALL is the residue of (3), and it has its own line below
       (`MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED`) rather than prose inside a closed item.
 
+- [ ] MTMC-A-TRACKLESS-FRAME-IS-MARKED-BY-EVERY-SLOT · `_do_process` tests `tracks is None`
+      before it tests ownership, so in a two-slot chain a frame the tracker never answered for
+      gets `"mtmc"` appended by BOTH slots and `missing_stages` reads `("mtmc", "mtmc")`.
+      Harmless -- `is_partial()` is a membership test -- but it is noise on a diagnostic field,
+      and hoisting the ownership test above the `tracks` lookup would also spare a non-owning
+      slot the lookup on every foreign frame. Found by #263's approving review.
+
+- [ ] MTMC-AN-UNROSTERED-SLOT-IN-A-TWO-GROUP-PROCESS-IS-SILENT · the Python routing test is
+      `self._routes and self._roster_set and camera_id not in self._roster_set`; the C++ twin
+      is `routes_ && roster_.count(...) == 0`, with no roster-is-empty conjunct. Through
+      `Topology.from_spec` the difference is unreachable (an unrostered second slot is refused
+      at load), but a `Topology` assembled another way plus `camera_groups=2` has the Python
+      slot silently claim every camera where the C++ one claims none. An assert would say it
+      out loud. Found by #263's approving review.
+
 - [ ] MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED · with two groups, a camera NEITHER roster names
       is returned unchanged by every slot, so its event carries no `global_ids`, no marker
       saying why, and `is_partial()` false. Reachable: add a camera by API that the chain
@@ -3544,6 +3559,12 @@ hook down, for when the operator asked to see something before it is executed.
       same event with ids, so a kind marker would read as "mtmc did not run" on a frame where
       it did. Found by #263's review; recorded rather than solved because the marker is a
       schema question and the PR was a routing one.
+      IT IS ALSO A LIVE CROSS-PLANE DIVERGENCE with no register entry: the C++ not-mine path
+      attaches an EMPTY `ObjectBatch` under the slot's own name, so a reader there can tell
+      "this slot passed over" from "this slot produced no ids", while Python returns the item
+      untouched and the event carries nothing per slot. `benchmarks/parity/known.py` now says
+      the mtmc divergence is closed, which is what the next mtmc PR's reviewer reads -- so
+      whoever takes this item adds the entry or removes the difference.
 
 - [ ] MTMC-PYTHON-HAS-NO-NOT-MINE-DIAGNOSTIC · the C++ barrier remembers WHICH cameras a group
       passed over (`cameras_not_mine()`, printed per slot by `cli/bench.cpp`). The Python
@@ -3552,16 +3573,36 @@ hook down, for when the operator asked to see something before it is executed.
       declared roster rather than what was dropped. Found by #263's review; out of scope there
       because the counter is what the PR needed and the names are a second seam.
 
-- [ ] MTMC-TWO-GROUPS-SHARE-AN-ID-SPACE-DOWNSTREAM · group north's global id 7 and group
+- [x] MTMC-TWO-GROUPS-SHARE-AN-ID-SPACE-DOWNSTREAM · group north's global id 7 and group
       south's id 7 are the same number and a reader cannot tell them apart. Each group gets its
       own `IdentityMap` with its own `counter_++` (`mtmc/identity.h`), which is correct -- two
       groups are two identity spaces -- but `ObjectRecord` carries no group or slot, so the
       event stream flattens them. Pre-existing on both planes; #258 is what makes it reachable,
       since before it a second group was refused outright. Found by #258's review.
-      THE FIX is a field, and the question is which: the mtmc slot name on the record (cheap,
-      and the reader joins it), or ids minted from a per-group base so they never collide
-      (no schema change, but it spends id space and hides the group). The first is the shape
-      every other per-slot fact here takes.
+      DONE: the FIELD, and on `PerceptionEvent` rather than `ObjectRecord`. Schema v5 adds
+      `global_id_group`, the `mtmc` SLOT that answered. NOT its `group:`, which is a PLACEMENT
+      label two slots may legally share (#263's `test_two_slots_may_share_one_group_name`), so
+      naming it would give two identity spaces one name -- the confusion this item is about.
+      PER EVENT and not per object because the wire format is per-class vectors and a frame's
+      camera is in exactly one group: one string, not four more arrays.
+      The other candidate -- ids minted from a per-group base -- was rejected for the reason
+      the item states: it spends id space and HIDES the group, so a reader still cannot name
+      the space it is holding.
+      WRITTEN ONLY WHEN A GROUP ANSWERED, unlike the v4 arrays, which are always present: an
+      array is indexed by row and a missing one breaks the join, while this is a scalar and
+      every chain here has one group -- a key on 1000 events a second would be broker bytes
+      for a fact they do not have. Absence reads as "one identity space".
+      EVIDENCE: `mixed_frame.scn` names a slot and the other three event goldens do not, so
+      the byte gate compares BOTH readings -- with the directive ignored on the C++ side it
+      reports `differs at column 854`. The end-to-end is
+      `test_each_cameras_events_name_the_slot_that_minted_their_ids`: two real slots, disjoint
+      rosters, BOTH declaring `group: quay`, and each camera's four events naming its own slot
+      -- a field carrying the group would name both spaces `quay` and fail there.
+      Offline suite 4409 passed / 9 skipped, and 4168 passed / 236 skipped with `shipvision`
+      unfindable; 30 offline C++ binaries green; `test_mtmc_stage` 46 checks and
+      `test_event_records` 24 checks in the container. Both planes probed red: dropping
+      `state.note_global_id_group` fails the stage check; filing `_group` instead of the slot
+      fails the element test, the end-to-end and the real-tier chain test.
 
 - [x] CSRC-MTMC-GATE-OPTIONS · THE GATE'S THRESHOLDS ARE NOT SETTABLE FROM THE CHAIN, and
       MEASURED 11 Sep that is what makes the chain issue zero global ids: at 12 cameras x 20 fps
