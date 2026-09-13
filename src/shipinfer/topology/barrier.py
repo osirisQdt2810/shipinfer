@@ -435,6 +435,7 @@ class InstantBarrier:
         "_max_instants",
         "_newest_capture",
         "_next_instant",
+        "_not_mine",
         "_on_event",
         "_recent",
         "_recent_limit",
@@ -507,6 +508,10 @@ class InstantBarrier:
         #: Cameras that have actually submitted a frame. Only consulted before the first
         #: announcement — see :meth:`camera_added`.
         self._seen: set[str] = set()
+        #: Cameras whose frames this group passed over, from :meth:`note_not_mine`. A RECORD
+        #: and not a membership, so :meth:`drop_camera` leaves it alone: what happened
+        #: happened. `mtmc/barrier.cpp`'s `not_mine_` does the same, deliberately.
+        self._not_mine: set[str] = set()
         #: Each camera's newest capture stamp, and how many frames in a row it has refused
         #: against it. Both bounded by the fleet and dropped with the camera.
         self._newest_capture: dict[str, float] = {}
@@ -636,6 +641,31 @@ class InstantBarrier:
             # difference is empty and nothing can be silent by construction. A branch for that
             # would be a second statement of the same fact.
             return frozenset(self._announced - self._seen)
+
+    def note_not_mine(self, camera_id: str) -> None:
+        """One frame routed to another group in this process: count it, and name the camera.
+
+        HANDED IN, like :meth:`note_arrival_lag_us`: the routing decision is the element's
+        roster test and this class has never known what a roster is. Both halves under one
+        lock because they are one fact — :meth:`frame_stats` says how many, the set beside it
+        says which, and a count with nothing to point at is what #258's review found.
+        """
+        with self._cond:
+            self._frame_counts[MISSED_NOT_MINE] = self._frame_counts.get(MISSED_NOT_MINE, 0) + 1
+            self._not_mine.add(camera_id)
+
+    @property
+    def cameras_not_mine(self) -> frozenset[str]:
+        """Cameras whose frames this group passed over. Empty for a one-group process.
+
+        THE OPPOSITE QUESTION to :attr:`silent_cameras`, and the one a routing mistake needs:
+        `silent` names the cameras this group was promised and never saw, so a bad roster has
+        it naming the declared ones and pointing away from the cause. Non-empty is NORMAL with
+        two groups — every frame of every foreign camera lands here — so it is read beside
+        `silent`, never alarmed on.
+        """
+        with self._cond:
+            return frozenset(self._not_mine)
 
     @property
     def open_instants(self) -> int:

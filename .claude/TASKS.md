@@ -3535,20 +3535,37 @@ hook down, for when the operator asked to see something before it is executed.
       A CAMERA IN NO ROSTER AT ALL is the residue of (3), and it has its own line below
       (`MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED`) rather than prose inside a closed item.
 
-- [ ] MTMC-A-TRACKLESS-FRAME-IS-MARKED-BY-EVERY-SLOT · `_do_process` tests `tracks is None`
+- [x] MTMC-A-TRACKLESS-FRAME-IS-MARKED-BY-EVERY-SLOT · `_do_process` tests `tracks is None`
       before it tests ownership, so in a two-slot chain a frame the tracker never answered for
       gets `"mtmc"` appended by BOTH slots and `missing_stages` reads `("mtmc", "mtmc")`.
       Harmless -- `is_partial()` is a membership test -- but it is noise on a diagnostic field,
       and hoisting the ownership test above the `tracks` lookup would also spare a non-owning
       slot the lookup on every foreign frame. Found by #263's approving review.
+      DONE: hoisted, to the order `stages.cpp::do_run` already had. THE NOISE WAS THE SMALL
+      HALF -- asking second also made a foreign frame with no tracks `no_tracks` here and
+      `not_mine` there, which is a plain sync-rule break, and let a non-owning slot's
+      `ValidationError` on `meta['tracks']` fail the frame for the slot that DOES own the
+      camera (the runner fails an item's future on any exception).
+      EVIDENCE: `test_the_ownership_test_comes_before_the_frame_is_read` and
+      `test_a_foreign_frames_bad_tracks_do_not_fail_the_slot_that_owns_it`; both fail against
+      the element exactly as main had it.
 
-- [ ] MTMC-AN-UNROSTERED-SLOT-IN-A-TWO-GROUP-PROCESS-IS-SILENT · the Python routing test is
+- [x] MTMC-AN-UNROSTERED-SLOT-IN-A-TWO-GROUP-PROCESS-IS-SILENT · the Python routing test is
       `self._routes and self._roster_set and camera_id not in self._roster_set`; the C++ twin
       is `routes_ && roster_.count(...) == 0`, with no roster-is-empty conjunct. Through
       `Topology.from_spec` the difference is unreachable (an unrostered second slot is refused
       at load), but a `Topology` assembled another way plus `camera_groups=2` has the Python
       slot silently claim every camera where the C++ one claims none. An assert would say it
       out loud. Found by #263's approving review.
+      DONE: BOTH, which is better than either. The conjunct is gone, so the two per-frame
+      tests now read the same on both planes; and each plane refuses the state the conjunct
+      was hiding -- `_do_open` and the `MtmcStage` constructor both throw when a slot must
+      route and names no cameras. A loud refusal beats a term that quietly makes the planes
+      disagree.
+      EVIDENCE: `test_a_slot_that_must_route_and_names_no_cameras_is_refused_at_open` with
+      `test_one_group_may_still_name_no_cameras` beside it, and
+      `a_routing_slot_that_names_no_cameras_is_refused` / `a_lone_slot_may_name_no_cameras`
+      in `test_mtmc_stage.cpp`.
 
 - [ ] MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED · with two groups, a camera NEITHER roster names
       is returned unchanged by every slot, so its event carries no `global_ids`, no marker
@@ -3559,19 +3576,29 @@ hook down, for when the operator asked to see something before it is executed.
       same event with ids, so a kind marker would read as "mtmc did not run" on a frame where
       it did. Found by #263's review; recorded rather than solved because the marker is a
       schema question and the PR was a routing one.
-      IT IS ALSO A LIVE CROSS-PLANE DIVERGENCE with no register entry: the C++ not-mine path
-      attaches an EMPTY `ObjectBatch` under the slot's own name, so a reader there can tell
-      "this slot passed over" from "this slot produced no ids", while Python returns the item
-      untouched and the event carries nothing per slot. `benchmarks/parity/known.py` now says
-      the mtmc divergence is closed, which is what the next mtmc PR's reviewer reads -- so
-      whoever takes this item adds the entry or removes the difference.
+      IT IS NOT A CROSS-PLANE DIVERGENCE, and an earlier version of this line said it was.
+      The C++ not-mine path attaches an EMPTY `ObjectBatch` under the slot's own name
+      (`stages.cpp`) where Python returns the item untouched, but that reaches no reader:
+      `records.cpp` takes the SAME `continue` for an empty batch as for an absent one, so both
+      planes publish every `*_global_id_vec` entry null, `missing_stages` `[]`, `partial`
+      false and NO `global_id_group` key. The attach buys an in-process name-exists join that
+      no stage and no consumer reads. `benchmarks/parity/known.py` needs no entry -- an entry
+      whose divergence does not exist is the rot that file warns about. What IS missing is a
+      slot-scoped marker on the event, which is this item.
 
-- [ ] MTMC-PYTHON-HAS-NO-NOT-MINE-DIAGNOSTIC · the C++ barrier remembers WHICH cameras a group
+- [x] MTMC-PYTHON-HAS-NO-NOT-MINE-DIAGNOSTIC · the C++ barrier remembers WHICH cameras a group
       passed over (`cameras_not_mine()`, printed per slot by `cli/bench.cpp`). The Python
       barrier has the counter and not the names, so a routing mistake there is a number with
       nothing to point at -- and `silent_cameras()` answers the opposite question, naming the
       declared roster rather than what was dropped. Found by #263's review; out of scope there
       because the counter is what the PR needed and the names are a second seam.
+      DONE: `InstantBarrier.note_not_mine` and `.cameras_not_mine`, `not_mine_`'s twin down to
+      the details that matter -- both halves under ONE lock because they are one fact, and
+      `drop_camera` deliberately does NOT erase it, because what happened happened.
+      EVIDENCE: `TestTheCamerasThisGroupPassedOver` (five cases, including the one that tells
+      it apart from `silent_cameras` on one barrier), and the element test asserts both
+      properties on the same run -- `cameras_not_mine == {cam-south}` while
+      `silent_cameras == {cam-north}`, which is the confusion the item is about.
 
 - [x] MTMC-TWO-GROUPS-SHARE-AN-ID-SPACE-DOWNSTREAM · group north's global id 7 and group
       south's id 7 are the same number and a reader cannot tell them apart. Each group gets its

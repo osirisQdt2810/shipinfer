@@ -552,22 +552,27 @@ class TestTwoIdentitySpacesAreTellableApartOnTheWire:
         started = runner(
             two_group_chain_for(path),
             settings=settings(workers=4),
-            source_factory=scripted(frames=2),
+            source_factory=scripted(frames=3),
         )
         started.add_camera(CameraSpec("cam-a", "injected://a", 0.0))
         started.add_camera(CameraSpec("cam-b", "injected://b", 0.0))
 
-        assert until(lambda: len(events_in(path)) == 4), events_in(path)
+        assert until(lambda: len(events_in(path)) == 6), events_in(path)
 
+        # PER CAMERA, and never "all six named a slot": a tracker's first frame may publish
+        # no track at all, and then its instant carries no ids and no slot. What a slot
+        # passing over its OWN camera breaks is that camera having ANY named event, which is
+        # what this asserts -- and it stays deterministic under load.
         owner = {"cam-a": "mtmc_north", "cam-b": "mtmc_south"}
-        named = 0
+        named: dict[str, set[str]] = {"cam-a": set(), "cam-b": set()}
         for event in events_in(path):
             group = event.get("global_id_group")
             if group is None:
                 continue
-            named += 1
-            assert group == owner[event["camera_id"]], (
-                "a camera's ids were minted by the other group's counter, or the field "
-                "carries the shared `group:` rather than the slot"
+            named[event["camera_id"]].add(group)
+        for camera, slots in named.items():
+            assert slots == {owner[camera]}, (
+                f"{camera}: expected only {owner[camera]!r} to mint its ids, got {slots or 'none'}"
+                " -- another group's counter, the shared `group:`, or a slot that passed over"
+                f" its own camera. Events: {events_in(path)}"
             )
-        assert named == 4, f"a slot passed over its own camera: {events_in(path)}"

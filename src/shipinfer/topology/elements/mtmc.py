@@ -216,15 +216,18 @@ class _MtmcMetrics:
         )
         self.missing = registry.counter(
             "shipinfer_mtmc_frames_missing_total",
-            "Frames emitted with `mtmc` in `missing_stages`, by reason. Every one of these "
-            "carries its boxes, vectors and per-camera track ids and lacks only the global "
-            "id, which is worth far more than a dropped frame. The reasons mix two "
-            "vocabularies on purpose: `late`, `duplicate`, `backward` and `would_starve` "
-            "are what happened to this frame, while `evicted`, `expired`, `failed` and "
-            "`unassignable` "
-            "are what happened to the *instant* it was in -- one such instant produces one "
-            "of these per camera in it, so read this against "
-            "`shipinfer_mtmc_instants_total` rather than as a count of instants.",
+            "Frames this slot published no global id for, by reason. Every one carries its "
+            "boxes, vectors and per-camera track ids and lacks only the global id, which is "
+            "worth far more than a dropped frame. The reasons mix THREE vocabularies on "
+            "purpose: `late`, `duplicate`, `backward` and `would_starve` are what happened to "
+            "this frame; `evicted`, `expired`, `failed` and `unassignable` are what happened "
+            "to the *instant* it was in -- one such instant produces one of these per camera "
+            "in it, so read this against `shipinfer_mtmc_instants_total` rather than as a "
+            "count of instants; and `not_mine` is neither, because nothing went wrong. That "
+            "frame belongs to ANOTHER group in this process, which fills it with ids, so "
+            "`not_mine` alone carries no `mtmc` in `missing_stages` and ticks at full frame "
+            "rate on a healthy two-group deployment. Read it beside "
+            "`InstantBarrier.cameras_not_mine`, which names the cameras.",
         )
         self.late = registry.counter(
             "shipinfer_mtmc_frames_late_total",
@@ -485,6 +488,16 @@ class ShipvisionMtmc(Element):
         # ONE process both taking every camera is two contradictory sets of ids for one
         # object -- the other plane's `routes_`, same guard.
         self._routes = context.camera_groups > 1
+        # AN UNROSTERED SLOT CANNOT ROUTE, which is what lets `_do_process` spell its test
+        # exactly as `stages.cpp` does. `_check_every_group_is_rostered` refuses this chain at
+        # load; a hand-built element would otherwise claim EVERY camera where the other plane
+        # claims none, silently.
+        if self._routes and not self._roster_set:
+            raise ConfigurationError(
+                f"mtmc element {self.name!r} shares this process with another cross-camera "
+                f"group and declares no `cameras:`. An unrostered group means every camera, "
+                f"so it would take the other group's too and give one object two global ids"
+            )
         self._TrackingError = load_errors().TrackingError
         self._CameraTracks = mtmc.CameraTracks
         self._FrameTrackCluster = mtmc.FrameTrackCluster
@@ -710,6 +723,21 @@ class ShipvisionMtmc(Element):
         # deployment that has this fault. Two bool reads in the common case; the barrier is
         # asked at most once per window-closing instant, which `_note_silent_roster` explains.
         self._note_silent_roster()
+        assert self._barrier is not None  # `process` refuses before `open`
+        camera_id = item.context.camera_id
+        # NOT THIS GROUP'S CAMERA, AND ASKED FIRST -- before the frame is even read for
+        # tracks, which is the order `stages.cpp::do_run` has. Asking second made a foreign
+        # frame with no tracks `no_tracks` here and `not_mine` there, and let one slot's
+        # `ValidationError` fail the frame for the slot that does own the camera.
+        if self._routes and camera_id not in self._roster_set:
+            # COUNTED AND NAMED on the barrier, not just on the metrics registry: a routing
+            # mistake is a number with nothing to point at otherwise (`cameras_not_mine`).
+            self._barrier.note_not_mine(camera_id)
+            self._metrics.frame_missing(MISSED_NOT_MINE)
+            # UNCHANGED, not `_missing`: that marker is the KIND, so marking here would say
+            # the mtmc stage is missing on the very event the OTHER slot fills with ids --
+            # `is_partial()` true on every frame of a two-group deployment (#263 r1).
+            return item
         tracks = item.meta.get("tracks")
         if tracks is None:
             self._metrics.frame_missing(MISSING_TRACKS)
@@ -720,18 +748,6 @@ class ShipvisionMtmc(Element):
                 f"{type(tracks).__name__} and needs the sequence of tracks a `track` element "
                 "files"
             )
-
-        assert self._barrier is not None  # `process` refuses before `open`
-        camera_id = item.context.camera_id
-        if self._routes and self._roster_set and camera_id not in self._roster_set:
-            # NOT THIS GROUP'S CAMERA. Published with no ids and never submitted: this
-            # group's barrier must not wait on it. COUNTED, because #258's review found the
-            # other plane passing over every frame with nothing saying so.
-            self._metrics.frame_missing(MISSED_NOT_MINE)
-            # UNCHANGED, not `_missing`: that marker is the KIND, so marking here would say
-            # the mtmc stage is missing on the very event the OTHER slot fills with ids --
-            # `is_partial()` true on every frame of a two-group deployment (#263 r1).
-            return item
         capture_s = self._capture_s(item)
         view = self._view(item, camera_id, capture_s, tracks)
         # HOW LATE THIS FRAME IS: here, because only this place holds both stamps on one

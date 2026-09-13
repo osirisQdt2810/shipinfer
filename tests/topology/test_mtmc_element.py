@@ -1181,6 +1181,75 @@ class TestTwoGroupsInOneProcessRouteByRoster:
                 registry, "shipinfer_mtmc_frames_missing_total", reason=MISSED_NOT_MINE
             )
             assert counted == 1.0, "the frame this group did not take is counted as not_mine"
+            assert element.barrier is not None
+            assert element.barrier.cameras_not_mine == frozenset({"cam-south"}), (
+                "AND NAMED. A count on its own is a routing mistake with nothing to point "
+                "at, and `silent_cameras` answers the other question -- it would list "
+                "`cam-north`, the camera this group was promised"
+            )
+            assert element.barrier.silent_cameras == frozenset({"cam-north"})
+        finally:
+            element.close()
+
+    def test_a_slot_that_must_route_and_names_no_cameras_is_refused_at_open(self) -> None:
+        """What lets `_do_process` spell its test exactly as `stages.cpp` does.
+
+        The Python test used to carry a third term, `and self._roster_set`, that the C++ twin
+        has no trace of: an unrostered slot there claims NO camera while here it claimed EVERY
+        one. `chain.py::_check_every_group_is_rostered` refuses such a chain at load, so this
+        is unreachable through `Topology.from_spec` -- and a silent divergence is worth a loud
+        refusal rather than a conjunct that hides it.
+        """
+        element = create_element(ElementKind.MTMC, "shipvision", "mtmc-north", {})
+
+        with pytest.raises(ConfigurationError, match="declares no `cameras:`"):
+            element.open(ElementContext(workers=4, camera_groups=2))
+
+    def test_one_group_may_still_name_no_cameras(self) -> None:
+        """The other half, and every chain in this repository: with nowhere to route to a
+        roster is the fleet's placement hint and an absent one is not a fault."""
+        element = create_element(ElementKind.MTMC, "shipvision", "mtmc", {})
+        element.open(ElementContext(workers=4, camera_groups=1))
+        element.close()
+
+    def test_the_ownership_test_comes_before_the_frame_is_read(self) -> None:
+        """The order `stages.cpp::do_run` has, and asking second was three wrongs.
+
+        A foreign frame the tracker never answered for was counted `no_tracks` here and
+        `not_mine` there; both slots appended `"mtmc"` so `missing_stages` read
+        `("mtmc", "mtmc")`; and a non-owning slot paid a dict lookup per foreign frame.
+        """
+        registry = MetricsRegistry()
+        element = opened(
+            {"group": "north", "cameras": ["cam-north"]}, registry=registry, camera_groups=2
+        )
+        try:
+            emitted = element.process(item("cam-south", 0, tracks=None))
+
+            assert "mtmc" not in emitted.meta.get(
+                "missing_stages", ()
+            ), "a slot that does not own the camera marks nothing on its event"
+            assert (
+                value(registry, "shipinfer_mtmc_frames_missing_total", reason=MISSING_TRACKS)
+                == 0.0
+            ), "and does not call it a tracker gap, which is the other plane's answer too"
+            assert (
+                value(registry, "shipinfer_mtmc_frames_missing_total", reason=MISSED_NOT_MINE)
+                == 1.0
+            )
+        finally:
+            element.close()
+
+    def test_a_foreign_frames_bad_tracks_do_not_fail_the_slot_that_owns_it(self) -> None:
+        """`meta['tracks']` of the wrong type is a mis-wired chain and this element refuses it
+        -- but a slot that does not own the camera has no business reading the key at all, and
+        the runner fails an item's future on any exception, so refusing here cost the OTHER
+        slot's frame its whole event."""
+        element = opened({"group": "north", "cameras": ["cam-north"]}, camera_groups=2)
+        try:
+            emitted = element.process(item("cam-south", 0, tracks="not a sequence"))
+
+            assert emitted.meta["tracks"] == "not a sequence", "handed on untouched"
         finally:
             element.close()
 

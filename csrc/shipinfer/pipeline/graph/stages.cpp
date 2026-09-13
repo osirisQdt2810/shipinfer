@@ -340,7 +340,18 @@ namespace shipinfer {
           barrier_(std::move(barrier)),
           roster_(roster.begin(), roster.end()),
           routes_(routes),
-          tracker_(std::move(tracker)) {}
+          tracker_(std::move(tracker)) {
+        // AN UNROSTERED SLOT CANNOT ROUTE. `plan_stages.cpp` refuses such a plan, so nothing
+        // built from one reaches this -- but a stage constructed directly would pass over
+        // EVERY camera in silence, where the other plane's would take every camera. Both
+        // planes now refuse it out loud instead (`elements/mtmc.py::_do_open`).
+        if (routes_ && roster_.empty()) {
+            throw ConfigError("mtmc stage '" + this->name() +
+                              "' shares this process with another cross-camera group and "
+                              "names no cameras; an unrostered group means every camera, so "
+                              "it would take the other group's too");
+        }
+    }
 
     namespace {
 
