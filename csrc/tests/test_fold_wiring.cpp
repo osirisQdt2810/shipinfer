@@ -142,6 +142,38 @@ namespace {
                   " floats of the REMAINING output matches the run that copied both home");
     }
 
+    void keeping_the_last_advertised_output_is_refused() {
+        // AN ENGINE THAT KEEPS EVERYTHING ANSWERS NOTHING, and `InferenceResponse` states the
+        // opposite invariant -- "Never empty for a completed response". Unrefused, `outputs()`
+        // goes to zero and `first()` throws `out_of_range` from inside a stage instead.
+        std::shared_ptr<TrtEngine> engine;
+        try {
+            engine = TrtEngine::load(plan_path(), 0);
+        } catch (const std::exception& error) {
+            std::printf("SKIP: no engine at %s (%s)\n", plan_path().c_str(), error.what());
+            return;
+        }
+        TrtEngineAdapter adapter(std::make_unique<TrtInstance>(engine, 0));
+        const size_t count = engine->outputs().size();
+        // Every output but the last, so the refusal is about the LAST one and not about a
+        // count this engine happens to have.
+        for (size_t i = 0; i + 1 < count; ++i)
+            adapter.keep_on_device(engine->outputs()[i].name);
+        check(adapter.outputs() == 1, "one advertised output left to keep");
+
+        std::string message;
+        try {
+            adapter.keep_on_device(engine->outputs()[count - 1].name);
+        } catch (const BackendError& error) {
+            message = error.what();
+        }
+        check(message.find("advertising no output at all") != std::string::npos,
+              "refused, saying what is wrong: " + (message.empty() ? "(no throw)" : message));
+        check(adapter.outputs() == 1,
+              "and NOTHING MOVED -- the check runs before the instance is told, so a refusal "
+              "does not leave the engine half-kept");
+    }
+
     void the_device_fold_answers_what_the_host_fold_answers() {
         std::shared_ptr<TrtEngine> engine;
         try {
@@ -214,6 +246,7 @@ namespace {
 int main() {
     the_device_fold_answers_what_the_host_fold_answers();
     a_kept_output_stops_being_copied_home_and_stops_being_advertised();
+    keeping_the_last_advertised_output_is_refused();
     std::printf("%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }
