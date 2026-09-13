@@ -59,9 +59,8 @@ Resolution = str
 TOPOLOGIES = ("single", "fleet", "service")
 
 #: What a BENCH RUN can ask for -- one short of ``build_engines.py``'s, which also builds
-#: ``int8``. The bench cannot, and no longer because of the engine checks: our side loads
-#: ``model_repository/<name>/1/model.plan`` whatever precision it holds, so the flag would
-#: select nothing. ``BENCH-PRECISION-SELECTS-NO-PLAN`` is what earns it back.
+#: ``int8``. The flag SELECTS now (a named precision installs its plan), so what int8 waits
+#: on is the builder rather than this: the segmenter does not build at int8 on this box.
 PRECISIONS = ("fp32", "fp16")
 
 #: And the flag ``build_engines.py`` actually takes for each. A map rather than an f-string
@@ -263,15 +262,15 @@ class BenchConfig:
     #: detections, and their plans were outside every check.
     emb_engine: Path | None = None
     # doc: long what `None` means here, and why it is not the same as "fp32"
-    #: Which precision BOTH sides load when neither engine is named. `require_same_engines`
-    #: below is what makes this a knob rather than a hazard: point it at fp16 without
-    #: installing fp16 plans and the run is REFUSED, which is what that guard exists for.
+    #: Which precision BOTH sides load. `require_same_engines` below is what makes it a knob
+    #: rather than a hazard, and it now SELECTS: naming one INSTALLS the matching flat engine
+    #: at `model_repository/<name>/1/` before the run, so the two sides cannot load different
+    #: files. Named with no flat engine to install is still REFUSED -- a claim the run cannot
+    #: keep -- and a BASELINE-only run installs nothing, because it loads no plan of ours.
     #:
-    #: ``None`` is "nobody asked", and it is not the same claim as ``"fp32"``. Our side loads
-    #: `model_repository/<name>/1/model.plan` whatever precision it holds, so on a run with no
-    #: flat engine to compare it against, a NAMED precision is a claim the run cannot keep --
-    #: it is refused (`require_same_engines`) rather than reported. Unnamed measures whatever
-    #: is installed and says so, which is what every chain run here does.
+    #: ``None`` is "nobody asked", and it is not the same claim as ``"fp32"``: it measures
+    #: whatever is installed, says so, and never writes. That is what every chain run here
+    #: does.
     precision: str | None = None
     model_repository: Path | None = None
     #: Where JSONL logs, console captures and ``summary.json`` land.
@@ -593,7 +592,7 @@ class BenchConfig:
                 )
             if _digest(flat) == _digest(plan):
                 continue
-            if self.precision is not None:
+            if self.precision is not None and system != "baseline":
                 # doc: long why a named precision INSTALLS rather than refuses
                 # THE SELECTION HALF (`BENCH-PRECISION-SELECTS-NO-PLAN`). `--precision` named
                 # the BASELINE's flat engine and nothing else: our side loaded
@@ -609,16 +608,25 @@ class BenchConfig:
                 # told the operator to do by hand: `build_engines.py` "also installs the plan".
                 #
                 # THE COST, stated: the bench writes into the model repository before
-                # measuring. `--install` is the documented workflow and does exactly this
-                # today, so it is a new caller rather than a new behaviour.
+                # measuring. `--install` is the documented workflow and does this today.
+                #
+                # NEVER ON A BASELINE-ONLY RUN. The scoping above skips only the embedder
+                # PAIR, so `--systems baseline` fell through here and rewrote the detector and
+                # segmenter while leaving both embedders -- a MIXED repository, on a run where
+                # nothing of ours loads a plan. This method already holds that acting on an
+                # artefact such a run does not load is a defect; overwriting one is worse.
                 print(
                     f"{model}: installing {flat.name} as "
                     f"{plan.relative_to(repository.parent)} for --precision "
                     f"{self.precision}",
                     file=sys.stderr,
                 )
-                plan.parent.mkdir(parents=True, exist_ok=True)
-                plan.write_bytes(flat.read_bytes())
+                # THROUGH A TEMPORARY AND A RENAME: `write_bytes` truncates first, so a
+                # Ctrl-C mid-copy leaves a truncated plan and no original. The parent exists
+                # by construction -- the branch above raised unless `plan.is_file()`.
+                staged = plan.with_name(plan.name + ".installing")
+                staged.write_bytes(flat.read_bytes())
+                staged.replace(plan)
                 continue
             raise RuntimeError(
                 f"{model}: the baseline loads {flat.name} and the server loads "

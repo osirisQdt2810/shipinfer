@@ -758,21 +758,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--precision",
         # doc: long why int8 is on the builder and NOT here, and what naming one now means
-        # NO `int8` HERE. Our side loads `model_repository/<name>/1/model.plan` whatever
-        # precision it holds and this flag names the FLAT file, so naming a precision is a
-        # CLAIM about what is installed rather than a selection. The claim is now checked:
-        # `require_same_engines` refuses a run that cannot hold the plan to the named flat
-        # engine, so the knob no longer lies -- but it still does not SELECT, which is why
-        # int8 waits for the day it can (`BENCH-PRECISION-SELECTS-NO-PLAN`).
+        # NO `int8` HERE, and the reason is no longer "this flag cannot select": it does now
+        # (`BENCH-PRECISION-SELECTS-NO-PLAN`). Naming a precision INSTALLS the flat engine
+        # into `model_repository/<name>/1/` before the run, so both sides load one file --
+        # and `int8` waits on the builder, where `scripts/build_engines.py` states what it
+        # takes to produce one (the segmenter does not build at int8 on this box).
         choices=("fp32", "fp16"),
         # DEFAULT None, not "fp32", so the config can tell "the operator asked for this
         # precision" from "nobody said". The first is a claim the run has to be able to keep;
         # the second is today's behaviour, which is to measure whatever plan is installed.
         default=None,
-        help="which engines the BASELINE loads, and which digest `require_same_engines` then "
-        "holds our side to -- all four models, the embedders as a precision-attribution check "
-        "rather than a cross-system one. `build_engines.py --fp16` installs them, and a "
-        "mismatch is refused rather than reported as an architecture win.",
+        help="which precision BOTH sides load -- all four models, the embedders as a "
+        "precision-attribution check rather than a cross-system one. WRITES INTO THE MODEL "
+        "REPOSITORY: naming one installs the matching flat engine at "
+        "`model_repository/<name>/1/`, the same copy `build_engines.py` makes, so the two "
+        "sides cannot load different files. A run that names nothing measures whatever is "
+        "installed and says so, and never writes.",
     )
     p.add_argument("--warmup", type=float, default=10.0, dest="warmup_s")
     p.add_argument("--batch", type=int, default=8)

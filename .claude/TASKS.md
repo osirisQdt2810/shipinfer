@@ -3928,7 +3928,26 @@ hook down, for when the operator asked to see something before it is executed.
       `test_without_a_named_precision_a_mismatch_is_still_refused` (the refusal stands and
       nothing is written). Probed by making the install branch unreachable: the first turns
       red on the refusal it replaced.
-      `int8` comes back to the choices now that this has landed.
+      `int8` comes back to the choices now that this has landed -- and what it waits on is the
+      BUILDER, not this flag: the segmenter does not build at int8 on this box.
+      ROUND 1 CAUGHT THE HALF THAT WOULD HAVE HURT: the install sat below the
+      `system == "baseline"` scoping, which skips only the embedder PAIR -- so
+      `--systems baseline --precision fp16` rewrote the detector and segmenter while leaving
+      both embedders, on a run where nothing of ours loads a plan at all. A MIXED repository,
+      and the next unnamed run is documented to "measure whatever is installed and say so",
+      so it would have said so about a half-converted one. Gated on the system now, and this
+      method already held that acting on an artefact a baseline-only run does not load is a
+      defect -- overwriting one is worse.
+      AND THE OPERATOR-FACING TEXT SAID THE OPPOSITE, which is where the cost had to be
+      stated: `--precision`'s `--help` still said a mismatch is "refused rather than reported"
+      and never mentioned the write. It now says WRITES INTO THE MODEL REPOSITORY at the flag
+      that triggers it, and the two `config.py` comments that called the flag a non-selector
+      are corrected rather than left inverted.
+      THE WRITE IS ATOMIC: staged beside the plan and `os.replace`d, because `write_bytes`
+      truncates first and a Ctrl-C mid-copy would leave a truncated plan and no original.
+      AND THE IDEMPOTENCE TEST DID NOT TEST IT -- a second call rewriting identical bytes
+      passed the bytes check identically. It asserts on `st_mtime_ns` now, and goes red when
+      the digest skip is removed.
 
 - [x] BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE · **MERGED as #218 (squash `1054479`, 10 Sep),
       APPROVE on round 3 after two BLOCKING rounds.** Round 2's five findings, and the first is a

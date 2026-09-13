@@ -262,7 +262,38 @@ class TestBothSidesLoadTheSameEngine:
         config.require_same_engines()
 
         assert plan.read_bytes() == b"PLAN-FP16", "the named precision is what is installed"
-        config.require_same_engines()  # idempotent: the second run copies nothing
+
+        # IDEMPOTENT, asserted on the mtime rather than the bytes: a second call that rewrote
+        # identical bytes would pass a bytes check identically, so that check was not the
+        # evidence it read as (#262's review).
+        before = plan.stat().st_mtime_ns
+        config.require_same_engines()
+        assert plan.stat().st_mtime_ns == before, "the second call copies nothing"
+
+    def test_a_baseline_only_run_installs_nothing(self, tmp_path: Path) -> None:
+        """`--systems baseline` loads no plan of ours, so it may not rewrite one.
+
+        The scoping above skips only the embedder PAIR, so this fell through and rewrote the
+        detector and segmenter while leaving both embedders -- a MIXED repository, from a run
+        where nothing of ours runs at all (#262's review, reproduced). The next unnamed run is
+        documented to "measure whatever is installed and say so", and would have said so about
+        a half-converted one.
+        """
+        config = replace(
+            self._config(tmp_path, b"PLAN-FP16", b"PLAN-FP32-INSTALLED"), precision="fp16"
+        )
+        repository = config.model_repository
+        assert repository is not None
+        plans = {
+            model: (repository / model / "1" / "model.plan")
+            for model in ("ship_detector", "ship_segmenter")
+        }
+
+        with pytest.raises(RuntimeError, match="measures the engines"):
+            config.require_same_engines("baseline")
+
+        for model, plan in plans.items():
+            assert plan.read_bytes() == b"PLAN-FP32-INSTALLED", f"{model} was not rewritten"
 
     def test_without_a_named_precision_a_mismatch_is_still_refused(
         self, tmp_path: Path
