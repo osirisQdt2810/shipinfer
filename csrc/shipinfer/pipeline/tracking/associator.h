@@ -70,9 +70,14 @@ namespace shipinfer::tracking {
     struct TrackerOptions {
         std::optional<int64_t> regression_reset;
         std::map<std::string, std::string> options;
+        //: The chain's `params: algorithm:`. Empty means the chain did not say, and then the
+        //: lane's own default stands -- which is the ONE case where the two planes agree
+        //: without carrying anything, because both default to ByteTrack.
+        std::string algorithm;
 
         bool operator==(const TrackerOptions& other) const {
-            return regression_reset == other.regression_reset && options == other.options;
+            return regression_reset == other.regression_reset && options == other.options &&
+                   algorithm == other.algorithm;
         }
     };
 

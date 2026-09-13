@@ -4633,7 +4633,7 @@ hook down, for when the operator asked to see something before it is executed.
       stay registered as `tracker_options` in `known.py`, narrowed from four knobs to two,
       and `CSRC-TRACKER-ALGORITHM` below is the open line the register now cites.
 
-- [ ] CSRC-TRACKER-ALGORITHM · the lane has one tracker and the plan says nothing. The open
+- [x] CSRC-TRACKER-ALGORITHM · the lane has one tracker and SAYS SO now. DONE 12 Sep, #261. The open
       half of the `tracker_options` register entry after #259 narrowed it. Python's
       `TrackerShard` resolves `params: algorithm:` through `shipvision.mot.TRACKERS` (`sort`,
       `bytetrack`, `ocsort`, `botsort`, `deepsortv2`); `bytetrack.cpp` is the C++ lane's only
@@ -4653,6 +4653,40 @@ hook down, for when the operator asked to see something before it is executed.
       -- silently dropping it is what #259 fixed -- but it is a drift channel with no test. A
       test that reads the struct's fields out of the submodule header and compares them to the
       table would close it, and belongs with whatever reopens this file.
+      DONE 12 Sep, #261, the cheap half AND the drift test -- this PR is what reopened the
+      file, which is the condition the line above set. `algorithm <name>` is on the plan,
+      always emitted (an absent line would mean "the lane's own default" and the two lanes do
+      not have the same one), read by both planes, and `bytetrack.cpp` REFUSES a name it
+      cannot run with the reason and the ledger item in the message -- rather than publishing
+      one tracker's ids under another's name. The PLAN does not judge the name: a lane-less
+      `--offline` build has no trackers to judge against, so the refusal belongs where the
+      registry is, the division `impl` already follows.
+      THE DRIFT TEST is `test_the_lanes_key_table_still_mirrors_bytetracks_struct`: it parses
+      `ByteTrackTracker::Options`'s fields out of the submodule header and compares them to
+      the lane's key table, naming which side each difference is on. Skips when the submodule
+      is absent, like everything else that reads it. Probed by renaming one table key: it
+      reports `Only in the struct: ['gate']` / `Only in the table: ['gate_DRIFTED']`.
+      THE EXPENSIVE HALF IS NOT DONE and is not open work: porting BoT-SORT or OC-SORT is
+      worth doing when a chain wants one, and `ship_person_cpu.yaml` does not. What this
+      closes is the SILENCE, which was the defect.
+      EVIDENCE: `test_plan_stages` 85 checks, `test_tracking_associator` 44,
+      `test_plan_parity` 130, all six plan goldens re-emitted with the new line.
+
+- [ ] CSRC-TRACKER-ATTRIBUTION · one plane drops a row for a poor overlap and the other has no
+      step to drop it in. The last knob of the `tracker_options` register entry, which #259 and
+      #261 narrowed down to this. Python's `track.py` reads `params: attribution_iou:` and maps
+      a tracker's published boxes back onto detection ROWS, dropping one whose IoU with every
+      track is below the cut -- that row serialises with a NULL track_id rather than somebody
+      else's. The C++ `TrackerShard::update` returns an id per detection already, so there is
+      no attribution step and no row is ever dropped: same chain, same frame, a row that is
+      null on one plane and identified on the other.
+      NOT A MISSING PLAN LINE, which is why it outlived the other three: carrying
+      `attribution_iou` would give this plane a number with nothing to apply it to. THE FIX is
+      the step, and the question worth settling first is whether this plane WANTS one -- its
+      tracker answers per detection by construction, so the attribution exists on the other
+      plane to undo something `associate()` does there and may simply not apply here. Settle
+      that before building, and if the answer is "not needed", the entry closes by saying so
+      rather than by converging.
 
 - [x] **CSRC-GRAPH-HAS-NO-TRACKING · COMPLETE 11 Sep. All six PRs merged: #215 (the `track`
       stage), #217 (the instant barrier), #219 (the identity map), #220 (the seam and the
