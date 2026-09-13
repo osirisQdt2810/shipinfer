@@ -653,6 +653,41 @@ class TestThePlaneAndTheTag:
         assert "tracks" in emitted.meta
 
 
+@needs_shipvision
+class TestTheSlotTravelsWithTheIdsItMinted:
+    """``meta["global_id_group"]`` (v5): whose counter the ``meta["global_ids"]`` came from.
+
+    Two slots are two identity spaces, so north's 7 and south's 7 are different objects
+    wearing one number, and the name is what tells a reader which it has.
+    """
+
+    def emitted(self, built) -> Any:
+        return built.process(item("cam-a", 0, tracks=[track(1, "cam-a", 0, TALL, SAME_A)]))
+
+    def test_the_slot_is_what_reaches_the_meta(self) -> None:
+        built = opened(name="mtmc-south")
+        try:
+            emitted = self.emitted(built)
+        finally:
+            built.close()
+
+        assert emitted.meta["global_id_group"] == "mtmc-south"
+        assert emitted.meta["global_ids"], "a name with no ids names nothing"
+
+    def test_the_declared_group_is_not_what_reaches_it(self) -> None:
+        """A ``group:`` is a PLACEMENT label and two slots may share one (`test_chain.py`:
+        ``test_two_slots_may_share_one_group_name``), so naming it here would give two
+        identity spaces one name -- the exact confusion this field exists to remove."""
+        built = opened({"group": "quay"}, name="mtmc-north")
+        try:
+            emitted = self.emitted(built)
+        finally:
+            built.close()
+
+        assert emitted.meta["global_id_group"] == "mtmc-north"
+        assert built.group == "quay", "the group is still declared, and still means placement"
+
+
 # -- the gaps ------------------------------------------------------------------------------------
 
 
@@ -669,6 +704,7 @@ class TestAFrameWithoutGlobalIdsSaysSo:
 
         assert emitted.meta["missing_stages"] == ("mtmc",)
         assert "global_ids" not in emitted.meta
+        assert "global_id_group" not in emitted.meta, "no ids, so no counter to name"
         assert value(metrics, "shipinfer_mtmc_frames_missing_total", reason=MISSING_TRACKS) == 1
 
     def test_the_gap_is_appended_and_never_replaces_an_earlier_one(self, element) -> None:
@@ -717,6 +753,7 @@ class TestAFrameWithoutGlobalIdsSaysSo:
 
         assert emitted.meta["missing_stages"] == ("mtmc",)
         assert "global_ids" not in emitted.meta
+        assert "global_id_group" not in emitted.meta, "no ids, so no counter to name"
         assert (
             value(metrics, "shipinfer_mtmc_frames_missing_total", reason=MISSED_UNASSIGNABLE)
             == 1

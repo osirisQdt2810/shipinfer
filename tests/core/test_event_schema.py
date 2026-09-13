@@ -73,6 +73,12 @@ V3_KEYS = {
     "type",
 }
 
+#: Every key a v4 payload carried: `V3_KEYS` plus the two cross-camera arrays, which is what
+#: `test_a_v3_consumer_sees_new_keys_and_no_changed_ones` pins the difference to. Built from
+#: the literal above rather than from `as_dict()` for the reason that one is a literal -- a
+#: set read out of the source agrees with whatever the source happens to say.
+V4_KEYS = V3_KEYS | {"body_global_id_vec", "ship_global_id_vec"}
+
 
 def person(index: int, *, score: float = 0.9) -> ObjectRecord:
     return ObjectRecord(
@@ -180,8 +186,8 @@ class TestShipsAreAnExtension:
         Pinned to a literal, not to the constant: the number *is* the contract, and a test
         that read the constant would agree with any value the source happened to hold.
         """
-        assert SCHEMA_VERSION == 4
-        assert event().as_dict()["schema_version"] == 4
+        assert SCHEMA_VERSION == 5
+        assert event().as_dict()["schema_version"] == 5
 
     def test_masks_are_summarised_not_published(self):
         """This bus carries metadata; a 512x512 float mask is 1 MB and stays out of it."""
@@ -331,9 +337,60 @@ class TestTheGlobalIdIsAnExtension:
     def test_it_round_trips_through_json(self):
         payload = json.loads(self.identified(global_id=31).to_json())
 
-        assert payload["schema_version"] == 4
+        assert payload["schema_version"] == 5
         assert payload["body_global_id_vec"] == [31]
         assert payload["ship_global_id_vec"] == [31]
+
+
+class TestTheIdentitySpaceIsAnExtension:
+    """v5 names WHICH counter minted this frame's global ids, and only when one did.
+
+    Two ``mtmc`` groups in one fleet are two counters, so north's 7 and south's 7 are
+    different objects wearing one number and a consumer joining both had nothing to tell
+    them apart. One scalar rather than four more arrays: a frame's camera is in exactly one
+    group, so the fact is per event.
+    """
+
+    def identified(self, **fields) -> PerceptionEvent:
+        """One person and one ship, both carrying global id 31."""
+        return event(
+            replace(person(0), track_id=7, track_state="confirmed", global_id=31),
+            replace(ship(1), track_id=7, track_state="confirmed", global_id=31),
+            **fields,
+        )
+
+    def test_a_v4_consumer_sees_one_new_key_and_no_changed_ones(self):
+        payload = self.identified(global_id_group="mtmc_north").as_dict()
+
+        assert set(payload) >= V4_KEYS, f"v5 dropped: {sorted(V4_KEYS - set(payload))}"
+        assert set(payload) - V4_KEYS == {"global_id_group"}
+
+    def test_a_fleet_with_one_group_carries_no_such_key_at_all(self):
+        """Omitted, where every v4 array is present-and-null — and the difference is real.
+
+        An array is indexed by row, so a missing one would break the join every consumer
+        does. This is a scalar with nothing to stay aligned with, and every chain in this
+        repository has one group: writing it on all 1000 events a second would be broker
+        bytes for a fact only a two-group fleet has. Absence reads as "one identity space".
+        """
+        assert set(self.identified().as_dict()) == V4_KEYS
+
+    def test_two_groups_that_minted_the_same_number_stay_distinguishable(self):
+        """The failure this field exists to fix, as the assertion."""
+        north = self.identified(global_id_group="mtmc_north").as_dict()
+        south = self.identified(global_id_group="mtmc_south").as_dict()
+
+        assert north["body_global_id_vec"] == south["body_global_id_vec"] == [31]
+        assert north["global_id_group"] != south["global_id_group"]
+
+    def test_it_round_trips_through_json(self):
+        payload = json.loads(self.identified(global_id_group="mtmc_north").to_json())
+
+        assert payload["schema_version"] == 5
+        assert payload["global_id_group"] == "mtmc_north"
+
+    def test_the_legacy_payload_gains_no_key(self):
+        assert set(self.identified(global_id_group="mtmc_north").as_det2mot()) == V1_KEYS
 
 
 class TestTheOldImportPathStillResolves:

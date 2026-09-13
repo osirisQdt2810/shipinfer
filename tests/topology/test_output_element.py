@@ -429,8 +429,48 @@ class TestTracksLandOnTheObjectTheyBelongTo:
         assert event.missing_stages == ("track",)
 
 
-class TestTheEventIsSchemaV4:
-    """What lands on the wire, read back from the file a chain would write."""
+class TestTheGroupSaysWhoseCounterMintedTheIds:
+    """``global_id_group`` (v5), which the ``mtmc`` element files beside ``global_ids``."""
+
+    def published(self, element, **meta) -> Any:
+        element.process(
+            item(
+                detections=detections("ship"),
+                tracks=[FakeTrack(9)],
+                track_rows=(0,),
+                **meta,
+            )
+        )
+        (event,) = emitted(element)
+        return event
+
+    def test_the_group_reaches_the_event_beside_the_ids(self, element) -> None:
+        """Two groups mint 7 independently, so the number alone is not an identity."""
+        event = self.published(element, global_ids=[31], global_id_group="mtmc_north")
+
+        assert event.global_id_group == "mtmc_north"
+        assert event.as_dict()["global_id_group"] == "mtmc_north"
+
+    def test_a_chain_with_no_cross_camera_tier_names_no_group(self, element) -> None:
+        """Absence, not an empty string: one identity space needs no name for it."""
+        event = self.published(element, global_ids=[31])
+
+        assert event.global_id_group is None
+        assert "global_id_group" not in event.as_dict()
+
+    def test_a_group_with_no_ids_to_name_is_refused(self, element) -> None:
+        """A name on its own would label ids the frame does not carry; the two are filed
+        together (`topology/elements/mtmc.py`), so only a mis-wired chain gets here."""
+        with pytest.raises(ValidationError, match="global_id_group"):
+            self.published(element, global_id_group="mtmc_north")
+
+
+class TestTheEventIsTheCurrentSchema:
+    """What lands on the wire, read back from the file a chain would write.
+
+    Named for the contract rather than for a number: the version is asserted as a literal
+    below, which is the assertion that has to change when the schema does.
+    """
 
     def test_one_line_per_frame_carries_the_version_and_the_new_keys(
         self, tmp_path: Path
@@ -448,6 +488,7 @@ class TestTheEventIsSchemaV4:
                     tracks=[FakeTrack(9)],
                     track_rows=(0,),
                     global_ids=[31],
+                    global_id_group="mtmc_north",
                 )
             )
         finally:
@@ -455,9 +496,10 @@ class TestTheEventIsSchemaV4:
 
         (line,) = path.read_text(encoding="utf-8").splitlines()
         payload = json.loads(line)
-        assert payload["schema_version"] == SCHEMA_VERSION == 4
+        assert payload["schema_version"] == SCHEMA_VERSION == 5
         assert payload["ship_track_id_vec"] == [9]
         assert payload["ship_global_id_vec"] == [31]
+        assert payload["global_id_group"] == "mtmc_north", "whose counter minted the 31"
 
     def test_closing_the_element_flushes_the_sink(self, tmp_path: Path) -> None:
         """A chain that stopped without this loses buffered events with no error anywhere."""

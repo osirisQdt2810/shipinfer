@@ -63,6 +63,7 @@ namespace {
         // Derived HERE when the scenario named the enum, so this plane's own vocabulary is
         // what reaches the golden -- the whole point of the `finished` directive.
         event.reason = scenario.finished ? to_string(*scenario.finished) : scenario.reason;
+        event.global_id_group = scenario.global_id_group;
         return event;
     }
 

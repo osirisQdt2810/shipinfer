@@ -61,6 +61,7 @@ def render(scenario: EventScenario) -> str:
         ),
         missing_stages=scenario.missing,
         reason=scenario.reason,
+        global_id_group=scenario.global_id_group,
     )
     return event.to_json()
 

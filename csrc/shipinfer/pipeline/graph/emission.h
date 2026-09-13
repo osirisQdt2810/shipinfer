@@ -73,6 +73,10 @@ namespace shipinfer {
         float fps = 0.f;
         std::vector<Detection> detections;
         std::map<std::string, ObjectBatch> batches;
+        //: Which identity space minted this frame's global ids -- the `mtmc` group that
+        //: answered, empty when none did. One string, because a frame's camera is in
+        //: exactly one group; `core/events/schema.h` says why the event carries it.
+        std::string global_id_group;
     };
 
     //: The names the planner reads — `pipeline/graph/state.py`. `FRAME_INPUT` is the frame's
