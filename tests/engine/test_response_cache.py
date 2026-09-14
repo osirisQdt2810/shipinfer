@@ -11,6 +11,7 @@ model actually run", which is the only way to tell a hit from a fast miss.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import numpy as np
@@ -81,6 +82,30 @@ def _executions(server: InferenceServer) -> int:
     )
 
 
+def _await_cache_write(
+    server: InferenceServer, entries: int = 1, timeout_s: float = 5.0
+) -> None:
+    """Wait until the cache actually HOLDS what the last request should have stored.
+
+    THE WRITE IS NOT ORDERED BEFORE THE RESPONSE: `model.py::_store_when_done` caches in a
+    `add_done_callback`, which runs on the worker thread after the future resolves, and
+    `infer_sync` returns on that same resolution. So a second identical request issued at
+    once can find nothing and re-run the model. Reproduced 14 Sep, 1 run in 20 at load 66:
+    `assert 2 == 1  # the second identical request re-ran the model`. Waiting tests what the
+    cache promises -- identical inputs hit -- without asserting an ordering it does not.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if server.model("m").stats()["cache"]["entries"] >= entries:
+            return
+        time.sleep(0.005)
+    raise AssertionError(
+        f"the cache still holds {server.model('m').stats()['cache']['entries']} entr(ies) "
+        f"after {timeout_s}s; the done-callback never ran, which is a real defect rather "
+        f"than the ordering this helper exists to absorb"
+    )
+
+
 class TestCacheKeying:
     """Identical inputs hit; different inputs do not. Measured by the backend's own counter."""
 
@@ -89,6 +114,7 @@ class TestCacheKeying:
         with _server(_repo(tmp_path)) as server:
             first = server.infer_sync(_request(1.0), timeout=10)
             assert _executions(server) == 1
+            _await_cache_write(server)
 
             second = server.infer_sync(_request(1.0), timeout=10)
             assert _executions(server) == 1, "the second identical request re-ran the model"
@@ -118,6 +144,10 @@ class TestCachedResponseIntegrity:
         (camera_id, frame_id) invariant exists to prevent."""
         with _server(_repo(tmp_path)) as server:
             server.infer_sync(_request(1.0, camera="cam_first", frame=1), timeout=10)
+            # WITHOUT THIS THE TEST PASSES VACUOUSLY. A miss returns a fresh response, which
+            # carries the asking tag anyway -- so a raced write turns this from a cache test
+            # into an assertion that `infer_sync` echoes its own request.
+            _await_cache_write(server)
             hit = server.infer_sync(_request(1.0, camera="cam_second", frame=99), timeout=10)
 
         assert hit.context.camera_id == "cam_second"
@@ -128,6 +158,7 @@ class TestCachedResponseIntegrity:
         later hit. numpy raises at the offending line instead."""
         with _server(_repo(tmp_path)) as server:
             server.infer_sync(_request(1.0), timeout=10)
+            _await_cache_write(server)
             hit = server.infer_sync(_request(1.0), timeout=10)
 
         with pytest.raises(ValueError):
