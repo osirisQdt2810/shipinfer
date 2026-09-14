@@ -519,7 +519,22 @@ AWAITING-OPERATOR: rows 8 and 9 above -- how the 12 Sep design-load profile was 
       warm-up file could escape its version directory. Plus `execution.cuda_graph_batch_sizes`
       is now a **filter** on a mixed repository rather than a per-model assertion — treating a
       deployment-wide setting as a claim about each model made it unusable at all.
-- [!] **D5 · MOVED to V146/L4 (peer shipinfer-28) 28 Aug.** The mtmc matcher wiring (`csrc/shipvision/mtmc/core` →
+- [!] **D5 · RE-CHECKED 14 Sep against the pinned commit: the lane delivered the MOVE, and
+      the original complaint is still true in a sharper form.** `core -> matchers` landed --
+      `shipvision/mtmc/matchers/{appearance,gated,spatial}` all exist -- and a native gated
+      path IS reachable from shipping code now: `MTMC_MATCHERS.build('gated',
+      backend='native')` resolves to `mtmc.backends.native.NativeGatedMatcher`, which calls
+      into `_C`. That half of the reachability question is answered.
+      BUT IT CALLS THE FREE FUNCTIONS, not the class this item named: `mtmc_to_distance`,
+      `mtmc_threshold_similarity`, `mtmc_ground_distances`, `mtmc_spatial_similarity`. A grep
+      of shipvision's own package for `MtmcGatedMatcher` returns NOTHING; the only file that
+      names it is `tests/mtmc/backends/test_matchers_parity.py`. So `_C.MtmcGatedMatcher` is
+      still exercised only from a test, which is what this line said on 28 Aug.
+      THE QUESTION HAS SHARPENED rather than closed: it was "wire it or delete it", and the
+      composed free-function path has since superseded it, so the answer looks like DELETE.
+      Still the peer's lane and another repo, so it stays yours/theirs to action -- but it is
+      now a removal with a named replacement rather than an open design question.**
+      ORIGINAL: MOVED to V146/L4 (peer shipinfer-28) 28 Aug.** The mtmc matcher wiring (`csrc/shipvision/mtmc/core` →
       `matchers`, tracker interface) is now the operator-directed V146 rework in shipvision, owned by the peer's L4 lane;
       the reachability question resolves there. shipinfer-side consumption is live since #83 (`ShipvisionMtmc` builds via
       `MTMC.build`). Original: **The one-crossing MTMC matchers are unreachable** from shipping code:
@@ -869,7 +884,17 @@ AWAITING-OPERATOR: rows 8 and 9 above -- how the 12 Sep design-load profile was 
       native class merged into its algorithm's `tracker.py`; (2) the imgproc library lifted
       out of `bindings/module.cpp` (891 → 130 lines); (3) the new `strongsort`/`boosttrack`
       trackers with their Optuna spaces; (4) the native MTMC tracker (C13).
-- [!] **C13 · MOVED to V146/L4 (peer shipinfer-28) 28 Aug** — the operator's V146 orders exactly this (mtmc tracker
+- [!] **C13 · THE PREMISE IS GONE, re-checked 14 Sep against the pinned commit.** This line
+      is about `mtmc/trackers/cluster/tracker.py` holding a Python `threading.Lock` around
+      `track()`. That file no longer exists -- `shipvision/mtmc/trackers/cluster/` contains
+      nothing but stale `__pycache__` -- and a grep of the whole `shipvision/mtmc/` tree for
+      `threading.Lock` or `class ClusterTracker` returns nothing. The peer's V146/L4 rework
+      removed it. So there is no Python lock left to replace with a C++ one.
+      WHAT IS NOT SETTLED is the other half -- whether a native C++ MTMC tracker exists to
+      the standard V64 asked for -- which is a shipvision question and the peer's lane, so
+      this stays theirs. Kept rather than closed because the ORIGINAL ask was a tracker, not
+      a lock; the lock was only the symptom that prompted it.**
+      ORIGINAL: MOVED to V146/L4 (peer shipinfer-28) 28 Aug** — the operator's V146 orders exactly this (mtmc tracker
       interface + implementations in shipvision, `core` → `matchers`); the peer owns the lane. Original: **A native C++ MTMC tracker** (V64) — `mtmc/trackers/cluster/tracker.py` holds a
       Python `threading.Lock` around `track()`, and the operator's point is that if a lock is
       needed at all it should be a C++ one. `mtmcservice`'s `VTXTracker`/`AICTracker` are the
@@ -8555,9 +8580,23 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       its own tests, and track.py is C8b's file — hence deferred out of #85 (option B). One slice: reader swap + the
       two refusal tests + delete track's private copy.
 
-- [!] **SV-LICENSE · OPERATOR: shipvision has NO LICENSE file at all** (found by McByte's reviewer) — not even for its
-      own MIT claim, and Apache-2.0 §4(a) vendoring for the McByte port wants one to sit next to. Add one (MIT text +
-      THIRD_PARTY_NOTICES already exists on the McByte branch)?
+- [!] **SV-LICENSE · HALF OF THIS IS ANSWERED, re-checked 14 Sep against the pinned commit
+      (`d247d5f`, which is shipvision's main). The ask is now much smaller than the line says.**
+      WHAT LANDED, in `4c8f137` (the mcbyte tracker, shipvision #14): `LICENSES/Apache-2.0.txt`
+      is tracked, and so is `THIRD_PARTY_NOTICES.md` -- the file this line said "already exists
+      on the McByte branch" has since merged. So the Apache-2.0 §4(a) half, the one with an
+      actual obligation attached, has something to sit next to.
+      WHAT IS STILL MISSING is the narrow half: shipvision declares MIT in two places --
+      `pyproject.toml:11` (`license = "MIT"`) and `README.md:95` ("MIT, with one exception: the
+      `mcbyte` tracker is ported from roboflow/trackers under the Apache License 2.0") -- and
+      carries no file with the MIT text in it. A declared licence with no text is the gap.
+      STILL YOURS, and only because of what it is rather than how big: it is another repo, and
+      choosing what a project is licensed under is the owner's call, not a maintenance edit I
+      should make. ONE FILE if the answer is yes: `LICENSE` at shipvision's root with the MIT
+      text and the copyright line you want on it.
+      ORIGINAL: shipvision has NO LICENSE file at all (found by McByte's reviewer) — not even
+      for its own MIT claim, and Apache-2.0 §4(a) vendoring for the McByte port wants one to sit
+      next to. Add one (MIT text + THIRD_PARTY_NOTICES already exists on the McByte branch)?
 - [x] **SV-C-LEAK · MERGED as shipvision #15 (5a5359a), confirmed on shipvision origin/main 31 Aug; it rides into shipinfer with the pointer bump (#102). Original: FIXED, open as shipvision #15 (f0e9781, own lane): `shipvision/_native.py` is the single _C import point and refuses a FOREIGN build with a RuntimeWarning naming both paths (SHIPVISION_ALLOW_FOREIGN_C=1 opts back in); all three backends route through it; a conftest header names the live extension every run. Fires on the real thing: test_registration now skips honestly where it silently ran the primary checkout's C++. fa's own tests hit the trap mid-fix (patching sys.modules alone passes in isolation and lies in a full run — the package ATTRIBUTE also resolves `from shipvision import _C`; both patched now). Original: an editable install of
       the real submodule leaks a built `shipvision._C` into any copied tree — `TRACKERS.build("bytetrack")` silently
       resolves NATIVE and the numpy path is never exercised (a whole mutation round was meaningless before the reviewer
