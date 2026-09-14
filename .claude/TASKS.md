@@ -15,7 +15,7 @@ line names the ledger item that holds the detail, and the exact action.
 | 7 | **THE TARGET LOOKS REACHABLE ON THE FULL BOX, and the 260 figure was measured on footage that could not be tracked.** Re-measured 11 Sep at the DESIGN LOAD on the route you mandated (gstreamer RTSP from offline video, `--source nvdec`), 4 GPUs, the full `decode -> ... -> mtmc track` chain, on footage a tracker can follow: **711.5 img/s of TRACKED frames** (50 cameras x 20 fps, 954.5 offered, 739.1 accepted, only 3.7% untracked), at 15.5 of 48 host cores. Linearly on 16 GPUs that is ~2 850, i.e. the 3 000 target, and the host budget is what decides it: 21 ms of CPU per image is 63 cores at 3 000, which the blocking-sync default (#214, -39%, YOURS TO MERGE) and the mask fold's kernel (#232, 1.44 ms/crop of host CPU) bring back under 48. WHAT DOES NOT SURVIVE that load is IDENTITY: 0.30% of observations admitted and zero global ids, which is the ordering work, not the throughput. THREE LEVERS, re-priced against that measurement: (a) **the host budget** — the blocking-sync default (#214, yours) and the mask fold on the device, which together are the difference between 63 cores at 3 000 and something under 48; (b) more devices, and sixteen is ~2 850 by this row, i.e. the target; (c) fewer or cheaper models per image — the segmenter alone costs 5.5x for 1.47 invocations because it crops 640x640 per ship. Camera affinity has MOVED DOWN: it buys ~4% at the design rate (3.7% untracked), not the 42% the saturation runs suggested, and what it is still needed for is identity rather than throughput. (a) is mostly built; (b) is yours; (c) is a product decision. | `V167-GSTREAMER-ONLY-3000`, `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` |
 | 4b | **DONE 12 Sep — merged under V169**, which made workflow PRs mine to merge. Worth knowing for the next one: the Claude review job **passed** on this PR and returned APPROVE, so CLAUDE.md's "a PR touching `.github/workflows/**` cannot pass the review job" did not hold here. The only thing keeping it open was the missing `automerge` label. Not yet rewritten in CLAUDE.md — one observation is not a rule; `CI-WORKFLOW-PRS-MAY-BE-REVIEWABLE` holds the check. | `CPP-LANE-JOB-GLOBS-ONE-PREFIX` |
 | 4 | **Pull `nvcr.io/nvidia/deepstream` (~6 GB)** onto this box, or say no — the fourth topology's running half needs it; the design half is done. | `T4` |
-| 10 | **Does the numpy oracle keep NEAREST?** `V124a-PHASE3` thins `runtime/ops` onto shipvision, and I measured what that actually changes: with no resampling the two agree EXACTLY (0 delta on letterbox and crop), so the whole pixel difference is the resize -- ours is nearest, theirs bilinear (max |d| 0.733, 52% of values). Ours is nearest ON PURPOSE, "so the CUDA kernel has an unambiguous reference to match bit-for-bit". Adopting theirs retires that property in favour of shipvision's own matched oracle+kernel pair. NOT BLOCKING: slice 1 is everything that already agrees and needs no ruling; I will build that and stop before the interpolation. | `V124a-PHASE3` |
+| 10 | **No longer a question -- answered by measuring, noted so you can overrule.** I had asked whether the numpy oracle keeps NEAREST when `V124a-PHASE3` thins `runtime/ops` onto shipvision. It keeps it: `numpy_ops.py` is the dependency-free FLOOR (`ops/__init__.py:68`, "native if built, else torch, else numpy") and CI runs that tier with no submodule, so moving it would put shipvision under ADR-001. What moves instead is `torch_ops.py`, 30 KB of the 38, where the two agree already -- letterbox bit-exact, crop within 1.5e-05. My earlier two-slice plan was wrong and is corrected on the item. | `V124a-PHASE3` |
 | 8 | **How was the 12 Sep design-load profile configured?** I need it to re-price `EXECUTE-BLOCKS-THE-INSTANCE-THREAD`, whose ~14% was measured under the OLD spinning-sync default that #214 replaced two days later (host CPU -40%, rows +25%). Same box, same plan shape (28 instance threads), gstreamer RTSP, the plan regenerated from `ship_person_cpu.yaml`: 12 Sep read 37 572 and accepted 32 445 over 40 s; my three configurations accept 6-21% and under nsys almost nothing. Worker count, `pipeline_queue`, the mtmc `sync_window_ms` with 50 cameras in one group, or a different fixture? With it the re-profile is one run. | `EXECUTE-BLOCKS-THE-INSTANCE-THREAD` |
 | 9 | **Which reading of `missing_stages` is the contract?** It means "this FRAME missed it" on a chain and "this TOPOLOGY does not run it" in the DeepStream builder (`PR1_MISSING_STAGES`), and they share one serialiser -- so two deployments into one broker read each other's `partial` wrongly. Moving DeepStream's absent stages to `extra` keeps schema v5 and needs no `motservice` rebuild, but flips that deployment's `partial` to false and empties its list. Either is an afternoon; picking which live consumers change is yours. | `EVENTS-MISSING-STAGES-MEANS-TWO-THINGS` |
 | 5 | **shipvision has no LICENSE file at all**, and **where does the NV12 work live?** (the claimed 1021 uncommitted lines are in no checkout I can see). | `SV-LICENSE`, `C9` |
@@ -9322,11 +9322,32 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       frame-clamp/patch-clamp question V124a settled, and it was not covered by that decision.
       Adopting shipvision's ops retires shipinfer's numpy oracle as a bit-exact kernel
       reference and leans on shipvision's own matched oracle+kernel pair instead.
-      SO BUILD IT IN TWO SLICES, which the measurement makes possible: (1) everything that
-      already agrees -- a pure deduplication with ZERO pixel change and no re-baselining, which
-      is most of the 38 KB; (2) the interpolation, alone, where the only question is whether
-      this repo still wants a nearest reference of its own. Slice 1 needs no ruling; slice 2 is
-      one line of it. See row 10.
+      THAT TWO-SLICE PLAN WAS WRONG and I am correcting it rather than leaving it; measuring
+      the rest of the surface the same afternoon says something better. Four more numbers:
+        torch letterbox, mine vs theirs     max |d| 0          EXACT
+        torch crop (scaled and unscaled)    max |d| 1.5e-05    float32 rounding
+        nms, 200 random cases               identical 200/200
+        numpy crop, ANY scaling             max |d| 0.7        99.9% differ
+      AND `shipvision.imgproc` EXPOSES NO INTERPOLATION KNOB -- `METHODS` is the NMS family,
+      and neither `letterbox` nor `crop_batch` takes a resize method. So there was never a
+      slice that delegates the numpy path while keeping nearest: my "everything that already
+      agrees" was the degenerate no-resize case, which production never hits.
+      THE REAL SHAPE IS TORCH-ONLY, and it is better than the original plan:
+      * `torch_ops.py` MOVES -- 30 KB of the 38, letterbox bit-exact and crop within float32
+        epsilon, and torch is a hard dependency (ADR-003) so nothing is added to the floor.
+      * `numpy_ops.py` STAYS, and this is the part the original plan had backwards. It imports
+        numpy and nothing else, and `ops/__init__.py:68` makes it the last-resort backend
+        ("native if built, else torch, else numpy"). Moving it puts the submodule UNDER
+        ADR-001's floor, on a tier CI deliberately runs with no submodule checked out. It is
+        not duplication debt: it is the dependency-free fallback AND the nearest-neighbour
+        reference the CUDA kernel is matched against, which is a different job from
+        shipvision's bilinear oracle.
+      * `nms` agrees exactly, but it reaches this repo through `numpy_ops.py` too, so it moves
+        with torch or not at all.
+      SO ROW 10's QUESTION DISSOLVES: the interpolation only ever mattered for the numpy path,
+      and the numpy path should not move. Decided under V154 rather than asked -- a
+      dependency-free nearest reference is what ADR-001 and the kernel-parity test both
+      already rely on. Row 10 says so rather than asking.
 
 - [x] **V124a · DECIDED BY ME 9 Sep under V154, not owed any longer: ADOPT SHIPVISION'S
       FRAME-CLAMP.** The recommendation was already written here with its reasons and I am
