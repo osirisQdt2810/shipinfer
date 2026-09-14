@@ -3338,6 +3338,24 @@ AWAITING-OPERATOR: rows 8 and 9 above -- how the 12 Sep design-load profile was 
       changed is the estimate of the cost -- a drift here is now a defect one seam already
       documented and the other still had.
 
+- [ ] CACHE-KEYING-FLAKE-SEEN-ONCE · `tests/engine/test_response_cache.py::TestCacheKeying::
+      test_identical_inputs_run_the_model_once` failed once in a full-suite run on 14 Sep and
+      has not reproduced. Recorded rather than shrugged off, because the neighbouring item
+      above is what an unrecorded flake costs: it blocked an APPROVED diff twice.
+      WHAT IS KNOWN. It failed inside `pytest -q` over the whole tree; the same module then
+      passed 5/5 in isolation (~1.6 s each), the single test 3/3, and the whole suite green on
+      a re-run (4458 passed). So `main` is not red and the earlier push, which was docs-only,
+      did not cause it. The failing assertion was not captured -- the run had scrolled -- which
+      is the first thing to fix if it recurs.
+      THE LIKELY CAUSE, unproven: the test starts a real server and does two `infer_sync` calls
+      with a 10 s timeout, and this box was at load 39-46 of 48 cores (four other users' GPU
+      training jobs) when it failed. A timeout under load fits; a genuine cache race that
+      occasionally re-runs the model would be much more interesting and cannot be ruled out
+      from one sighting.
+      WHAT WOULD SETTLE IT: capture the assertion text next time (`-x` and keep the output),
+      and if it is the executions count rather than a timeout, it is a real defect in the
+      response cache and not a test problem at all.
+
 - [!] API-WEDGED-REPORT-FLAKE-IS-NOT-A-TIMEOUT · `tests/api/test_streams.py::
       TestNothingBlockingRunsOnTheEventLoop::test_a_wedged_report_is_a_504_and_the_next_request_still_answers`
       fails on CI's **py3.10** leg and passes locally on the same interpreter (3.10.12), three
