@@ -7,7 +7,7 @@ line names the ledger item that holds the detail, and the exact action.
 
 | # | Action | Item |
 |---|---|---|
-| 1 | **ANSWERED 10 Sep (V164): the metric is FPS — images processed per second — the target is 5x the baseline, and it runs on FOUR GPUs, not five.** Events/rows/CPU-second are ruled out ("tuyệt đối không"). Both arms need re-taking on four GPUs as img/s; every figure so far is five-GPU and event-based. | `C1-WHAT-IS-THE-5x-AGAINST?`, `FPS-ON-FOUR-GPUS` |
+| 1 | **ANSWERED 10 Sep (V164): the metric is FPS — images processed per second — the target is 5x the baseline, and it runs on FOUR GPUs, not five.** Events/rows/CPU-second are ruled out ("tuyệt đối không"). Both arms need re-taking on four GPUs as img/s; every figure so far is five-GPU and event-based. **AND `C1` KEPT WAITING ON IT ANYWAY** until 14 Sep -- it read "waiting on the operator's one question" for four days after you answered. Corrected: `C1`, `FPS-ON-FOUR-GPUS`, `V165` and `V167` all now wait on the same RE-RUN (four GPUs, img/s, both arms), not on you. | `C1-WHAT-IS-THE-5x-AGAINST?`, `FPS-ON-FOUR-GPUS`, `C1` |
 | 0 | **Nothing — resolved itself.** A vendor apt repo served a bad index for ~30 min on 9 Sep and `main` went red on a repository this project never installs from; it cleared, and #194 and #196 merged on a re-run. #195 hardens against the next one and carries `automerge`. | `CI-A-VENDOR-REPO-BLOCKS-EVERY-MERGE` |
 | 2 | **DONE 10 Sep — you merged it** (`a9867e3`). The C++ tracking chain is mine again. | `CSRC-GRAPH-HAS-NO-TRACKING`, `V146b` |
 | 3 | **DONE 10 Sep — you merged it** (`b645dbd`). `V124a-PHASE3` is unblocked. | `V124b`, `V124a-PHASE3` |
@@ -4754,7 +4754,12 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       (3) the C++ plane still has no `mtmc`, so "decode -> mtmc track" cannot be measured end
       to end until PR 3 lands (the barrier half is built and green).
 
-- [!] **V165-WHOLE-PIPELINE-4500 · SAME QUESTION AS `V167-GSTREAMER-ONLY-3000`, which carries the numbers: the chain is measured, the target needs a lever and the lever is a product decision.** THE TARGET IS NOW ABSOLUTE AND IT IS THE WHOLE CHAIN.**
+- [!] **V165-WHOLE-PIPELINE-4500 · THE QUESTION IT SHARES HAS CHANGED, 14 Sep: both
+      host-budget levers are MERGED (#214 today, #232/#239 on 11-12 Sep), so
+      `V167-GSTREAMER-ONLY-3000` is now a measurement waiting on a quiet box rather than a
+      lever decision waiting on you. This line inherits that: nothing here needs an answer
+      until the re-run says whether the target is met.**
+      ORIGINAL: SAME QUESTION AS `V167-GSTREAMER-ONLY-3000`, which carries the numbers: the chain is measured, the target needs a lever and the lever is a product decision.** THE TARGET IS NOW ABSOLUTE AND IT IS THE WHOLE CHAIN.**
       4 500 img/s from `decode -> ... -> mtmc track`, not a multiple of anything -- so the
       offer-bound baseline stops being the denominator. The operator also asked the right
       question about my numbers, and the answer is a COUNT rather than an excuse.
@@ -4821,7 +4826,12 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       done per row (`SEGMENT-NO-CLASSES-ASYMMETRY`), and 4 500 img/s at 11.74 invocations is
       52 700 invocations/s, which four A5000s do not do.
 
-- [!] **FPS-ON-FOUR-GPUS · RE-MEASURED 11 Sep on the full chain (see `V167-GSTREAMER-ONLY-3000`): four GPUs retire ~260 img/s TRACKED, and four buy nothing over three. Waiting on the same lever question.** MEASURED 10 Sep. The absolute numbers hold; every RATIO in this
+- [!] **FPS-ON-FOUR-GPUS · WAITING ON A BOX, NOT ON YOU, 14 Sep. Its blocker was the same
+      lever question as `V167-GSTREAMER-ONLY-3000`, and both host-budget levers have merged
+      (#214 today, #232/#239 on 11-12 Sep). What it needs is the re-run: four free GPUs and
+      enough idle cores, which this box has not had today -- 10-14 of 48 free against the
+      ~16 the 11 Sep run used.**
+      ORIGINAL: RE-MEASURED 11 Sep on the full chain (see `V167-GSTREAMER-ONLY-3000`): four GPUs retire ~260 img/s TRACKED, and four buy nothing over three. Waiting on the same lever question.** MEASURED 10 Sep. The absolute numbers hold; every RATIO in this
       item was wrong because the baseline is OFFER-BOUND and does no inference (0-8% GPU,
       9 815 img/s on ONE gpu against 9 953 on four). Instrument open as #216; the page's
       false 'capacity, not a floor' claim and the comparand question are what remain.**
@@ -5857,7 +5867,16 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       `C2c`/`C2d` are the shipvision-side and Python-side halves and are both closed; this is
       the C++ half nobody opened.
 
-- [!] **C1 · WAITING ON `C1-WHAT-IS-THE-5x-AGAINST?` ABOVE, which is the operator's one
+- [!] **C1 · THE QUESTION IT WAITS ON WAS ANSWERED FOUR DAYS AGO. `C1-WHAT-IS-THE-5x-AGAINST?`
+      is `[x]` -- the operator settled it on 10 Sep under V164: the metric is FPS, the target
+      5x the baseline, on FOUR GPUs. This line kept saying "waiting on the operator's one
+      question" for four days after it was answered, which is the fifth stale `[!]` found in
+      the 14 Sep audit.
+      WHAT IT ACTUALLY NEEDS is the measurement that answer implies: both arms re-taken on
+      FOUR GPUs as img/s, since every figure here is five-GPU and event-based. That is the
+      same re-run `FPS-ON-FOUR-GPUS` and `V167` are waiting for, and the same blocker -- a
+      quiet box, not a decision.**
+      ORIGINAL: WAITING ON `C1-WHAT-IS-THE-5x-AGAINST?` ABOVE, which is the operator's one
       question: both arms are now measured (baseline 959.8 SATURATED, ours 539 complete, same
       five GPUs, same 70 s) and the two are not comparable in either direction. Everything C1
       could do without that answer is done. Original: ANSWERED BY V156: the >=5x target STANDS,
