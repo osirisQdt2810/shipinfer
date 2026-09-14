@@ -3411,6 +3411,24 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       changed is the estimate of the cost -- a drift here is now a defect one seam already
       documented and the other still had.
 
+- [ ] EVENTS-CHAIN-FLAKE-SEEN-ONCE · `tests/topology/test_chain_to_events.py::
+      TestTwoIdentitySpacesAreTellableApartOnTheWire::
+      test_each_cameras_events_name_the_slot_that_minted_their_ids` failed once in a full-suite
+      run on 14 Sep and passed 3/3 alone straight after, with the next whole-suite run green
+      (4 455 passed). Recorded because the sibling item below started exactly here and turned
+      out to be a real defect.
+      THE ASSERTION, captured this time -- which is what that item's lesson asked for:
+      `assert until(lambda: len(events_in(path)) == 6)`. Six events is 2 cameras x 3 frames and
+      is guaranteed, so this is a wait that ran out, not a wrong expectation.
+      WHAT MAKES IT WORTH A LINE RATHER THAN A SHRUG: `until` already allows **20 s** against a
+      nominal ~1.1 s for this test -- eighteen times the headroom -- so "the box was busy" is a
+      weak explanation on its own. The box was at load ~45 of 48 cores, and this test starts a
+      real runner with `shipvision`'s tracker and four workers, so starvation is plausible; a
+      wedge somewhere in start-up or drain is not ruled out.
+      NEXT TIME: it is the whole-suite run that reproduces it, so capture with `-x` and keep the
+      output. If the count is stuck below six rather than merely late -- check whether the
+      cameras were added and whether the sink file exists at all -- it is not a deadline.
+
 - [x] CACHE-KEYING-FLAKE-SEEN-ONCE · **REPRODUCED AND FIXED 14 Sep, and it was not the
       timeout I guessed.** This line said to capture the assertion text next time, because
       which of the two it was decided whether it mattered. It was the interesting one:
