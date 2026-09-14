@@ -3646,12 +3646,20 @@ hook down, for when the operator asked to see something before it is executed.
       is asked before the bridge loads, and its two cases moved out of the `@needs_shipvision`
       class: on main they SKIP with no submodule, on this branch they PASS.
 
-- [ ] MTMC-THE-NTP-PROPERTY-IS-PYTHON-ONLY · ADR-022's property -- a wall-clock step moves no
-      instant, because the key is monotonic -- is asserted on the Python plane only
-      (`TestAnNtpStepDoesNotMoveAnInstant`). The C++ stage keys on the same field and
-      `test_mtmc_barrier` carries 146 checks, so a twin there is cheap and would put this under
-      the sync rule's "same inputs -> same events" rather than under one plane's word for it.
-      Found by #272's review.
+- [x] MTMC-THE-NTP-PROPERTY-IS-PYTHON-ONLY · DONE 14 Sep. ADR-022's property -- a wall-clock
+      step moves no instant, because the key is monotonic -- was asserted on the Python plane
+      only (`TestAnNtpStepDoesNotMoveAnInstant`). Found by #272's review; the twin is now
+      `a_wall_clock_step_moves_no_instant` + `the_lag_diagnostic_still_sees_the_step` in
+      `csrc/tests/test_mtmc_stage.cpp`, so this is under the sync rule rather than under one
+      plane's word for it. 52 checks, 0 failures, in the container.
+      NOT IN `test_mtmc_barrier.cpp`, which is where this line guessed it would go, and the
+      correction is the useful part: `InstantBarrier::submit` takes ONE stamp, so by the time
+      the barrier sees a frame the choice between the clocks is already made. A twin there
+      could only assert that a monotonic sequence is not backwards -- true of any sequence,
+      and a check that cannot fail. `MtmcStage::do_run` is what picks (`capture_s` from
+      `captured_ns`, `lag_ns` from `captured_unix_ns`), so the stage is the only place the
+      property is expressible. Both halves probed by flipping the stage to the wall key: the
+      first check fails alone, and reading the lag off the key fails four.
 
 - [ ] MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED · with two groups, a camera NEITHER roster names
       is returned unchanged by every slot, so its event carries no `global_ids`, no marker
