@@ -4931,11 +4931,22 @@ hook down, for when the operator asked to see something before it is executed.
       one rule instead of two, and it removes an inconsistency INSIDE the Python plane -- in
       the divergence band a track's embedding is blended from the row `last_match` names while
       its `track_id` is attributed to a different row, or to none.
-      BEFORE BUILDING IT, GET A NUMBER. There is no tracking driver or golden in
-      `benchmarks/parity/` at all, and the only in-tree test of the cut sets it to 1.0 and says
-      in its own docstring that this is not a realistic setting. A parity case over a real
-      tracker -- same frames to both planes, compare the per-row id streams -- is what should
-      decide the priority, and it is the case the register entry deserves.
+      PRICED 14 Sep, and the number argues for LEAVING IT UNBUILT for now.
+      `benchmarks/parity/scenarios/tracking/attribution.scn` drives both planes over the same
+      boxes and compares the per-row id streams: **42 lines compared, 0 differing**, on
+      scenarios placed ON the tracker's own gate rather than near it (`aspect_edge` keeps its
+      track at the narrowest width that can; `aspect_break` is 0.1px further and re-mints).
+      WHY IT IS UNREACHED, measured not argued: sweeping the width axis across detector scores
+      0.60-1.00, the lowest posterior IoU any CONTINUED track reaches is **0.3317 against the
+      0.30 cut** -- the tracker's gate gives out ~0.03 IoU before the attribution threshold
+      does, so a track that survives is always attributed and the divergence band is empty.
+      WHAT WOULD CHANGE THE ANSWER, and why this line stays open: the band is empty by ~0.03,
+      not by construction, so any submodule bump that loosens the gate or any chain that
+      raises `attribution_iou` opens it -- both planes' cases bracket that edge and go red if
+      it moves. And `crossing_near_tie` covers the SECOND mechanism, which no threshold
+      protects: Python's mapping is a global one-to-one assignment, so two tracks whose
+      posteriors nearly coincide (2px apart, the two pairings within 0.18) can be paired the
+      other way round from the tracker's own matching. That one is not priced.
 
 - [x] CSRC-TRACKER-ALGORITHM · the lane has one tracker and SAYS SO now. DONE 12 Sep, #261. The open
       half of the `tracker_options` register entry after #259 narrowed it. Python's

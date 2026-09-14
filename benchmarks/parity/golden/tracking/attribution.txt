@@ -1,0 +1,47 @@
+# One plane's per-row track ids for scenarios/tracking/*.scn. Emitted, never
+# hand-edited:
+#   python scripts/emit_parity_golden.py --kind tracking --scenario attribution --emit-golden
+# `-` is a row no track claimed. The C++ binary prints its own beside this one;
+# where they differ, that is `tracker_options` in known.py.
+scenario steady
+frame 0 ids 1
+frame 1 ids 1
+frame 2 ids 1
+scenario aspect_edge
+frame 0 ids 1
+frame 1 ids 1
+frame 2 ids 1
+frame 3 ids 1
+frame 4 ids 1
+frame 5 ids 1
+frame 6 ids 1
+scenario aspect_break
+frame 0 ids 1
+frame 1 ids 1
+frame 2 ids 1
+frame 3 ids 1
+frame 4 ids 1
+frame 5 ids 1
+frame 6 ids 2
+scenario crossing_near_tie
+frame 0 ids 1 2
+frame 1 ids 1 2
+frame 2 ids 1 2
+frame 3 ids 1 2
+frame 4 ids 1 2
+frame 5 ids 1 2
+frame 6 ids 1 2
+frame 7 ids 1 2
+frame 8 ids 1 2
+frame 9 ids 1 2
+frame 10 ids 1 2
+frame 11 ids 1 2
+frame 12 ids 1 2
+frame 13 ids 1 2
+frame 14 ids 1 2
+frame 15 ids 1 2
+frame 16 ids 1 2
+frame 17 ids 1 2
+frame 18 ids 1 2
+frame 19 ids 1 2
+frame 20 ids 1 2
