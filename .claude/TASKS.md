@@ -9391,6 +9391,23 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       that path has to keep being exercised somewhere that gates a merge, which is the same
       reason that job takes no submodule. Its own PR, because it edits `pr-pipeline.yml` and
       therefore cannot pass the review job (CLAUDE.md's known exception, V169 merge).
+      WHY NUMPY CANNOT MOVE, stated exactly, because "it is the floor" was hand-waving and
+      the precise version is stronger: `ops/__init__.py::get_image_ops` is a three-rung
+      fallback -- `NativeImageOps` (needs `shipvision._C` BUILT), then `TorchImageOps`, then
+      `NumpyImageOps()` as the unconditional return. If all three rungs import shipvision
+      then on a checkout with no submodule the factory has nothing to return at all: not a
+      degraded backend, an ImportError where the seam promises a working one.
+      AND THE DISTINCTION THAT MATTERS, which I nearly got wrong: "a machine with no BUILD
+      still runs" (CLAUDE.md) is not "a machine with no SUBMODULE". A deployment has the
+      submodule -- it is pinned in this repo -- and may simply not have compiled `_C`; there,
+      shipvision's PYTHON half imports fine and delegating torch to it costs nothing. The
+      no-submodule case is CI's plain leg, which is deliberate and is the ADR-001 check.
+      SO THE TORCH MOVE IS VIABLE AND HAS ONE PRICE, now quantified rather than assumed: the
+      plain leg would exercise numpy only for ops, and `test_ops_parity.py`'s three-way
+      comparison would degenerate to numpy-vs-numpy there. #279 made that survivable by
+      giving the kernels leg torchvision, so torch-over-shipvision IS covered on a
+      merge-gating machine -- but the coverage moves legs rather than staying put, and that
+      is the trade to state in the PR rather than discover in review.
       SO ROW 10's QUESTION DISSOLVES: the interpolation only ever mattered for the numpy path,
       and the numpy path should not move. Decided under V154 rather than asked -- a
       dependency-free nearest reference is what ADR-001 and the kernel-parity test both
