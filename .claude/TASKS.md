@@ -310,12 +310,31 @@ it is not told. So a request becomes a line the moment it arrives, not at the en
 | `[~]` | in progress this session — blocks stopping |
 | `[x]` | done, evidence on the line |
 | `[!]` | blocked on the operator, question on the line — does not block |
+| | **and re-read it before trusting it**: see the audit note under the legend |
 | `[-]` | dropped by the operator, reason on the line |
 
 A stopping point is exactly three things: everything is `[x]`/`[!]`/`[-]`; an action needs
 confirmation before it is safe; or the operator interrupted. **Opening a PR is not one. Pushing
 is not one. Writing a summary is not one.** `AWAITING-OPERATOR:` on its own line also stands the
 hook down, for when the operator asked to see something before it is executed.
+
+**AUDIT `[!]` BEFORE BELIEVING IT (14 Sep).** A blocked marker is load-bearing -- the Stop hook
+lets a session end on one -- so a stale `[!]` is work that stops being done AND stops being
+visible. Nothing walks back from a merged PR to the line that asked for it. One pass over the
+nineteen found FOUR reporting "waiting on you" about work already done: `V124b` and
+`V124a-PHASE3` (both gated on #187, merged 10 Sep), `V146b` (#169, same day) and
+`API-WEDGED-REPORT-FLAKE` (fixed by #224 on 11 Sep, unnoticed for three days).
+The pass that finds them, in order of yield: for each `[!]`, (1) if it names a PR, check whether
+it merged -- `gh pr view N --json state`; (2) if it names a FILE or symbol, check the file, and
+against the pinned submodule commit rather than memory, which is how `C13`'s deleted
+`tracker.py` and `SV-LICENSE`'s now-present `LICENSES/` turned up; (3) if it parks a question,
+search the merged PR titles for someone having answered it by ACTING -- that is what #224 did
+and it is the case no PR reference would have caught.
+I tried to mechanise step (1) and threw it away: `[!]` blocks cite shipvision PR numbers
+(`C27`'s #11/#12) and shipinfer's in the same syntax, long blocks sweep up unrelated `#N` from
+prose, and inline `[!] OPERATOR:` sub-markers parse as items. An advisory list that is mostly
+false positives gets ignored, which is no better than the reminder it replaces. Done by hand it
+is twenty minutes and it found four.
 
 AWAITING-OPERATOR: rows 8 and 9 above -- how the 12 Sep design-load profile was configured, and which reading of `missing_stages` is the contract. Everything else is `[x]`/`[!]`/`[-]`; the one remaining `[ ]` is `SHIPVISION-TRACK-LAST-MATCH`, which the parity register PINS open by test and which is a decision rather than work in flight.
 
