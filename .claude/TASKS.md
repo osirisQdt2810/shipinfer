@@ -4580,6 +4580,23 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       at this exact load, nine runs); the mask fold on the device is #232, MERGED 11 Sep, with
       its wiring #239 MERGED 12 Sep and `ENGINE-COPIES-EVERY-OUTPUT-HOME` closed with it. So
       lever (a) is no longer "mostly built" -- it is in, and none of it is waiting on anyone.
+      AND A THIRD SHAPE FOR THE KNOB, 14 Sep, measured despite a contended box because an
+      interleaved A/B on ONE box cancels contention between its arms -- which is #214's own
+      method. 12 cameras x 20 fps x 20 s, four GPUs, `workers 24`, the pan fixture, arms run
+      off/on/off/on:
+        blocking_sync=0   accepted 2 005, 2 527    cores 5.14, 6.46
+        blocking_sync=1   accepted 2 697, 2 681    cores 5.72, 5.81
+      READ AS RANGES, not means, which is the rule this ledger already carries: accepted does
+      NOT overlap -- ON [2 681, 2 697] against OFF [2 005, 2 527], so min(ON) > max(OFF) -- and
+      cores DO overlap, ON [5.72, 5.81] sitting inside OFF [5.14, 6.46]. So at this shape the
+      knob buys THROUGHPUT AND STABILITY (the OFF spread is 522 accepted and 1.32 cores; ON is
+      16 and 0.09) and NO measurable host-CPU saving.
+      NOT A CONTRADICTION OF #214, and the shape is why: that PR measured 50x20 (-40% host CPU)
+      and "a fifth of it" as 50 cameras x 4 fps -- same fleet, lower rate. This is 12 cameras at
+      FULL rate: a quarter of the fleet, a quarter of the camera threads and RTSP streams, same
+      per-camera cadence. Three shapes now, and the host-CPU win appears in the two with fifty
+      cameras and not in the one with twelve, which is worth knowing before anyone extrapolates
+      the -40% down the load curve.
       WHICH CHANGES THE QUESTION FROM A DECISION TO A MEASUREMENT. "Which lever?" was asked when
       (a) was unfinished. It is finished, so the next step is to re-run the 11 Sep measurement
       and see where 711.5 tracked img/s and 15.5 cores have moved -- and only if that still
