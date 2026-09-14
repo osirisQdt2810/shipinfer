@@ -189,11 +189,17 @@ class TorchImageOps(ImageOps):
 
         A copy into *pageable* host memory never DMAs. The driver moves it in pieces through
         a bounce buffer of its own, which is why the same transfer measures around 1.4 GB/s
-        pageable and around 10 GB/s pinned. The C++ plane had this exact defect in NMS —
-        downloading the mask into a fresh pageable vector cost 30.8 ms a call against 1.7 ms
-        through a pinned scratch (ledger C32) — and these two sites are the Python plane's
-        version of it: at 1000 frames a second they carry the letterboxed batch and every
-        crop back across PCIe.
+        pageable and around 10 GB/s pinned. shipvision's NMS **still has** this exact defect —
+        `imgproc/image_ops.cu` downloads the bitmask into a fresh pageable
+        `std::vector<unsigned long long>` and `NmsScratch` carries no host_mask — and these
+        two sites are the Python plane's version of it: at 1000 frames a second they carry
+        the letterboxed batch and every crop back across PCIe.
+
+        PRESENT TENSE ON PURPOSE, and this line used to say "had". The fix was measured
+        (30.8 ms a call pageable against 1.7 ms pinned) on a branch that never reached
+        shipvision's main, so citing it as done is exactly what ledger **C27** exists to
+        stop; C32, which this cited, is the closed item recording the branch. Verified
+        against the pinned commit, not from memory.
 
         The pool key is the **fixed** shape ``(name, rows, *shape[1:])``, never the true row
         count. That is deliberate: a crowded frame's eighteen crops and a quiet frame's three
