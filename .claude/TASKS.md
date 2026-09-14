@@ -3662,6 +3662,38 @@ hook down, for when the operator asked to see something before it is executed.
       same event with ids, so a kind marker would read as "mtmc did not run" on a frame where
       it did. Found by #263's review; recorded rather than solved because the marker is a
       schema question and the PR was a routing one.
+      NAMED NOW, 13 Sep, AT THE RUNNER -- which is the only layer that can. A slot sees a
+      camera outside its own roster and cannot tell "another group's" (every frame of every
+      foreign camera on a healthy two-group chain) from "nobody's"; the runner holds every
+      roster. `InprocessRunner._warn_if_no_group_owns` warns once per camera, naming it and
+      the slots that could have claimed it. NOT a refusal: a roster is written once and
+      cameras arrive by API, so one unlisted camera must not fail a fleet that is correct.
+      THE BARRIER'S `cameras_not_mine` DID NOT COVER THIS, and #266/#267 believed it did.
+      Its one reader is the silent-roster warning, gated on `silent_cameras` being non-empty
+      -- a DIFFERENT fault -- and an orphan can never be silent: `camera_added` returns before
+      announcing it and `_do_process` turns it away before `submit`, so it enters neither
+      `_announced` nor `_seen`. Measured: `cameras_not_mine ['cam-orphan']`,
+      `silent_cameras []`, no warning, even with the 100-window latch forced open.
+      WHAT IS STILL OPEN is the EVENT, and the measured table is why it is not obvious:
+        cause                                  partial  missing_stages     global_id_group
+        camera no roster names (two groups)    false    []                 ABSENT
+        chain has NO mtmc element at all       false    []                 ABSENT
+        owning slot, tracker gap               true     ["track","mtmc"]   ABSENT
+        owning slot, barrier gap (late/failed) true     ["mtmc"]           ABSENT
+        owning slot, zero or gated tracks      false    []                 present
+      The first two rows are BYTE-IDENTICAL, and `topology/detect_only.yaml` ships with no
+      mtmc, so both are real. A consumer cannot tell "no group owns this camera" from "this
+      deployment has no cross-camera tier". Worse, `core/events/schema.py` promises of
+      `global_id_group` that "absence is the frame-level fact `missing_stages` carries" --
+      and in row one absence carries no fact at all, so the schema's own sentence is wrong
+      for that row. Fixing THAT is the remaining work: either make the row carry a fact or
+      correct the promise. A kind marker is still the wrong shape, for the reason above.
+      AND THE C++ PLANE OWES THE SAME WARNING (V88/V89). `plan_stages.cpp` refuses the two
+      plan-time roster faults -- one camera in two rosters, a second slot naming none -- but
+      an ORPHAN cannot be caught there: cameras arrive at run time through
+      `IngestManager::add_camera`, which is where the Python twin warns. Opened with this
+      PR rather than claimed done; the frame path itself is NOT divergent, as below.
+
       IT IS NOT A CROSS-PLANE DIVERGENCE, and an earlier version of this line said it was.
       The C++ not-mine path attaches an EMPTY `ObjectBatch` under the slot's own name
       (`stages.cpp`) where Python returns the item untouched, but that reaches no reader:
