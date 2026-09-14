@@ -9384,10 +9384,13 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `.[dev,cli]`. #278's first run reddened on exactly that. So the torch-to-torch premise
       -- the headline -- is evidence from an install carrying the extra, not from the merge
       gate, and the test says so in its skip reason rather than reporting a pass it never ran.
-      CLOSING THAT would be one line on the kernels leg (`torchvision` from the CPU index,
-      the same shape as its existing `[solvers]` install). Held out of #278 deliberately: it
-      edits `pr-pipeline.yml`, which cannot pass the review job (CLAUDE.md's known exception)
-      and needs a manual merge, so it does not belong in a test PR.
+      CLOSED 14 Sep: the kernels leg of BOTH workflows now installs `torchvision` from the
+      same CPU index, so their torch backend can construct and the headline premise runs on
+      the merge gate. The plain `test` job deliberately does NOT get it --
+      `runtime/ops/torch_ops.py::_nms_fallback` exists for installs without torchvision and
+      that path has to keep being exercised somewhere that gates a merge, which is the same
+      reason that job takes no submodule. Its own PR, because it edits `pr-pipeline.yml` and
+      therefore cannot pass the review job (CLAUDE.md's known exception, V169 merge).
       SO ROW 10's QUESTION DISSOLVES: the interpolation only ever mattered for the numpy path,
       and the numpy path should not move. Decided under V154 rather than asked -- a
       dependency-free nearest reference is what ADR-001 and the kernel-parity test both
