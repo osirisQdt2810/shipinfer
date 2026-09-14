@@ -103,6 +103,13 @@ def pytest_configure(config) -> None:
     from tests.support.models import pin_intra_op_threads
 
     pin_intra_op_threads()
+    # AND THE SAME REASON FOR A DEVICE-WIDE FLAG. Since #214 the blocking-sync knob is ON by
+    # default, and a manager built over a FABRICATED `device_count` (`test_platform.py`) has a
+    # non-empty `_visible`, so it dlopens libcudart and sets that flag on the real box --
+    # blanking the device lists cannot cover a count that is faked rather than read.
+    from shipinfer.runtime.device import BLOCKING_SYNC_ENV
+
+    os.environ[BLOCKING_SYNC_ENV] = "0"
 
 
 # doc: long the leak it prevents is three steps long and invisible from the call site
