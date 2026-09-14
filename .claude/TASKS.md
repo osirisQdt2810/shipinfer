@@ -3115,7 +3115,7 @@ hook down, for when the operator asked to see something before it is executed.
       events on it yet; with them, a lease may cost a query rather than a sync. (2) A fused
       detector decode, the first real consumer that would want one.
 
-- [ ] EXECUTE-BLOCKS-THE-INSTANCE-THREAD · PRICED 12 Sep at the design load: ~14% of instance-thread wall. PROFILED 11 Sep: `cudaStreamSynchronize` is **32.2%
+- [!] EXECUTE-BLOCKS-THE-INSTANCE-THREAD · PRICED 12 Sep at the design load: ~14% of instance-thread wall. PROFILED 11 Sep: `cudaStreamSynchronize` is **32.2%
       of all CUDA API time** -- 9.64 s over 5 564 calls, 1.73 ms average -- because
       `TrtEngine::execute` synchronises before returning, so the instance thread stops dead for
       the length of a batch instead of taking the next one. The launches are the floor (1.03 M
@@ -3195,9 +3195,28 @@ hook down, for when the operator asked to see something before it is executed.
       and `cudaStreamSynchronize` 92 calls totalling 0.6 ms, against 150 629 calls and
       304.29 s on 12 Sep. So that report measures startup, not steady state, and NO fresh
       number was obtained: the hold above rests on the #214 argument, not on a measurement.
-      WHAT IT NEEDS is the PLAN the 12 Sep run used -- `.artifacts/cpp/run.plan` is absent and
-      the engine flags are not the same experiment -- plus a window long enough that engine
-      load is not most of it (that run was 80.85 s of process for a 40 s measurement).
+      RE-ATTEMPTED PROPERLY 14 Sep with the plan, and it still does not reproduce. The plan
+      was regenerated (`shipinfer plan -t topology/ship_person_cpu.yaml`) and it IS the same
+      shape -- det 2, seg 2, person-emb 2, ship-emb 1, so 7 instances a GPU and 28 instance
+      threads, exactly the denominator the table above states. The stale host `bench` was the
+      first problem (it did not know the `algorithm` verb) and the gstreamer lane the second:
+      that binary has to be built INSIDE `shipinfer-gst:jammy` with TensorRT mounted, because
+      the host has no GStreamer -dev. Both fixed; at 8 cameras x 10 fps the chain runs clean,
+      0 rejected. AT THE DESIGN LOAD IT COLLAPSES, three configurations:
+        engine flags, 50x20x60 s      read 13 055  accepted 2 725  rejected 10 373
+        plan, workers 4, 50x20x40 s   read  6 089  accepted     8  rejected  5 859
+        plan, workers 48, 50x20x40 s  read  6 666  accepted   382  rejected  6 323
+      Under nsys it is worse still (accepted 8, cameras abandoned at stop), so no `cuda_api_sum`
+      window is usable. 12 Sep read 37 572 and accepted 32 445 over 40 s on the same box.
+      [!] OPERATOR: HOW WAS THE 12 SEP DESIGN-LOAD RUN CONFIGURED? The gap is not small -- 86%
+      accepted there against 6% here -- so it is a configuration I do not have rather than
+      drift: worker count, `pipeline_queue`, the mtmc `sync_window_ms` with 50 cameras in one
+      group, or a different fixture than `benchmarks/baseline/data/{person,ship}_2K`. With
+      that, the re-profile is one run and this item gets its number. Without it I am guessing,
+      and I have spent six GPU runs on the guess already.
+      THE HOLD ABOVE DOES NOT DEPEND ON THIS. #214 changed the sync's cost model whatever the
+      fresh share turns out to be; the number decides how much the ring is worth, not whether
+      the 12 Sep 14% still describes today's default.
 
 - [x] THE-BUILD-NEVER-VECTORISES · MEASURED AND CLOSED 11 Sep. `scripts/build_csrc.py` compiles with `-O2` and nothing else
       (`optimise = ["-O0", "-g"] if args.debug else ["-O2"]`), and this box's g++ is 11.4, where
@@ -3222,7 +3241,7 @@ hook down, for when the operator asked to see something before it is executed.
       obvious candidate is `MTMC-GRAM-WANTS-A-REAL-GEMM` if the gram lands in tree -- and measure
       that loop rather than flipping a flag and claiming a speed-up.
 
-- [ ] EVENTS-MISSING-STAGES-MEANS-TWO-THINGS · the field means one thing on a chain and the
+- [!] EVENTS-MISSING-STAGES-MEANS-TWO-THINGS · the field means one thing on a chain and the
       opposite on the DeepStream builder, and both are deliberate. On a chain it is PER FRAME:
       the stage ran and this frame missed it, so `detect_only.yaml` -- which runs no `track`,
       no `embed` and no `mtmc` -- publishes `partial: false` and an EMPTY `missing_stages`.
@@ -3241,10 +3260,18 @@ hook down, for when the operator asked to see something before it is executed.
       convention over the shared serialiser. Deciding it is a schema question and wants its
       own PR: either `missing_stages` becomes per-frame everywhere and the DeepStream
       topology's absent stages move to a static field, or the chain plane starts naming the
-      slots its file does not declare. The first looks right -- `partial` is a frame word --
-      but it is not this PR's call.
+      slots its file does not declare. The first looks right -- `partial` is a frame word.
+      [!] OPERATOR: WHICH READING IS THE CONTRACT? This is not a refactor: whichever way it
+      goes, one set of live consumers sees different bytes. Moving DeepStream's absent stages
+      to `extra` keeps schema v5 (no version bump, no `motservice` rebuild) but flips that
+      deployment's `partial` from true to false and empties its `missing_stages`. Leaving it
+      alone keeps `partial` meaning two things across producers. I can build either in an
+      afternoon; I should not pick which consumers to break.
 
-- [ ] MTMC-TWO-SLOT-CACHED-REGISTRIES · `pipeline/mtmc/cluster.cpp` is
+- [-] MTMC-TWO-SLOT-CACHED-REGISTRIES · HELD 14 Sep, deliberately, and the trigger below
+      is the whole decision: the template is written by whoever adds the THIRD caller, not
+      before. Re-read as `[ ]` the day a third appears.
+       `pipeline/mtmc/cluster.cpp` is
       `pipeline/tracking/associator.cpp` transcribed: `add`/`has`/`names`/`create`, `made_lock`,
       `made`, `made_*`, the (impl, slot) cache and the lane-before-unknown refusal, ~60
       near-identical lines. Named by #220's review, and defensible at TWO: the mirroring is
@@ -5042,7 +5069,17 @@ hook down, for when the operator asked to see something before it is executed.
       believed then: "this plane has no such step" is FALSE. `shard.cpp` maps tracks onto rows
       by `Track::last_match`, exactly. See CSRC-TRACKER-ATTRIBUTION's ruling.
 
-- [ ] SHIPVISION-TRACK-LAST-MATCH · carry the matched detection row onto the Python `Track`,
+- [ ] SHIPVISION-TRACK-LAST-MATCH · **PINNED OPEN BY DESIGN -- this one cannot be closed, and
+      that is the register working.** `benchmarks/parity/known.py`'s `tracker_options` entry
+      cites this line, and `test_every_entry_has_an_open_ledger_line_and_a_reproducing_case`
+      asserts the cited line is an OPEN `[ ]` one: an entry nobody owns the fix for is a
+      suppression, which is the whole thing that register exists to refuse. So marking this
+      `[x]`, `[-]` or `[!]` REDDENS THE OFFLINE SUITE. It closes when the fix lands and the
+      register entry is deleted with it -- not before, and not to tidy the ledger.
+      The 14 Sep pricing argues for leaving it unbuilt for now (band empty by 0.03 IoU), so
+      the expected state is: open, priced, deliberately unbuilt. A reader counting open items
+      should count this one as a decision, not as work in flight.
+      carry the matched detection row onto the Python `Track`,
       so both planes read ONE exact mapping. Successor to CSRC-TRACKER-ATTRIBUTION (settled
       13 Sep) and the open line the `tracker_options` register entry cites.
       THE CHANGE IS IN `3rdparty/shipvision`, not here -- ADR-010: a submodule PR, then a
