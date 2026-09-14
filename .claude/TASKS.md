@@ -4597,6 +4597,24 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       per-camera cadence. Three shapes now, and the host-CPU win appears in the two with fifty
       cameras and not in the one with twelve, which is worth knowing before anyone extrapolates
       the -40% down the load curve.
+      AND THE OTHER LEVER, A/B'd the same way and at the same shape -- `bench.cpp:400` calls
+      `SHIPINFER_DEVICE_FOLD=0` "the A/B this was measured with", so this is the hatch it was
+      built for. Arms off/on/off/on, the knob confirmed engaged (the "folding `mask_area_px`
+      on the device" line appears in the ON arms and not the OFF ones) and the segmenter busy
+      in all four (700-990 rows a device):
+        fold=0   accepted 2 278, 2 207   host CPU 157.4 s, 175.1 s
+        fold=1   accepted 2 780, 2 451   host CPU 149.0 s, 137.4 s
+      NORMALISED, because the ON arms also did MORE work -- 3 411-3 833 segmenter rows against
+      3 002-3 123 -- so raw seconds understate it. Host CPU per ACCEPTED frame:
+        fold=0   [69.1, 79.4] ms        fold=1   [53.6, 56.0] ms
+      NON-OVERLAPPING, so the difference is real: at the worst pairing the fold is **19% less
+      host CPU per frame**, having segmented more. That is the shape of what #232 priced at
+      1.44 ms/crop of host loop against 10 us of kernel.
+      SO OF THE TWO HOST-BUDGET LEVERS, ONLY ONE SHOWS AT TWELVE CAMERAS. The fold's saving is
+      here and non-overlapping; the blocking sync's is not at this shape (its cores overlap,
+      above) though its throughput gain is. Both raise accepted frames. Worth having before the
+      design-load run: the -40% host CPU #214 measured at 50x20 is not what the knob alone
+      gives a smaller fleet, while the fold's saving looks like it travels.
       WHICH CHANGES THE QUESTION FROM A DECISION TO A MEASUREMENT. "Which lever?" was asked when
       (a) was unfinished. It is finished, so the next step is to re-run the 11 Sep measurement
       and see where 711.5 tracked img/s and 15.5 cores have moved -- and only if that still
