@@ -1087,7 +1087,19 @@ AWAITING-OPERATOR: rows 8 and 9 above -- how the 12 Sep design-load profile was 
       predicted. **Native `nms` is 33.3 ms vs torch 2.1 ms = 0.06x — 16x slower — twice in a
       row.** That is a defect, not noise, and it is C27. Two consequences for C1: the fused
       kernels are not where the 5x is, and a per-frame budget built on the 50x figure is wrong.
-- [!] **C27 · VERIFIED 28 Aug by source inspection: the pinned host_mask fix did NOT survive the #11 rewrite.**
+- [!] **C27 · RE-VERIFIED 14 Sep against the PINNED commit, and one citation of it in this
+      repo was wrong.** `3rdparty/shipvision` pins `d247d5f`, which IS shipvision's `main`, and
+      the defect is live there: `imgproc/image_ops.cu:362` still downloads the bitmask into a
+      fresh pageable `std::vector<unsigned long long>`, and `NmsScratch` (image_ops.h:126)
+      still carries only device pointers. The recovered work is safe --
+      `origin/backup/csrc-native-pinned-nms` survives on shipvision's remote, though the
+      scratchpad patch copy this line mentions is long gone, as scratchpads are.
+      THE CITATION: `runtime/ops/torch_ops.py::_to_host` said the C++ plane "had" this defect
+      and pointed at C32 -- past tense for something still true, and at the CLOSED item that
+      records the branch rather than at this one. Fixed; it now reads present tense with the
+      file evidence and points here. That is the failure mode this line's "do NOT cite it
+      anywhere" was written to prevent, and it had already happened once.**
+      ORIGINAL: VERIFIED 28 Aug by source inspection: the pinned host_mask fix did NOT survive the #11 rewrite.**
       On shipvision `origin/main` (c779ad7), `csrc/shipvision/imgproc/image_ops.cu::nms` downloads the
       `(n, ceil(n/64))` mask into a fresh **pageable** `std::vector<unsigned long long> mask(mask_words)` — the exact
       root cause the old branch fixed (30.8 ms pageable vs 1.7 ms pinned at 44 MB). `NmsScratch` (image_ops.h:124)
