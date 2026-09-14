@@ -753,11 +753,11 @@ class ShipvisionMtmc(Element):
             )
         capture_s = self._capture_s(item)
         view = self._view(item, camera_id, capture_s, tracks)
-        # HOW LATE THIS FRAME IS: here, because only this place holds both stamps on one
-        # clock. CLAMPED AT ZERO AND COUNTED — a frame arriving before its own capture stamp
-        # is the two clocks disagreeing, and `backward` cannot see that: it compares a
-        # camera's stamps against its OWN history. See `note_arrival_lag_us`.
-        lag_us = (time.time() - capture_s) * 1e6
+        # HOW LATE THIS FRAME IS, on the WALL PAIR BY NAME and never on `capture_s`: with a
+        # monotonic key (ADR-022) this is the only thing left that can see a SOURCE's clock
+        # disagree with this shard's. CLAMPED AT ZERO AND COUNTED, because `backward` cannot
+        # see it -- that compares a camera's stamps against its OWN history.
+        lag_us = (time.time() - item.context.captured_unix_ns / 1e9) * 1e6
         self._barrier.note_arrival_lag_us(int(max(0.0, lag_us)), negative=lag_us < 0.0)
         try:
             outcome = self._barrier.submit(
@@ -787,24 +787,20 @@ class ShipvisionMtmc(Element):
         return item.derive(global_ids=global_ids, global_id_group=self.name)
 
     def _capture_s(self, item: ChainItem) -> float:
-        """When this frame was taken, in seconds, or a typed refusal.
+        """When this frame was taken, on the MONOTONIC clock, or a typed refusal.
 
-        :attr:`RequestContext.captured_unix_ns` defaults to ``0``, so a source that never
-        stamps it is indistinguishable from one that stamps the epoch — and either way every
-        frame of every camera lands in one instant, which closes once and makes every frame
-        after it ``late`` for the life of the process. That is a static property of a
-        mis-wired chain, identical on every frame, exactly like a zero ``frame_hw``, so it
-        gets the same treatment: a refusal that names the fix rather than a per-frame gap that
-        looks like clock skew. The production ingest path stamps it
-        (``ingest/frame/tag.py``); a hand-built ``RequestContext`` is what does not.
+        ``captured_ns`` and not ``captured_unix_ns`` — ADR-022 has the reasoning. It defaults
+        to ``0``, and a source that never stamps it would put every frame of every camera into
+        one instant for the life of the process: a static property of a mis-wired chain, so it
+        gets a refusal rather than a gap that looks like clock skew.
 
         Raises:
             ValidationError: the capture clock is zero or negative.
         """
-        captured = item.context.captured_unix_ns
+        captured = item.context.captured_ns
         if captured <= 0:
             raise ValidationError(
-                f"mtmc element {self.name!r}: this frame's captured_unix_ns is {captured} and "
+                f"mtmc element {self.name!r}: this frame's captured_ns is {captured} and "
                 "cross-camera association buckets frames by capture time; every camera would "
                 "land in one instant. Stamp the frame at ingest -- `FrameTag`/`ingest.frame` "
                 "does it for every source the server reads"

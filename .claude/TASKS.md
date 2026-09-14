@@ -3403,7 +3403,7 @@ hook down, for when the operator asked to see something before it is executed.
       per frame is 267-279 ms against a 60 ms window, so a frame that takes four windows to
       reach `mtmc` is late by construction and the window is not the variable. If that is it,
       the fix is upstream of the barrier (the chain's latency) or the barrier has to bucket on
-      arrival rather than capture -- and ADR on the capture stamp says why it cannot.
+      arrival rather than capture -- and ADR-022 says why it keys on capture.
       MEASURE FIRST: the distribution of (arrival - capture) at the mtmc stage, which nothing
       reports today. Do not touch the window until that histogram exists.
       IT EXISTS NOW and it settles the question. `mtmc_arrival_lag_us`, both planes, measured
@@ -3420,7 +3420,7 @@ hook down, for when the operator asked to see something before it is executed.
       variance. That is `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` and `EXECUTE-BLOCKS-THE-
       INSTANCE-THREAD` territory, not the barrier's, and this item closes having said which.
 
-- [ ] MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK · (a) DONE 11 Sep, (b) STILL OPEN. #222 converged the two planes onto the
+- [x] MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK · (a) DONE 11 Sep, (b) DONE 13 Sep. #222 converged the two planes onto the
       CAPTURE (wall) stamp, because keying instants on different clocks is two sets of global
       ids for one clip and the sync rule makes that a defect. The risk the old comment argued
       is real and now has nowhere to hide: NTP can step the wall clock, including backwards,
@@ -3449,6 +3449,35 @@ hook down, for when the operator asked to see something before it is executed.
       ingest writes once per frame, carried through the RPC, so a group shares one process's
       monotonic clock. That belongs with `launch/`'s control plane and needs the proto to carry
       it; until then (a) makes a step visible on any box rather than silent on all of them.
+
+      (b) DONE 13 Sep, AND THE RPC WAS NOT THE WORK -- the premise above is false, checked line
+      by line. "A fleet's shards could never share an instant with [a steady stamp]" assumes
+      shards DO share one. They cannot: a barrier is an object in ONE process (one non-test
+      construction per plane), `_pin_to_group` keeps every camera of a group on one shard and
+      raises `NoShardAvailableError` rather than splitting it, `runners/fleet.py` refuses to
+      execute an item at all ("frames enter a shard through its own decode element"), and
+      `shard.proto` carries eight control RPCs and no frame. There is no path where two
+      processes' frames meet one barrier, so there was no wire to carry a stamp across.
+      AND THE STAMP WAS ALREADY ON EVERY ITEM: ingest reads BOTH clocks in one expression at
+      decode on both planes. The work was to READ THE OTHER FIELD, which is what was done --
+      `_capture_s` and `stages.cpp` key on `captured_ns` now, with the zero refusal following
+      the field. Recorded as ADR-022, because two places in the tree already cited "the ADR on
+      the capture stamp" and no such ADR existed.
+      KEPT DELIBERATELY: the backward guard, which is unreachable for an ingest-stamped frame
+      and still load-bearing for the DeepStream path (its stamp is the camera's own clock); and
+      the arrival-lag diagnostic, which now names `captured_unix_ns` explicitly rather than
+      taking the key -- with the key monotonic, that pair is the only signal left that a
+      SOURCE's clock and this shard's disagree.
+      WHAT IT BUYS, measured against the real barrier before the change: a 2 s backward step at
+      50 cameras and a 60 ms window cost 40 of 80 instants, and a 5 s step 75 of 79 -- while
+      `backward` read a flat 50 (one per camera) and the damage was counted as `late`, which
+      reads to an operator as "the chain is too slow". The residual scales with `_recent_limit`
+      (~10 s of history at 50 cameras), which is why (a)'s 3-camera tests never reached it.
+      NOT COVERED BY EITHER (a) OR (b), and worth its own line if anyone re-litigates this: a
+      chain with ONE UNROSTERED `mtmc` slot passes load, is pinned by nothing, and gives N
+      shards N identity spaces under one declared group -- `silent_cameras` cannot report it
+      because nothing was announced. `topology/ship_person.yaml` is exactly that chain. It is
+      not this item (N separate barriers, not one shared one, and no clock would fix it).
 
 - [x] CSRC-MTMC-TWO-GROUPS-PER-SHARD · DONE 12 Sep. #222 carried the chain's `group:`/`cameras:` roster onto
       the plan and announces it to the barrier, so the refusal of a SECOND `mtmc` slot no
@@ -3616,6 +3645,13 @@ hook down, for when the operator asked to see something before it is executed.
       could only be tested where the submodule is checked out -- which is not what CI has. It
       is asked before the bridge loads, and its two cases moved out of the `@needs_shipvision`
       class: on main they SKIP with no submodule, on this branch they PASS.
+
+- [ ] MTMC-THE-NTP-PROPERTY-IS-PYTHON-ONLY · ADR-022's property -- a wall-clock step moves no
+      instant, because the key is monotonic -- is asserted on the Python plane only
+      (`TestAnNtpStepDoesNotMoveAnInstant`). The C++ stage keys on the same field and
+      `test_mtmc_barrier` carries 146 checks, so a twin there is cheap and would put this under
+      the sync rule's "same inputs -> same events" rather than under one plane's word for it.
+      Found by #272's review.
 
 - [ ] MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED · with two groups, a camera NEITHER roster names
       is returned unchanged by every slot, so its event carries no `global_ids`, no marker
