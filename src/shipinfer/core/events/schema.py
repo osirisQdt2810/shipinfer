@@ -259,10 +259,18 @@ class PerceptionEvent:
                 "reason": self.reason,
             }
         )
-        # OMITTED WHEN ABSENT, not written as null. Present exactly when a cross-camera
-        # tier answered for THIS frame -- a one-group chain writes it on every frame its slot
-        # associates -- so absence is the frame-level fact `missing_stages` carries, and
-        # never "this deployment has one identity space".
+        # doc: long absence has three causes and only one of them is a frame-level fact
+        # OMITTED WHEN ABSENT, not written as null. Present exactly when a cross-camera tier
+        # answered for THIS frame -- a one-group chain writes it on every frame its slot
+        # associates. ABSENCE DOES NOT SAY WHY, and this line used to claim it did ("the
+        # frame-level fact `missing_stages` carries"). Three causes share it and only the
+        # first is per frame: the tier ran and this frame missed its instant, which
+        # `missing_stages` does carry; the chain declares no `mtmc` slot at all; or no slot's
+        # roster names this camera. The last two are DEPLOYMENT facts, identical on the wire
+        # and constant for the run, so they are said once at start-up rather than on every
+        # frame -- `InprocessRunner._warn_if_no_group_owns` and, on the other plane,
+        # `cameras_no_group_owns` in `cli/bench.cpp`. A per-frame marker would be the wrong
+        # shape for a fact that cannot change while the process lives.
         if self.global_id_group is not None:
             payload["global_id_group"] = self.global_id_group
         if self.extra:

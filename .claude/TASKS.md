@@ -3696,7 +3696,9 @@ hook down, for when the operator asked to see something before it is executed.
       property is expressible. Both halves probed by flipping the stage to the wall key: the
       first check fails alone, and reading the lag off the key fails four.
 
-- [ ] MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED · with two groups, a camera NEITHER roster names
+- [x] MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED · DONE 14 Sep, all three halves: the runner names
+      it (#274), the C++ plane names it (#276), and the event's promise is corrected here.
+      With two groups, a camera NEITHER roster names
       is returned unchanged by every slot, so its event carries no `global_ids`, no marker
       saying why, and `is_partial()` false. Reachable: add a camera by API that the chain
       file never listed. It IS counted -- twice, as `not_mine`, once per slot -- so a run says
@@ -3717,7 +3719,20 @@ hook down, for when the operator asked to see something before it is executed.
       announcing it and `_do_process` turns it away before `submit`, so it enters neither
       `_announced` nor `_seen`. Measured: `cameras_not_mine ['cam-orphan']`,
       `silent_cameras []`, no warning, even with the 100-window latch forced open.
-      WHAT IS STILL OPEN is the EVENT, and the measured table is why it is not obvious:
+      THE EVENT HALF IS SETTLED 14 Sep, BY CORRECTING THE PROMISE rather than by adding a
+      marker, and the measured table below is the reason. Absence of `global_id_group` has
+      THREE causes and only one is a frame-level fact; the schema comment claimed it was
+      always the fact `missing_stages` carries, which is false for two of the three rows.
+      `as_dict` now says what absence does and does not mean, and
+      `test_absence_does_not_say_which_of_three_things_happened` is that table as an
+      assertion -- including that the two deployment rows are byte-identical, so the day
+      they stop being, the comment has to change with them.
+      WHY NOT A MARKER: the two indistinguishable rows are DEPLOYMENT facts, constant for
+      the life of the process, and a per-frame key is the wrong shape for a fact that cannot
+      change while the process lives. They are said once at start-up instead, on both planes
+      -- `InprocessRunner._warn_if_no_group_owns` (#274) and `cameras_no_group_owns` in
+      `cli/bench.cpp` (#276) -- which is what those two PRs were for.
+      THE TABLE, which is what all of that is about:
         cause                                  partial  missing_stages     global_id_group
         camera no roster names (two groups)    false    []                 ABSENT
         chain has NO mtmc element at all       false    []                 ABSENT
@@ -3726,11 +3741,8 @@ hook down, for when the operator asked to see something before it is executed.
         owning slot, zero or gated tracks      false    []                 present
       The first two rows are BYTE-IDENTICAL, and `topology/detect_only.yaml` ships with no
       mtmc, so both are real. A consumer cannot tell "no group owns this camera" from "this
-      deployment has no cross-camera tier". Worse, `core/events/schema.py` promises of
-      `global_id_group` that "absence is the frame-level fact `missing_stages` carries" --
-      and in row one absence carries no fact at all, so the schema's own sentence is wrong
-      for that row. Fixing THAT is the remaining work: either make the row carry a fact or
-      correct the promise. A kind marker is still the wrong shape, for the reason above.
+      deployment has no cross-camera tier" -- and that is now DOCUMENTED as the decision it
+      is, rather than being a sentence in the schema that was simply wrong.
       AND THE C++ PLANE NOW SAYS IT TOO (V88/V89), 14 Sep. `plan_stages.cpp` already refused
       the two plan-time roster faults -- one camera in two rosters, a second slot naming none
       -- and an orphan is neither: it is a fleet-vs-roster mismatch. THE PLANES DIFFER IN
