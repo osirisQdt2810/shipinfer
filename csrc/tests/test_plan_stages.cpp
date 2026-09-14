@@ -412,6 +412,51 @@ namespace {
               "the second one too, which is what makes the routing possible");
     }
 
+    void a_camera_no_group_owns_is_named_before_the_run() {
+        // `MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED`, this plane's half. With two groups a camera
+        // in NEITHER roster is associated by nobody, and the wire cannot say so: the event
+        // carries a null global id and `missing_stages` is empty, exactly as it is for a chain
+        // with no `mtmc` element. So it is said before the run, from the only place that holds
+        // every roster and the fleet at once.
+        const PlanStages built = plan_stages(
+            plan_of(kDetect + kTrack +
+                    "node quay mtmc plan-test\nscope global\ngroup north\ncamera cam0\n"
+                    "node berth mtmc plan-test\nscope global\ngroup south\ncamera cam1\n"),
+            kLoaded);
+
+        const std::vector<std::string> orphans =
+            cameras_no_group_owns(built, {"cam0", "cam1", "cam-orphan"});
+        check(orphans.size() == 1 && orphans[0] == "cam-orphan",
+              "only the camera no roster names, so a healthy fleet says nothing");
+
+        // THE HALF THAT MATTERS MOST: on a two-group chain EVERY camera is outside ONE roster,
+        // so a check that fired on that would name every healthy camera there is.
+        check(cameras_no_group_owns(built, {"cam0", "cam1"}).empty(),
+              "a camera some roster names is owned, whichever slot it is");
+
+        // In the fleet's order and once each -- a list that re-sorted or repeated a camera
+        // reads as a second fault.
+        const std::vector<std::string> many =
+            cameras_no_group_owns(built, {"zz", "aa", "zz", "cam0"});
+        check(many.size() == 2 && many[0] == "zz" && many[1] == "aa",
+              "the fleet's order, deduplicated");
+    }
+
+    void one_group_owns_every_camera_it_is_given() {
+        // BELOW TWO SLOTS there is no orphan to report, and this is not an off-by-one: with
+        // one group a roster is the fleet's placement HINT and not a filter, so `MtmcStage`
+        // runs with `routes` false and associates an unlisted camera anyway. The other plane
+        // draws the floor in the same place and for the same reason.
+        const PlanStages built = plan_stages(
+            plan_of(kDetect + kTrack +
+                    "node quay mtmc plan-test\nscope global\ngroup north\ncamera cam0\n"),
+            kLoaded);
+
+        check(built.mtmcs.size() == 1, "one slot");
+        check(cameras_no_group_owns(built, {"cam0", "cam-anything"}).empty(),
+              "so a camera outside the one roster is still associated, and is not an orphan");
+    }
+
     void one_camera_in_two_groups_is_refused() {
         // The contradiction the blanket refusal was really about, kept as the narrow rule:
         // two identity spaces would each give that camera's objects an id and the last stage
@@ -534,6 +579,8 @@ int main() {
         an_mtmc_slot_reads_the_chains_barrier_knobs();
         two_groups_with_disjoint_rosters_both_run();
         one_camera_in_two_groups_is_refused();
+        a_camera_no_group_owns_is_named_before_the_run();
+        one_group_owns_every_camera_it_is_given();
         a_second_group_that_names_no_cameras_is_refused();
         a_roster_that_lists_one_camera_twice_says_so();
         one_group_may_still_name_no_cameras();

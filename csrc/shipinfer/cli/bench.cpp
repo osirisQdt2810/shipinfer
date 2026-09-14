@@ -906,6 +906,36 @@ int main(int argc, char** argv) {
             }
             fleet.push_back(std::move(camera));
         }
+
+        // A CAMERA NO GROUP OWNS, named before the run rather than never
+        // (`MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED`, the twin of the other plane's runner
+        // warning). Not a refusal, for the same reason it is not one there: a roster is
+        // written once, and one unlisted camera must not fail a fleet that is otherwise
+        // correct -- its objects simply carry no fleet identity, which is invisible on the
+        // wire because the event says nothing is missing.
+        {
+            std::vector<std::string> named;
+            named.reserve(fleet.size());
+            for (const IngestConfig& camera : fleet) named.push_back(camera.camera_id);
+            const std::vector<std::string> orphans = cameras_no_group_owns(planned, named);
+            if (!orphans.empty()) {
+                std::string slots;
+                for (const MtmcStageSpec& slot : planned.mtmcs) {
+                    slots += (slots.empty() ? "" : ", ") + slot.slot;
+                }
+                std::string list;
+                for (const std::string& camera : orphans) {
+                    list += (list.empty() ? "" : ", ") + camera;
+                }
+                std::cerr << "warning: " << orphans.size()
+                          << " camera(s) are in no `mtmc` slot's `cameras:` -- " << slots
+                          << " name rosters and none lists " << list
+                          << ". They are associated by nobody, so their objects publish a null "
+                             "global_id and the event says nothing is missing. Add each to the "
+                             "group it belongs to, or accept that it has no fleet identity\n";
+            }
+        }
+
         IngestManager manager(std::move(fleet), sink);
 
         sampler.start();

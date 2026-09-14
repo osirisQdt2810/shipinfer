@@ -1,6 +1,8 @@
 #include "shipinfer/pipeline/graph/plan_stages.h"
 
 #include <map>
+#include <set>
+#include <vector>
 
 #include "shipinfer/pipeline/mtmc/cluster.h"
 #include "shipinfer/pipeline/tracking/associator.h"
@@ -193,6 +195,25 @@ namespace shipinfer {
         if (node.fold_score) fold.score_threshold = static_cast<float>(*node.fold_score);
         if (node.fold_mask) fold.mask_threshold = static_cast<float>(*node.fold_mask);
         return fold;
+    }
+
+    std::vector<std::string> cameras_no_group_owns(const PlanStages& planned,
+                                                   const std::vector<std::string>& cameras) {
+        if (planned.mtmcs.size() < 2) return {};
+        std::set<std::string> owned;
+        for (const MtmcStageSpec& slot : planned.mtmcs) {
+            owned.insert(slot.cameras.begin(), slot.cameras.end());
+        }
+        // IN THE FLEET'S ORDER and reported once each: the message names them, and a list that
+        // repeated a camera or re-sorted it reads as a second fault.
+        std::vector<std::string> orphans;
+        std::set<std::string> said;
+        for (const std::string& camera : cameras) {
+            if (owned.count(camera) == 0 && said.insert(camera).second) {
+                orphans.push_back(camera);
+            }
+        }
+        return orphans;
     }
 
     PlanStages plan_stages(const ResolvedPlan& plan, const std::set<std::string>& loaded) {
