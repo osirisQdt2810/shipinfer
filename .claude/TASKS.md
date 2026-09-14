@@ -16,7 +16,7 @@ line names the ledger item that holds the detail, and the exact action.
 | 4b | **DONE 12 Sep — merged under V169**, which made workflow PRs mine to merge. Worth knowing for the next one: the Claude review job **passed** on this PR and returned APPROVE, so CLAUDE.md's "a PR touching `.github/workflows/**` cannot pass the review job" did not hold here. The only thing keeping it open was the missing `automerge` label. Not yet rewritten in CLAUDE.md — one observation is not a rule; `CI-WORKFLOW-PRS-MAY-BE-REVIEWABLE` holds the check. | `CPP-LANE-JOB-GLOBS-ONE-PREFIX` |
 | 4 | **Pull `nvcr.io/nvidia/deepstream` (~6 GB)** onto this box, or say no — the fourth topology's running half needs it; the design half is done. | `T4` |
 | 10 | **No longer a question -- answered by measuring, noted so you can overrule.** I had asked whether the numpy oracle keeps NEAREST when `V124a-PHASE3` thins `runtime/ops` onto shipvision. It keeps it: `numpy_ops.py` is the dependency-free FLOOR (`ops/__init__.py:68`, "native if built, else torch, else numpy") and CI runs that tier with no submodule, so moving it would put shipvision under ADR-001. What moves instead is `torch_ops.py`, 30 KB of the 38, where the two agree already -- letterbox bit-exact, crop within 1.5e-05. My earlier two-slice plan was wrong and is corrected on the item. | `V124a-PHASE3` |
-| 8 | **How was the 12 Sep design-load profile configured?** I need it to re-price `EXECUTE-BLOCKS-THE-INSTANCE-THREAD`, whose ~14% was measured under the OLD spinning-sync default that #214 replaced two days later (host CPU -40%, rows +25%). Same box, same plan shape (28 instance threads), gstreamer RTSP, the plan regenerated from `ship_person_cpu.yaml`: 12 Sep read 37 572 and accepted 32 445 over 40 s; my three configurations accept 6-21% and under nsys almost nothing. Worker count, `pipeline_queue`, the mtmc `sync_window_ms` with 50 cameras in one group, or a different fixture? With it the re-profile is one run. | `EXECUTE-BLOCKS-THE-INSTANCE-THREAD` |
+| 8 | **Answered 14 Sep by me, not needed from you.** The 12 Sep design-load config is in `.artifacts/cpp/gate_design_load.plan`: `workers 92` where a freshly generated plan says 4. But that is not why I could not reproduce it -- 48 vs 92 moved acceptance 312 -> 402 of ~6 000 read, still ~6% against 90%. `host_cpu.py` has the real reason: that run got **16.19 cores**, mine got **7.02**, because this box is carrying ~40 of 48 in other users' training and this chain is host-bound. `EXECUTE-BLOCKS-THE-INSTANCE-THREAD`'s re-profile needs a QUIET BOX and four free GPUs, not a decision. | `EXECUTE-BLOCKS-THE-INSTANCE-THREAD` |
 | 9 | **Which reading of `missing_stages` is the contract?** It means "this FRAME missed it" on a chain and "this TOPOLOGY does not run it" in the DeepStream builder (`PR1_MISSING_STAGES`), and they share one serialiser -- so two deployments into one broker read each other's `partial` wrongly. Moving DeepStream's absent stages to `extra` keeps schema v5 and needs no `motservice` rebuild, but flips that deployment's `partial` to false and empties its list. Either is an afternoon; picking which live consumers change is yours. | `EVENTS-MISSING-STAGES-MEANS-TWO-THINGS` |
 | 5 | **shipvision has no LICENSE file at all**, and **where does the NV12 work live?** (the claimed 1021 uncommitted lines are in no checkout I can see). | `SV-LICENSE`, `C9` |
 
@@ -336,7 +336,7 @@ prose, and inline `[!] OPERATOR:` sub-markers parse as items. An advisory list t
 false positives gets ignored, which is no better than the reminder it replaces. Done by hand it
 is twenty minutes and it found four.
 
-AWAITING-OPERATOR: rows 8 and 9 above -- how the 12 Sep design-load profile was configured, and which reading of `missing_stages` is the contract. Everything else is `[x]`/`[!]`/`[-]`; the one remaining `[ ]` is `SHIPVISION-TRACK-LAST-MATCH`, which the parity register PINS open by test and which is a decision rather than work in flight.
+AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contract, per frame on a chain or per topology in the DeepStream builder. Row 8 answered itself on 14 Sep (the config was in the artefacts; the gap was host CPU, not configuration). Everything else is `[x]`/`[!]`/`[-]`; the one remaining `[ ]` is `SHIPVISION-TRACK-LAST-MATCH`, which the parity register PINS open by test and which is a decision rather than work in flight.
 
 > ## Z · The final gate — never remove this line (V61)
 >
@@ -3269,12 +3269,22 @@ AWAITING-OPERATOR: rows 8 and 9 above -- how the 12 Sep design-load profile was 
         plan, workers 48, 50x20x40 s  read  6 666  accepted   382  rejected  6 323
       Under nsys it is worse still (accepted 8, cameras abandoned at stop), so no `cuda_api_sum`
       window is usable. 12 Sep read 37 572 and accepted 32 445 over 40 s on the same box.
-      [!] OPERATOR: HOW WAS THE 12 SEP DESIGN-LOAD RUN CONFIGURED? The gap is not small -- 86%
-      accepted there against 6% here -- so it is a configuration I do not have rather than
-      drift: worker count, `pipeline_queue`, the mtmc `sync_window_ms` with 50 cameras in one
-      group, or a different fixture than `benchmarks/baseline/data/{person,ship}_2K`. With
-      that, the re-profile is one run and this item gets its number. Without it I am guessing,
-      and I have spent six GPU runs on the guess already.
+      ANSWERED 14 Sep WITHOUT THE OPERATOR, by reading the artefacts instead of asking.
+      `.artifacts/cpp/gate_design_load.plan` is the 12 Sep run: 50 cameras x 20 fps, the same
+      engines (`max_batch` 8/8/16/16, identical lines in both logs), and `setting workers 92`
+      where the freshly generated plan carries the chain default of 4. Diffed in full: workers
+      and one `algorithm bytetrack` line that landed after, nothing else.
+      AND THE WORKER COUNT IS NOT THE LEVER -- measured, not assumed. 48 vs 92 on the same
+      three GPUs moved acceptance 312 -> 402 of ~6 000 read. Still ~6%, against 90% on 12 Sep.
+      THE REAL CAUSE IS HOST CPU, and `host_cpu.py` says so in one number: the 12 Sep run got
+      **16.19 cores** busy (1 233 CPU-s over 76 s) and reached 61 981 of 68 538 frames; my run
+      today got **7.02** (365 CPU-s over 52 s) and reached 402. This box is carrying ~40 of its
+      48 cores in other users' GPU training, and RESULTS.md's own headline for this chain is
+      "the host is the wall". It was never a missing setting.
+      SO THE RE-PROFILE NEEDS A QUIET BOX, not an answer. Four free GPUs and a load average
+      low enough to leave ~16 cores, then `deploy/rootless/profile.sh --cpp` with `run92.plan`;
+      the plan is regenerable (`shipinfer plan -t topology/ship_person_cpu.yaml`, then set
+      workers to 92). Nothing here is yours any more.
       THE HOLD ABOVE DOES NOT DEPEND ON THIS. #214 changed the sync's cost model whatever the
       fresh share turns out to be; the number decides how much the ring is worth, not whether
       the 12 Sep 14% still describes today's default.
