@@ -3356,7 +3356,22 @@ AWAITING-OPERATOR: rows 8 and 9 above -- how the 12 Sep design-load profile was 
       and if it is the executions count rather than a timeout, it is a real defect in the
       response cache and not a test problem at all.
 
-- [!] API-WEDGED-REPORT-FLAKE-IS-NOT-A-TIMEOUT · `tests/api/test_streams.py::
+- [x] API-WEDGED-REPORT-FLAKE-IS-NOT-A-TIMEOUT · **DONE, and it was done on 11 Sep by #224 --
+      this line just never heard about it.** It parked a question ("say if you want it chased
+      now") and named the remaining hypothesis: one starlette `TestClient` driven from two
+      threads, with the fix being "an async test driving both requests as tasks". #224 is
+      titled "The wedged-report test drives two tasks, not one client from two threads" and
+      merged three days before this audit found it.
+      VERIFIED 14 Sep rather than inferred from the title: the test is `async` over
+      `httpx.AsyncClient` with two tasks, and its own comment now reads "THE SHAPE IS THE
+      FIX" while recording that the thread version failed CI's py3.10 leg four times.
+      Passes 3/3 locally, and main's last six ci.yml runs are green -- the py3.10 leg
+      included, which is the one that used to fail.
+      THE LESSON IS THE `[!]`, not the flake. An item blocked on an operator answer stays
+      blocked even after someone answers it by ACTING, because nothing walks back from the
+      PR to the line that asked. Three of these turned up in one audit today; this is the
+      fourth and the oldest.
+      ORIGINAL: `tests/api/test_streams.py::
       TestNothingBlockingRunsOnTheEventLoop::test_a_wedged_report_is_a_504_and_the_next_request_still_answers`
       fails on CI's **py3.10** leg and passes locally on the same interpreter (3.10.12), three
       for three in isolation and in the full suite. It has now failed three times on #222 and
