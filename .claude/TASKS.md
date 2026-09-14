@@ -3391,23 +3391,35 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       changed is the estimate of the cost -- a drift here is now a defect one seam already
       documented and the other still had.
 
-- [ ] CACHE-KEYING-FLAKE-SEEN-ONCE · `tests/engine/test_response_cache.py::TestCacheKeying::
-      test_identical_inputs_run_the_model_once` failed once in a full-suite run on 14 Sep and
-      has not reproduced. Recorded rather than shrugged off, because the neighbouring item
-      above is what an unrecorded flake costs: it blocked an APPROVED diff twice.
-      WHAT IS KNOWN. It failed inside `pytest -q` over the whole tree; the same module then
-      passed 5/5 in isolation (~1.6 s each), the single test 3/3, and the whole suite green on
-      a re-run (4458 passed). So `main` is not red and the earlier push, which was docs-only,
-      did not cause it. The failing assertion was not captured -- the run had scrolled -- which
-      is the first thing to fix if it recurs.
-      THE LIKELY CAUSE, unproven: the test starts a real server and does two `infer_sync` calls
-      with a 10 s timeout, and this box was at load 39-46 of 48 cores (four other users' GPU
-      training jobs) when it failed. A timeout under load fits; a genuine cache race that
-      occasionally re-runs the model would be much more interesting and cannot be ruled out
-      from one sighting.
-      WHAT WOULD SETTLE IT: capture the assertion text next time (`-x` and keep the output),
-      and if it is the executions count rather than a timeout, it is a real defect in the
-      response cache and not a test problem at all.
+- [x] CACHE-KEYING-FLAKE-SEEN-ONCE · **REPRODUCED AND FIXED 14 Sep, and it was not the
+      timeout I guessed.** This line said to capture the assertion text next time, because
+      which of the two it was decided whether it mattered. It was the interesting one:
+      `assert 2 == 1  # the second identical request re-ran the model`.
+      HOW: 1 failure in 20 runs of the module at load 66 on this 48-core box, the load being
+      other users' training. Idle it passes every time, which is why one sighting looked like
+      noise.
+      THE MECHANISM, and it is in the code's own docstring: `engine/model.py::_store_when_done`
+      caches in a `future.add_done_callback`, which runs on the worker thread AFTER the future
+      resolves -- and `infer_sync` returns on that same resolution. A second identical request
+      issued immediately finds nothing and re-runs the model; under load the worker is
+      descheduled and the window widens.
+      NOT A PRODUCTION DEFECT -- the tests asserted more than the design offers. Writing before
+      resolving would put the copy on the critical path, which that docstring explicitly
+      declines; the cache is opt-in, off by default, and a miss costs a re-run rather than a
+      wrong answer. So the fix is `_await_cache_write`, which waits for the entry and tests
+      what the cache promises without asserting an ordering it does not.
+      FOUR TESTS RACED IT, not one, and I said three before #281's review found the fourth.
+      Two were worse than a flake: on a miss
+      `test_a_hit_carries_this_request_s_identity_not_the_stored_one` passes VACUOUSLY, because
+      a fresh response carries the asking tag anyway. And `test_eviction_is_bounded` could not
+      be gated on `entries` at all -- it is already at `max_entries` before the put under test
+      -- so the helper takes stat MINIMUMS and that one waits on `evictions`. Measured: 1 of 25
+      trials read `evictions=1` with `entries=4`, which is exactly the window an entries gate
+      would have waved through.
+      ONLY THE TRAILING PUT IS EXPOSED, which the review stated and I had not: the callback and
+      the next dequeue are both the worker thread's, so put k lands before request k+1 starts.
+      That is why five sequential puts are safe and the sixth is not. All four wait now; 40/40
+      at load 64 against 1-in-20 before.
 
 - [x] API-WEDGED-REPORT-FLAKE-IS-NOT-A-TIMEOUT · **DONE, and it was done on 11 Sep by #224 --
       this line just never heard about it.** It parked a question ("say if you want it chased
