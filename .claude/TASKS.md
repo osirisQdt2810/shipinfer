@@ -3408,10 +3408,18 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       declines; the cache is opt-in, off by default, and a miss costs a re-run rather than a
       wrong answer. So the fix is `_await_cache_write`, which waits for the entry and tests
       what the cache promises without asserting an ordering it does not.
-      THREE TESTS RACED IT, not one, and the other two were worse: on a miss
+      FOUR TESTS RACED IT, not one, and I said three before #281's review found the fourth.
+      Two were worse than a flake: on a miss
       `test_a_hit_carries_this_request_s_identity_not_the_stored_one` passes VACUOUSLY, because
-      a fresh response carries the asking tag anyway. All three wait now. 40/40 at load 64,
-      against 1-in-20 before.
+      a fresh response carries the asking tag anyway. And `test_eviction_is_bounded` could not
+      be gated on `entries` at all -- it is already at `max_entries` before the put under test
+      -- so the helper takes stat MINIMUMS and that one waits on `evictions`. Measured: 1 of 25
+      trials read `evictions=1` with `entries=4`, which is exactly the window an entries gate
+      would have waved through.
+      ONLY THE TRAILING PUT IS EXPOSED, which the review stated and I had not: the callback and
+      the next dequeue are both the worker thread's, so put k lands before request k+1 starts.
+      That is why five sequential puts are safe and the sixth is not. All four wait now; 40/40
+      at load 64 against 1-in-20 before.
 
 - [x] API-WEDGED-REPORT-FLAKE-IS-NOT-A-TIMEOUT · **DONE, and it was done on 11 Sep by #224 --
       this line just never heard about it.** It parked a question ("say if you want it chased
