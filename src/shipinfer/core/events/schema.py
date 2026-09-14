@@ -259,21 +259,23 @@ class PerceptionEvent:
                 "reason": self.reason,
             }
         )
-        # doc: long absence has three causes and only one of them is a frame-level fact
+        # doc: long absence has three causes on a chain, and the other producer differs
         # OMITTED WHEN ABSENT, not written as null. Present exactly when a cross-camera tier
-        # answered for THIS frame -- a one-group chain writes it on every frame its slot
-        # associates. ABSENCE DOES NOT SAY WHY, and this line used to claim it did ("the
-        # frame-level fact `missing_stages` carries"). Three causes share it and only the
-        # first is per frame: the tier ran and this frame missed its instant, which
-        # `missing_stages` does carry; the chain declares no `mtmc` slot at all; or no slot's
-        # roster names this camera. The last two are DEPLOYMENT facts, identical on the wire
-        # and constant for the run, so a per-frame marker would be the wrong shape for them.
-        # THE ORPHAN is announced once at start-up, on both planes --
-        # `InprocessRunner._warn_if_no_group_owns` and `cameras_no_group_owns` in
-        # `cli/bench.cpp`; neither fires when the chain has NO slot, because both floor at
-        # two. THE NO-TIER CASE IS ANNOUNCED NOWHERE, deliberately: it is a static property
-        # of the chain file the operator wrote (`topology/detect_only.yaml` is one), not a
-        # fault to report back to them.
+        # answered for THIS frame. ABSENCE DOES NOT SAY WHY, and this line used to claim it
+        # did ("the frame-level fact `missing_stages` carries").
+        # ON A CHAIN three causes share it and only the first is per frame: the tier ran and
+        # this frame missed its instant, which `missing_stages` does carry; the chain declares
+        # no `mtmc` slot at all; or no slot's roster names this camera. The last two are
+        # DEPLOYMENT facts, identical on the wire and constant for the run. The orphan is
+        # announced once at start-up on both planes (`InprocessRunner._warn_if_no_group_owns`,
+        # `cameras_no_group_owns` in `cli/bench.cpp`) -- neither fires when the chain has NO
+        # slot, because both floor at two -- and the no-tier case is announced nowhere.
+        # AND THE DEEPSTREAM BUILDER TAKES THE OPPOSITE DECISION about its own absent stages,
+        # deliberately: `PR1_MISSING_STAGES` (`pipeline/deepstream/run.py`) names them on
+        # every event, because that graph is a SUBSET of the Python DAG and silence would
+        # publish a partial frame as a complete one (ADR-005). So `missing_stages` means
+        # "this frame missed it" on a chain and "this topology does not run it" there; the
+        # two are not reconciled, and `EVENTS-MISSING-STAGES-MEANS-TWO-THINGS` owns that.
         if self.global_id_group is not None:
             payload["global_id_group"] = self.global_id_group
         if self.extra:

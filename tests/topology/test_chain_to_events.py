@@ -325,12 +325,12 @@ def two_group_chain_for(path: Path) -> Topology:
 def no_mtmc_chain_for(path: Path) -> Topology:
     """The same chain with NO `mtmc` element -- one of the two causes below, as a real chain.
 
-    `topology/detect_only.yaml` ships this shape, so it is not a contrivance: a deployment
-    that wants boxes and tracks and no fleet identity runs exactly this.
+    A chain with no `mtmc` slot is a shape this tree ships; `topology/detect_only.yaml` is
+    shorter still (`decode -> detect -> output`). This one keeps the stages either side of
+    the missing tier, so the only difference from the two-group chain is the tier.
 
-    THE TRACK DOUBLE, not `impl: shipvision`: nothing here turns on a real tracker, and the
-    double is what lets the half of this shape that needs no submodule run in CI, where the
-    submodule is deliberately absent.
+    THE TRACK DOUBLE, not `impl: shipvision`: nothing here turns on a real tracker, and it
+    is what lets this half run in CI, where the submodule is deliberately absent.
     """
     return Topology.from_spec(ChainSpec.from_yaml(textwrap.dedent(f"""
                 name: no_mtmc
@@ -632,11 +632,11 @@ class TestTheTwoSilencesAreIndistinguishable:
 
     `as_dict` used to promise absence was "the frame-level fact `missing_stages` carries".
     It is not: a chain with no `mtmc` element and a camera no roster names both publish
-    `partial: false`, an empty `missing_stages` and no group key.
-
-    AT THE CHAIN LEVEL, the only place the two causes are two different things. From one
-    event factory they are one call and `f(x) == f(x)` holds for any deterministic
-    serialiser, which is how the first version of this guard passed proving nothing (#277).
+    `partial: false`, an empty `missing_stages` and no group key. Asserted HERE because the
+    chain level is the only place those two are two different things -- from one factory
+    they are one call, and `f(x) == f(x)` is how the first version passed proving nothing
+    (#277). Two variables, not one: only this arm needs the real element, for its turn-away;
+    nothing here reads a track id, but if it reddens, read the tracker out before the tier.
     """
 
     def events_for(self, runner, chain, cameras: list[str], path: Path) -> list[dict]:

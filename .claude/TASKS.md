@@ -3222,6 +3222,28 @@ hook down, for when the operator asked to see something before it is executed.
       obvious candidate is `MTMC-GRAM-WANTS-A-REAL-GEMM` if the gram lands in tree -- and measure
       that loop rather than flipping a flag and claiming a speed-up.
 
+- [ ] EVENTS-MISSING-STAGES-MEANS-TWO-THINGS · the field means one thing on a chain and the
+      opposite on the DeepStream builder, and both are deliberate. On a chain it is PER FRAME:
+      the stage ran and this frame missed it, so `detect_only.yaml` -- which runs no `track`,
+      no `embed` and no `mtmc` -- publishes `partial: false` and an EMPTY `missing_stages`.
+      In `pipeline/deepstream/run.py` it is STATIC: `PR1_MISSING_STAGES` names the two stages
+      that topology does not run on every event it publishes, because that graph is a subset
+      of the Python DAG and silence would publish a partial frame as a complete one (ADR-005,
+      cited there). Both readings are defensible; they are not reconciled, and they share one
+      serialiser -- `pipeline/schema.py` re-exports `core.events.schema`.
+      WHY IT MATTERS: two deployments into one broker. A DeepStream PR1 event carries
+      `partial: true` with a non-empty list for a stage nobody will ever run, and a
+      `detect_only` event carries `partial: false` while running one model of nine. A consumer
+      alarming on `partial` reads the first as a live gap and the second as a complete frame;
+      both are wrong.
+      FOUND BY #277's REVIEW, round 3, while correcting the `global_id_group` paragraph --
+      which is now SCOPED ("on a chain") and names this divergence rather than asserting one
+      convention over the shared serialiser. Deciding it is a schema question and wants its
+      own PR: either `missing_stages` becomes per-frame everywhere and the DeepStream
+      topology's absent stages move to a static field, or the chain plane starts naming the
+      slots its file does not declare. The first looks right -- `partial` is a frame word --
+      but it is not this PR's call.
+
 - [ ] MTMC-TWO-SLOT-CACHED-REGISTRIES · `pipeline/mtmc/cluster.cpp` is
       `pipeline/tracking/associator.cpp` transcribed: `add`/`has`/`names`/`create`, `made_lock`,
       `made`, `made_*`, the (impl, slot) cache and the lane-before-unknown refusal, ~60
@@ -3727,7 +3749,11 @@ hook down, for when the operator asked to see something before it is executed.
       asserted AT THE CHAIN LEVEL, which is the only place the two deployment rows are two
       different things: `test_chain_to_events.py::TestTheTwoSilencesAreIndistinguishable`
       runs a chain with no `mtmc` element beside a two-group chain with an orphan camera and
-      holds their key sets and their four cause-bearing fields equal. #277's review caught
+      holds their key sets and their four cause-bearing fields equal. NOT RUN BY CI: it is
+      `@needs_shipvision`, because the orphan row needs the real roster turn-away in
+      `ShipvisionMtmc._do_process` rather than a double, and CI does not check the submodule
+      out -- so the convergence is local evidence only. The no-tier row alone is pinned
+      offline (`TestAChainWithNoTierPublishesTheSilentShape`). #277's review caught
       the first version asserting it at the SCHEMA layer, where one factory builds both rows
       and the comparison is `f(x) == f(x)` -- green for any deterministic serialiser, and
       blind to the exact regression it advertised. Probed both ways now: a naming `reason`
