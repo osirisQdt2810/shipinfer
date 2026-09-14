@@ -11,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "shipinfer/pipeline/graph/emission.h"
@@ -303,6 +304,75 @@ namespace {
               "why");
     }
 
+    // -- ADR-022's property, on this plane ---------------------------------------------------
+
+    // THE TWIN of `TestAnNtpStepDoesNotMoveAnInstant` in `tests/topology/test_mtmc_element.py`
+    // (`MTMC-THE-NTP-PROPERTY-IS-PYTHON-ONLY`, found by #272's review). The property is one
+    // plane's word for it until both planes assert it, and the sync rule is "same inputs ->
+    // same events" rather than "the same field is read in both files".
+    //
+    // IT CANNOT LIVE IN `test_mtmc_barrier.cpp`, which is where the ledger line guessed it
+    // would. `InstantBarrier::submit` takes ONE stamp: by the time the barrier sees a frame
+    // the choice between the two clocks has already been made. The stage is what makes it
+    // (`stages.cpp`: `capture_s` from `captured_ns`, `lag_ns` from `captured_unix_ns`), so a
+    // barrier-level test would assert that a monotonic sequence is not backwards -- true of
+    // any sequence, and a guard that cannot fail.
+    void a_wall_clock_step_moves_no_instant() {
+        // The wall stamp steps 2 s BACK while the monotonic key advances, which is what NTP
+        // looks like from inside a process. Against a 60 ms window a 2 s step is far outside,
+        // so keying on the wall pair would refuse this frame as `backward` -- the regime the
+        // rekey exists to remove.
+        auto barrier = std::make_shared<InstantBarrier>(options());
+        auto tracker = std::make_shared<ScriptedTracker>();
+        MtmcStage stage(kSlot, "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {},
+                        false);
+        const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::system_clock::now().time_since_epoch())
+                                .count();
+
+        for (const auto& [frame_id, wall_ns] : std::vector<std::pair<int64_t, int64_t>>{
+                 {1, now_ns}, {2, now_ns - 2'000'000'000LL}}) {
+            auto state = frame_with("cam0", frame_id, {box(0, 0, 0)}, wall_ns);
+            attach(*state, "track_out", 1, {7}, {});
+            attach(*state, "embed_out", 2, {}, {1.0f, 0.0f});
+            stage.run(*state);
+        }
+
+        check(barrier->frame_stats().count(mtmc::kMissedBackward) == 0,
+              "a wall-clock step reached the key; the instant is keyed on the MONOTONIC stamp "
+              "(ADR-022) precisely so NTP cannot do this");
+    }
+
+    void the_lag_diagnostic_still_sees_the_step() {
+        // THE OTHER HALF, and why both stamps stay on every tag: the key cannot be stepped, so
+        // the wall pair is the only thing left that can say a clock moved. Bounded on BOTH
+        // sides -- a lag taken from the key reads ~0 here and one taken from the fixture's
+        // 2023 epoch saturates, so only a lag taken from the wall pair lands in this range.
+        auto barrier = std::make_shared<InstantBarrier>(options());
+        auto tracker = std::make_shared<ScriptedTracker>();
+        MtmcStage stage(kSlot, "mtmc_out", "track_out", {"embed_out"}, barrier, tracker, {},
+                        false);
+        const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::system_clock::now().time_since_epoch())
+                                .count();
+
+        for (const auto& [frame_id, wall_ns] : std::vector<std::pair<int64_t, int64_t>>{
+                 {1, now_ns}, {2, now_ns - 2'000'000'000LL}}) {
+            auto state = frame_with("cam0", frame_id, {box(0, 0, 0)}, wall_ns);
+            attach(*state, "track_out", 1, {7}, {});
+            attach(*state, "embed_out", 2, {}, {1.0f, 0.0f});
+            stage.run(*state);
+        }
+
+        const std::vector<uint32_t> samples = barrier->arrival_lag_us();
+        check(samples.size() == 2, "one sample a frame");
+        const uint32_t worst =
+            samples.empty() ? 0 : *std::max_element(samples.begin(), samples.end());
+        check(worst >= 1'500'000 && worst <= 3'000'000,
+              "a 2 s step should read as ~2 s of lag; the wall pair is the only signal left "
+              "that a clock moved, so it must not follow the key");
+    }
+
     void one_group_associates_a_camera_its_roster_never_named() {
         // THE CHAIN THIS REPOSITORY SHIPS. `ship_person_cpu.yaml` declares
         // `cameras: [cam-01..cam-04]` while every bench fleet is `cam00..cam11`, so making the
@@ -569,6 +639,8 @@ int main() {
     a_row_is_found_in_whichever_embedder_holds_it();
     the_stage_hands_the_barrier_a_real_arrival_lag();
     a_frame_stamped_in_the_future_is_clamped_and_counted();
+    a_wall_clock_step_moves_no_instant();
+    the_lag_diagnostic_still_sees_the_step();
     one_group_associates_a_camera_its_roster_never_named();
     routing_counts_and_names_the_camera_it_passed_over();
     a_routing_slot_that_names_no_cameras_is_refused();
