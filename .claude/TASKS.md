@@ -9344,6 +9344,22 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
         shipvision's bilinear oracle.
       * `nms` agrees exactly, but it reaches this repo through `numpy_ops.py` too, so it moves
         with torch or not at all.
+      AND THE MOVE IS WORTH MORE THAN DEDUPLICATION, which is new: shipvision's
+      `TorchImageOps` already has `nv12_letterbox`, `nv12_letterbox_into`,
+      `nv12_letterbox_device_into` and `supports_nv12_device_input` -- NV12 straight into a
+      `DeviceBuffer`. The Python ops seam has NO nv12 anywhere (`grep -rni nv12
+      src/shipinfer/runtime/ops/` is empty), so the plane that V156 mandates a route for
+      (gstreamer rtsp -> nv12 -> all on VRAM) cannot letterbox an NV12 frame at all today.
+      NOT A DEFECT, and the distinction matters: it is sequenced. `elements/decode.py:29` says
+      `gstreamer-gpu`, which keeps NV12 in VRAM, is "deliberately not registered until phase D
+      puts a DataPool behind it (arch.md §10)", and `elements/pool.py:376` refuses a
+      device-resident payload in so many words because the pixel-reading elements letterbox on
+      the host. So the hole is planned, not missed.
+      WHAT CHANGES IS THIS ITEM'S PRICE: taking shipvision's torch ops brings phase D's
+      device-side NV12 entry points in with them, rather than phase D having to write them.
+      That is an argument for doing it BEFORE phase D rather than last, and it is the first
+      reason to touch this item that is not duplication debt. The `_into` surface is confirmed
+      present, so the adapter shape the plan describes is buildable as written.
       SO ROW 10's QUESTION DISSOLVES: the interpolation only ever mattered for the numpy path,
       and the numpy path should not move. Decided under V154 rather than asked -- a
       dependency-free nearest reference is what ADR-001 and the kernel-parity test both
