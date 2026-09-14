@@ -273,11 +273,9 @@ namespace shipinfer::mtmc {
         //: can tell a window that is too narrow from a chain that is too slow to reach it.
         //:
         //: HANDED IN, not measured here, and that is the whole reason this is two methods. The
-        //: capture stamp is a WALL time and this barrier's own clock is deliberately steady
-        //: (`clock_` defaults to `steady_seconds`, and ADR says why instants key on the wall
-        //: stamp while deadlines do not), so subtracting one from the other here would be
-        //: arithmetic across two clocks. The mtmc stage holds both and is the only place that
-        //: legitimately can.
+        //: LAG is measured against the WALL pair while instants key on the monotonic stamp
+        //: (ADR-022), so subtracting one from the other here would be arithmetic across two
+        //: clocks. The mtmc stage holds both and is the only place that legitimately can.
         //:
         //: A RING, because a 24/7 server is not a benchmark and the OLDEST samples are the
         //: least useful: past `kMaxLagSamples` the next sample overwrites the oldest, so a

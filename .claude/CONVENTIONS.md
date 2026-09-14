@@ -25,9 +25,9 @@ what makes *this* codebase work; Part 3 is how to approach a task here.
   these four are prose rules. **`csrc/` is a fifth**: the same caps, the same
   `// doc: long <reason>` marker (74 of them today), and the same absence of a tool —
   `check_docs.py::main` refuses a non-`.py` path outright. Write the marker meaning "a human
-  read this and kept it", never "a hook approved it". Accepted ADRs stay as written (ADR-001 is ~40 lines); a trim
-  wave shortens new prose, never an accepted decision's reasoning. Cut history, apologetics
-  and anything a test already proves.
+  read this and kept it", never "a hook approved it". Accepted ADRs stay as written (ADR-001
+  is ~40 lines); a trim wave shortens new prose, never an accepted decision's reasoning. Cut
+  history, apologetics and anything a test already proves.
 - **Errors are typed.** Raise from `shipinfer.core.errors`. Never return `None`, `[]` or
   `{}` to mean "something went wrong"; a dropped frame, a full queue and a dead GPU are
   three different events and an empty list distinguishes none of them.

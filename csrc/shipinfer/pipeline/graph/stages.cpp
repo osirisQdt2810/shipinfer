@@ -463,30 +463,31 @@ namespace shipinfer {
             return std::make_shared<const std::map<mtmc::TrackKey, int64_t>>(
                 tracker_->ids(instant, cameras));
         };
-        // SECONDS FROM THE CAPTURE (WALL) STAMP, because the other plane keys the same
-        // barrier on `item.context.captured_unix_ns` and two planes bucketing one clip into
-        // different instants is two different sets of global ids -- the sync rule's whole
-        // subject, and #222's review caught the divergence. The steady stamp was the first
-        // choice for a real reason (NTP can step the wall clock, including backwards, and a
-        // stepped frame lands in the wrong instant rather than merely late) but it is also
-        // PER PROCESS, so a fleet's shards could never share an instant with it. The NTP risk
-        // is `MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK`.
+        // doc: long which clock an instant is keyed on, and why it stopped being the wall one
+        // SECONDS FROM THE MONOTONIC CAPTURE STAMP, the same field the other plane keys on --
+        // two planes bucketing one clip into different instants is two sets of global ids for
+        // it, which is the sync rule's whole subject. It was the WALL stamp until ADR-022,
+        // because a steady clock is per process and shards were thought to share an instant.
+        // They cannot: a barrier lives in one process, a group is pinned to one shard, and
+        // `runners/fleet.py` refuses to execute an item at all. So the per-process clock is
+        // shared everywhere it has to be, and NTP cannot step it under a forming instant.
+        // Both stamps are read in one expression at decode, so this is the same moment.
         //
         // REFUSED AT ZERO, the way the Python element's validator is: a source that never
         // stamps would otherwise put every camera's every frame into ONE instant that closes
         // once and makes everything after it late for the life of the process -- which reads
         // as clock skew and is a wiring fault.
-        if (state.tag().captured_unix_ns <= 0) {
+        if (state.tag().captured_ns <= 0) {
             throw ConfigError("stage " + name() + ": frame " +
                               std::to_string(state.tag().frame_id) + " of camera '" +
                               state.tag().camera_id +
                               "' carries no capture stamp, and an instant is keyed on when a "
-                              "frame was captured; the source must set captured_unix_ns");
+                              "frame was captured; the source must set captured_ns");
         }
-        const double capture_s = static_cast<double>(state.tag().captured_unix_ns) / 1e9;
-        // HOW LATE THIS FRAME IS, measured HERE because this is the only place that holds both
-        // stamps on one clock: the capture stamp is a wall time and the barrier's own clock is
-        // deliberately steady. `late` counts frames that missed their instant; this says by how
+        const double capture_s = static_cast<double>(state.tag().captured_ns) / 1e9;
+        // HOW LATE THIS FRAME IS, and it stays on the WALL PAIR deliberately: the key is
+        // monotonic now, so this is the only signal left that a SOURCE's clock and this
+        // shard's disagree. `late` counts frames that missed their instant; this says by how
         // much, which is what separates a window that is too narrow from a chain too slow.
         const auto arrival_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                     std::chrono::system_clock::now().time_since_epoch())

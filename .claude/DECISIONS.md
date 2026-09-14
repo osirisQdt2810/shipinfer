@@ -927,3 +927,35 @@ six runs against 421 of 905 once the roster named the run's own cameras. At fift
 **Consequences.** The bench chain's roster names no camera any run has, and both planes report
 that now. Barrier unit tests on both planes carry the property; the parity harness has no
 barrier scenario family, so it does not — that stays on the ledger item.
+
+---
+
+## ADR-022 — An instant is keyed on the monotonic capture stamp
+
+**Status:** Accepted · 2026-09-13 · answers `MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK` (b)
+
+**Context.** Cross-camera association buckets frames into *instants* by when they were
+captured. Both planes keyed that on `captured_unix_ns`, the wall stamp, and two places in the
+tree cited "the ADR on the capture stamp" for why — an ADR that did not exist. The reason
+actually written, in a comment, was that the steady stamp "is PER PROCESS, so a fleet's shards
+could never share an instant with it".
+
+**Decision.** Key on `captured_ns`, the monotonic stamp, on both planes. Keep the backward
+guard. Keep the arrival-lag diagnostic on the wall pair, reading `captured_unix_ns` by name so
+it cannot follow the key.
+
+**Why the old reason did not hold.** Shards never share an instant, and cannot: a barrier is an
+object in one process, `_pin_to_group` keeps a group on one shard and raises rather than
+splitting it, `runners/fleet.py` refuses to execute an item — "frames enter a shard through its
+own decode element" — and `shard.proto` carries eight control RPCs and no frame.
+
+**Why it is safe.** Every barrier comparison is relative, and the deadline comes from the
+injected steady clock, so no capture stamp is compared to an absolute. Both stamps are read in
+one expression at decode, so this is the same moment on a clock that cannot be stepped. The
+sync rule binds the two planes to the *same* field, not to wall time.
+
+**Consequences.** NTP can no longer move a forming instant for an ingest-stamped source.
+Measured before the change against the real barrier: a 2 s backward step at 50 cameras and a
+60 ms window cost 40 of 80 instants, counted as `late` rather than `backward` — which reads as
+"the chain is too slow". The backward guard stays load-bearing for the DeepStream path, whose
+stamp is the camera's own clock. Nothing on the wire changes.

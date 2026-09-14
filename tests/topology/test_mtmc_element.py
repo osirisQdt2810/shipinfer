@@ -48,6 +48,7 @@ from shipinfer.topology import ChainSpec, Topology
 from shipinfer.topology import bridge as bridge_module
 from shipinfer.topology.barrier import (
     DEFAULT_MAX_INSTANTS,
+    MISSED_BACKWARD,
     MISSED_NOT_MINE,
     WaiterBudget,
 )
@@ -238,10 +239,12 @@ def item(
 ) -> ChainItem:
     """One chain item on the metadata plane, as ``track`` hands it on.
 
-    ``instant`` is an offset in seconds from :data:`EPOCH_NS`, not an absolute capture time.
-    It has to be offset from *something* real: ``captured_unix_ns`` defaults to ``0`` and the
-    element refuses that, because a source that never stamps the clock would put every frame
-    of every camera into one instant.
+    ``instant`` is an offset in seconds from :data:`EPOCH_NS`, not an absolute capture time:
+    both stamps default to ``0`` and the element refuses that.
+
+    BOTH are set and move together, as ingest reads them (``ingest/frame/tag.py``). The
+    barrier keys on ``captured_ns`` (ADR-022) and the arrival-lag diagnostic reads the wall
+    pair, so setting one would make the other untestable.
     """
     payload = {"tracks": tracks} if tracks is not None else {}
     if frame_hw is not None:
@@ -250,6 +253,7 @@ def item(
         context=RequestContext(
             camera_id=camera,
             frame_id=frame,
+            captured_ns=EPOCH_NS + int(instant * 1e9),
             captured_unix_ns=EPOCH_NS + int(instant * 1e9),
         ),
         caps=Caps.parse("meta@cpu"),
@@ -797,12 +801,12 @@ class TestAFrameWithoutGlobalIdsSaysSo:
     def test_a_zero_capture_clock_is_a_loud_refusal_like_a_zero_frame_size(
         self, element
     ) -> None:
-        """``RequestContext.captured_unix_ns`` defaults to ``0``, so a source that never
-        stamps it is indistinguishable from one that stamps the epoch — and either way every
-        frame of every camera lands in one instant, which closes once and leaves the rest of
-        the deployment ``late`` for the life of the process. Same class of mis-wiring as a
-        zero ``frame_hw``, so it gets the same treatment rather than a per-frame gap that
-        reads like clock skew."""
+        """``RequestContext.captured_ns`` defaults to ``0``, so a source that never stamps it
+        is indistinguishable from one that stamps the epoch — and either way every frame of
+        every camera lands in one instant, which closes once and leaves the rest of the
+        deployment ``late`` for the life of the process. Same class of mis-wiring as a zero
+        ``frame_hw``, so it gets the same treatment rather than a per-frame gap that reads
+        like clock skew."""
         unstamped = ChainItem(
             context=RequestContext(camera_id="cam-a", frame_id=0),
             caps=Caps.parse("meta@cpu"),
@@ -810,7 +814,7 @@ class TestAFrameWithoutGlobalIdsSaysSo:
             meta={"tracks": [track(1, "cam-a", 0, TALL, SAME_A)], "frame_hw": (HEIGHT, WIDTH)},
         )
 
-        with pytest.raises(ValidationError, match="captured_unix_ns"):
+        with pytest.raises(ValidationError, match="captured_ns"):
             element.process(unstamped)
 
         assert element.barrier.open_instants == 0, "a refused frame still opened an instant"
@@ -885,6 +889,110 @@ class TestTwoMtmcSlotsCannotParkEveryWorkerBetweenThem:
 
 
 @needs_shipvision
+class TestAnNtpStepDoesNotMoveAnInstant:
+    """ADR-022: the instant is keyed on the MONOTONIC stamp, so NTP cannot step it.
+
+    The wall clock can be stepped, including backwards, and a stepped frame used to land in
+    the wrong instant rather than merely late. Measured against the real barrier before the
+    rekey: a 2 s backward step at 50 cameras and a 60 ms window cost 40 of 80 instants, and
+    the damage was counted as `late` -- which reads to an operator as "the chain is too
+    slow". A monotonic key cannot be stepped, so the whole class is gone for any source that
+    stamps at ingest.
+    """
+
+    def stepped(self, element, cameras: list[str], step_s: float) -> list[Any]:
+        """One frame per camera, then one more each with the WALL stamp stepped back.
+
+        `captured_ns` advances whatever NTP did; only the wall pair moves, which is what a
+        step looks like from inside a process. ON REAL CLOCKS, not this file's 2023
+        `EPOCH_NS`: the lag is measured against `time.time()`, and a fixed epoch is ~2.8 years
+        of microseconds away -- it swamps a 2 s step and makes any lag assertion pass whichever
+        stamp it came from. `frame_with` on the other plane takes an override for this reason.
+        """
+        now_ns, mono_ns = time.time_ns(), time.monotonic_ns()
+        out = []
+        for index, camera in enumerate(cameras):
+            out.append(
+                element.process(
+                    ChainItem(
+                        context=RequestContext(
+                            camera_id=camera,
+                            frame_id=0,
+                            captured_ns=mono_ns + int(index * 0.001 * 1e9),
+                            captured_unix_ns=now_ns + int(index * 0.001 * 1e9),
+                        ),
+                        caps=Caps.parse("meta@cpu"),
+                        payload=None,
+                        meta={
+                            "tracks": [track(1, camera, 0, TALL, SAME_A)],
+                            "frame_hw": (HEIGHT, WIDTH),
+                        },
+                    )
+                )
+            )
+        for index, camera in enumerate(cameras):
+            stepped = ChainItem(
+                context=RequestContext(
+                    camera_id=camera,
+                    frame_id=1,
+                    captured_ns=mono_ns + int((0.10 + index * 0.001) * 1e9),
+                    captured_unix_ns=now_ns + int((0.10 + index * 0.001 - step_s) * 1e9),
+                ),
+                caps=Caps.parse("meta@cpu"),
+                payload=None,
+                meta={
+                    "tracks": [track(1, camera, 1, TALL, SAME_A)],
+                    "frame_hw": (HEIGHT, WIDTH),
+                },
+            )
+            out.append(element.process(stepped))
+        return out
+
+    def test_a_two_second_backward_step_refuses_nothing(self) -> None:
+        """The property the rekey buys, and the one the old key could not have.
+
+        ONE camera, because `backward` is judged per camera against that camera's OWN newest
+        stamp -- a group of two would have the first frame wait for the second and say
+        nothing more about the clock.
+
+        A REALISTIC WINDOW, not this file's 30-second default: the guard fires on a step
+        LARGER than the window, so at `WIDE_MS` a 2 s step trips nothing on either key and
+        the test would pass whichever clock it ran on.
+        """
+        element = opened({"group": "quay", "cameras": ["cam-a"], "sync_window_ms": 60.0})
+        try:
+            self.stepped(element, ["cam-a"], step_s=2.0)
+
+            assert element.barrier is not None
+            stats = element.barrier.frame_stats()
+            assert stats.get(MISSED_BACKWARD, 0) == 0, (
+                "a wall-clock step reached the key; the barrier is keyed on the monotonic "
+                "stamp precisely so NTP cannot do this"
+            )
+        finally:
+            element.close()
+
+    def test_the_lag_diagnostic_still_sees_the_step(self) -> None:
+        """The other half, and why both stamps stay on every item: the key cannot be stepped,
+        so the WALL pair is the only thing left that can say a clock moved."""
+        element = opened({"group": "quay", "cameras": ["cam-a"], "sync_window_ms": 60.0})
+        try:
+            self.stepped(element, ["cam-a"], step_s=2.0)
+
+            assert element.barrier is not None
+            samples = element.barrier.arrival_lag_us
+            # BOUNDED ON BOTH SIDES, which is what makes it a test: a lag taken from the KEY
+            # reads ~0 here, and one taken from a fixed epoch reads ~9e13. Only a lag taken
+            # from the wall pair lands in this range.
+            assert samples and 1_500_000 <= max(samples) <= 3_000_000, (
+                f"a 2 s step should read as ~2 s of lag; got {samples}. The wall pair is the "
+                "only signal left that a clock moved, so it must not follow the key"
+            )
+        finally:
+            element.close()
+
+
+@needs_shipvision
 class TestHowLateAFrameArrivedReachesTheBarrier:
     """The five lines that PRODUCE the number, which the storage tests cannot reach.
 
@@ -911,6 +1019,9 @@ class TestHowLateAFrameArrivedReachesTheBarrier:
                     context=RequestContext(
                         camera_id="cam-a",
                         frame_id=0,
+                        # BOTH, as ingest stamps them: the barrier keys on the monotonic one
+                        # and the lag this test is about is measured from the wall one.
+                        captured_ns=time.monotonic_ns() - 50_000_000,
                         captured_unix_ns=time.time_ns() - 50_000_000,
                     ),
                     caps=Caps.parse("meta@cpu"),
@@ -946,6 +1057,9 @@ class TestHowLateAFrameArrivedReachesTheBarrier:
                     context=RequestContext(
                         camera_id="cam-a",
                         frame_id=0,
+                        # The KEY is ordinary; only the WALL stamp is in the future, which
+                        # is what a source whose clock runs ahead of this shard looks like.
+                        captured_ns=time.monotonic_ns(),
                         captured_unix_ns=time.time_ns() + 5_000_000_000,
                     ),
                     caps=Caps.parse("meta@cpu"),
