@@ -3163,6 +3163,27 @@ hook down, for when the operator asked to see something before it is executed.
       3.1 MB a row x 8 rows x 2 = 50 MB a slot pair per instance, x 2 instances x 4 devices.
       Measure VRAM before and after, and remember #239 already stopped the largest of those
       from being copied home -- the host set can be smaller than the device set now.
+      THE 14% IS STALE AS A JUSTIFICATION, 14 Sep, and this is a HOLD rather than a refusal.
+      It was profiled 12 Sep, when `cudaDeviceScheduleBlockingSync` was still OFF by default,
+      so the sync it measured SPUN. #214 made it the default two days later on nine runs at
+      this exact load: host CPU **-40%**, rows **+25%**, rows per host CPU-second 3.41x ->
+      7.17x, latency down 10-25% at p50/p95/p99. That is the same cost this item is about,
+      and a flag has now taken the host-CPU half of it -- which is the half that decides the
+      target. The 12-camera profile (RESULTS.md, "Where the time actually goes") is the one
+      that says why: "the host is the wall, and the GPUs are a quarter busy", 4.55 cores at
+      ~240 img/s, and 3 000 img/s extrapolating to ~46 of this box's 48 cores. That headline
+      is the 12-camera run's and not the design load's -- but host CPU is what it names as
+      binding on the way to the target, and host CPU is exactly what #214 bought back.
+      WHAT IS LEFT FOR THE RING is the other half: a blocked thread no longer burns a core,
+      so the ring buys pipeline DEPTH and latency rather than host CPU. That may still be
+      worth having -- the arrival lag is p50 ~240 ms against a 60 ms window -- but it is a
+      different and smaller number than 14%, and nobody has it.
+      SO RE-PROFILE BEFORE BUILDING, and it is one run: `deploy/rootless/profile.sh --cpp` at
+      50x20 over the mandated RTSP route, reading `cuda_api_sum` for `cudaStreamSynchronize`
+      against the 28 instance threads' wall from `host_cpu.py` -- the same denominator the
+      table above states, so the two numbers are comparable. Spending ~1 GB of VRAM and the
+      most delicate restructuring in this plane on a number measured under the old default is
+      the mistake this line exists to prevent.
 
 - [x] THE-BUILD-NEVER-VECTORISES · MEASURED AND CLOSED 11 Sep. `scripts/build_csrc.py` compiles with `-O2` and nothing else
       (`optimise = ["-O0", "-g"] if args.debug else ["-O2"]`), and this box's g++ is 11.4, where
