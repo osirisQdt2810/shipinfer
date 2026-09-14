@@ -9325,7 +9325,8 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       THAT TWO-SLICE PLAN WAS WRONG and I am correcting it rather than leaving it; measuring
       the rest of the surface the same afternoon says something better. Four more numbers:
         torch letterbox, mine vs theirs     max |d| 0          EXACT
-        torch crop (scaled and unscaled)    max |d| 1.5e-05    float32 rounding
+        torch crop, downscaled or copied    max |d| 1.5e-05    float32 rounding
+        torch crop, UPSCALED                max |d| 0.05-0.43  A REAL DIFFERENCE
         nms, 200 random cases               identical 200/200
         numpy crop, ANY scaling             max |d| 0.7        99.9% differ
       AND `shipvision.imgproc` EXPOSES NO INTERPOLATION KNOB -- `METHODS` is the NMS family,
@@ -9333,8 +9334,17 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       slice that delegates the numpy path while keeping nearest: my "everything that already
       agrees" was the degenerate no-resize case, which production never hits.
       THE REAL SHAPE IS TORCH-ONLY, and it is better than the original plan:
-      * `torch_ops.py` MOVES -- 30 KB of the 38, letterbox bit-exact and crop within float32
-        epsilon, and torch is a hard dependency (ADR-003) so nothing is added to the floor.
+      * `torch_ops.py` MOSTLY MOVES -- 30 KB of the 38, and torch is a hard dependency
+        (ADR-003) so nothing is added to the floor. Letterbox is bit-exact at every scale,
+        including upscaling a 120x160 frame to 640x640.
+        BUT CROP IS NOT FREE, and I had this wrong until the test caught it: the first probe
+        only tried downscale and no-scale. The two torch crops agree to float32 noise while
+        DOWNSCALING or copying and separate as soon as they sample denser than the source --
+        0.052 at 1.07x, 0.302 at 2x, 0.426 at 4x. A production path, not a corner: a person
+        far from the camera is a box SMALLER than the embedder's input and is upscaled into
+        it, so the swap would change embedder inputs for exactly the small detections
+        cross-camera identity is already hardest on. Price that before moving `crop_batch`;
+        `letterbox` and the staging can go first and alone.
       * `numpy_ops.py` STAYS, and this is the part the original plan had backwards. It imports
         numpy and nothing else, and `ops/__init__.py:68` makes it the last-resort backend
         ("native if built, else torch, else numpy"). Moving it puts the submodule UNDER
@@ -9360,6 +9370,13 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       That is an argument for doing it BEFORE phase D rather than last, and it is the first
       reason to touch this item that is not duplication debt. The `_into` surface is confirmed
       present, so the adapter shape the plan describes is buildable as written.
+      AND THE PREMISE IS PINNED NOW rather than left as a note:
+      `tests/runtime/test_ops_vs_shipvision.py` asserts all of the above -- letterbox exact,
+      crop agreeing off the upscale path and DIFFERING on it, nms identical over 100 random
+      fleets, and the numpy pair agreeing exactly with no resample while differing with one.
+      A submodule bump that moves either side fails there, with the cost in the message,
+      instead of surfacing mid-refactor. `needs_shipvision`-gated, so it runs on the kernels
+      leg #187 bought.
       SO ROW 10's QUESTION DISSOLVES: the interpolation only ever mattered for the numpy path,
       and the numpy path should not move. Decided under V154 rather than asked -- a
       dependency-free nearest reference is what ADR-001 and the kernel-parity test both
