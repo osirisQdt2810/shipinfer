@@ -3696,11 +3696,17 @@ hook down, for when the operator asked to see something before it is executed.
       and in row one absence carries no fact at all, so the schema's own sentence is wrong
       for that row. Fixing THAT is the remaining work: either make the row carry a fact or
       correct the promise. A kind marker is still the wrong shape, for the reason above.
-      AND THE C++ PLANE OWES THE SAME WARNING (V88/V89). `plan_stages.cpp` refuses the two
-      plan-time roster faults -- one camera in two rosters, a second slot naming none -- but
-      an ORPHAN cannot be caught there: cameras arrive at run time through
-      `IngestManager::add_camera`, which is where the Python twin warns. Opened with this
-      PR rather than claimed done; the frame path itself is NOT divergent, as below.
+      AND THE C++ PLANE NOW SAYS IT TOO (V88/V89), 14 Sep. `plan_stages.cpp` already refused
+      the two plan-time roster faults -- one camera in two rosters, a second slot naming none
+      -- and an orphan is neither: it is a fleet-vs-roster mismatch. THE PLANES DIFFER IN
+      SHAPE HERE FOR A STATED REASON: Python warns from the runner because cameras arrive by
+      API at run time, while this plane builds its whole fleet up front in `cli/bench.cpp`
+      (there is no run-time camera API), so the same fact is knowable BEFORE the run. The
+      question is `cameras_no_group_owns(planned, cameras)` in the CUDA-free reader, which is
+      what lets the offline tier ask it with no fleet; `bench.cpp` does the reporting, in the
+      same words. NOT a refusal on either plane. Same floor too -- two slots -- because below
+      that a roster is a placement hint and the slot associates an unlisted camera anyway.
+      The frame path itself is NOT divergent, as below.
 
       IT IS NOT A CROSS-PLANE DIVERGENCE, and an earlier version of this line said it was.
       The C++ not-mine path attaches an EMPTY `ObjectBatch` under the slot's own name
