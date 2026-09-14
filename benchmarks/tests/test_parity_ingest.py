@@ -523,6 +523,43 @@ class TestKnownDivergences:
             f"entries known.py's differ uses that the C++ gate does not honour"
         )
 
+    def test_the_documentary_entry_has_a_case_that_reaches_its_edge(self) -> None:
+        """`tracker_options` is documentary, so nothing here diffs it -- this is what does.
+
+        An entry the differ never exercises is the shape most likely to rot into a
+        suppression, and the defence is that its case still EXISTS and still reaches the
+        seam. The scenarios sit on the tracker's own gate by a tenth of a pixel; the two
+        planes' brackets live with their drivers (`tests/pipeline/test_tracking_parity.py`
+        and `csrc/tests/test_tracking_parity.cpp`), and this asserts the wiring they need.
+        """
+        documentary = {name for name, entry in KNOWN.items() if entry.explains is None}
+        assert documentary == {"tracker_options"}, (
+            f"the documentary entries are now {sorted(documentary)}; this test knows how to "
+            "check the reach of tracker_options only"
+        )
+
+        scenario = ROOT / "benchmarks" / "parity" / "scenarios" / "tracking" / "attribution.scn"
+        golden = ROOT / "benchmarks" / "parity" / "golden" / "tracking" / "attribution.txt"
+        assert scenario.is_file(), f"no {scenario.relative_to(ROOT)}: the entry has no case"
+        assert golden.is_file(), f"no {golden.relative_to(ROOT)}: the entry has no case"
+
+        # BOTH HALVES OF THE BRACKET, by name. A scenario file that lost one of them still
+        # parses and still compares clean, and the count would then mean nothing.
+        declared = scenario.read_text()
+        for needed in ("aspect_edge", "aspect_break", "crossing_near_tie"):
+            assert f"scenario {needed}" in declared, (
+                f"{scenario.name} no longer declares {needed!r}, so the case has stopped "
+                "bracketing the tracker's gate -- see the PRICED note in known.py"
+            )
+
+        # AND THE C++ HALF IS BUILT. A lane binary nobody compiles is the CSRC-BENCH-UNCOMPILED
+        # shape: the measurement would be Python-only and could not see a port drift at all.
+        build = (ROOT / "scripts" / "build_csrc.py").read_text()
+        assert '"tests/test_tracking_parity.cpp"' in build, (
+            "tests/test_tracking_parity.cpp is in no lane in build_csrc.py, so the C++ half of "
+            "the measurement is never compiled and the entry is Python-only again"
+        )
+
 
 # doc: long the three closed divergences and what each assertion is holding shut
 class TestTheThreeDivergencesAreClosed:

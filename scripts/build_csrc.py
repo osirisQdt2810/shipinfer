@@ -169,6 +169,9 @@ EXTERNAL: dict[str, ExternalLane] = {
             # found by #221's review. The durable fix is the glob
             # (`CPP-LANE-JOB-GLOBS-ONE-PREFIX`); the convention is what makes this one run now.
             "tests/test_tracking_cluster_parity.cpp",
+            # The per-ROW id stream, beside the other plane's: the case `tracker_options`
+            # never had. Same prefix, same reason as the line above.
+            "tests/test_tracking_parity.cpp",
         ),
         packages=(),
         include_root="3rdparty/shipvision/csrc",

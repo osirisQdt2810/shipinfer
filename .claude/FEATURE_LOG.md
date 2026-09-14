@@ -5,6 +5,24 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-14 — the tracking parity case, and the price it put on the last register entry
+
+`tracker_options` was the divergence register's one surviving entry and the only one nothing
+reproduced with real data. `SHIPVISION-TRACK-LAST-MATCH` asked for a number first; this is it.
+Both planes now run the same ByteTrack over the same boxes and their per-ROW id streams are
+compared -- `drive_tracking.py` through the real `track` ELEMENT, since the attribution under
+test lives there, and `test_tracking_parity.cpp` through `TrackerShard::update`. Ids are
+normalised per scenario on both sides: shipvision mints from a process-wide counter.
+42 lines compared, 0 differing. Making that mean something was the work: across detector
+scores 0.60-1.00 the lowest posterior IoU any CONTINUED track reaches is 0.3317 against a 0.30
+cut, so the tracker's gate gives out first and the band is EMPTY at the shipped defaults. The
+scenarios sit on that edge -- `aspect_edge` keeps its track, `aspect_break` is 0.1px further
+and re-mints -- and both planes assert the pair still brackets it, without which a submodule
+bump moves the edge and "0 differing" stays green over a case that probes nothing.
+The entry stays open, with the number on it: the band is empty by 0.03, not by construction.
+
+---
+
 ## 2026-09-13 — the non-owning mtmc slot is quiet, and the owning one names what it dropped
 
 Three findings from #263's review, all one seam. The two planes asked the routing question in
