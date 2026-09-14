@@ -1,6 +1,75 @@
 # Journal
 
 
+## 14 Sep — ten merged, four blocked items that were not, and a race that was not a timeout
+
+**The day's shape was not building, it was checking.** Ten PRs merged (#214, #273-#281) and
+the largest single yield came from auditing `[!]` lines rather than writing code.
+
+**The tracking parity case (#273) priced the last register entry.**
+`SHIPVISION-TRACK-LAST-MATCH` demanded a number before anyone built the fix. My first
+scenarios sat well away from the seam, so "0 differing" would have argued for deprioritising
+it on evidence that did not support the claim. Sweeping the width axis across detector scores
+0.60-1.00 put the lowest posterior IoU any CONTINUED track reaches at **0.3317 against a 0.30
+cut** -- the tracker's own gate gives out ~0.03 IoU before the attribution threshold, so the
+band is empty at the shipped defaults. The committed scenarios now sit on that edge and both
+planes assert the pair still brackets it.
+
+**#214 had been green and unlabelled since 10 Sep**, 108 commits behind main. Rebasing it
+(one feature-log conflict) and letting it merge mattered beyond itself: its measured result --
+host CPU -40%, rows +25% -- invalidates the premise of `EXECUTE-BLOCKS-THE-INSTANCE-THREAD`,
+whose ~14% was profiled two days earlier with the sync still SPINNING.
+
+**Four `[!]` items were waiting on work already done.** `V124b` and `V124a-PHASE3` gated on
+#187 (merged 10 Sep), `V146b` on #169 (same day), and the api-flake line on #224 -- which
+merged 11 Sep implementing the exact fix that line proposed, and nobody noticed for three
+days. A blocked marker is load-bearing, because the Stop hook lets a session end on one, so a
+stale `[!]` is work that stops being done AND stops being visible. The method is now written
+under the ledger's legend; I built the mechanised version, found it was mostly false positives
+(shipvision PR numbers share shipinfer's `#N` syntax, long blocks sweep prose, inline
+`[!] OPERATOR:` markers parse as items) and recorded the rejection with its reasons.
+
+**Two operator questions answered themselves.** Row 8 asked how the 12 Sep design-load profile
+was configured, after six of my runs failed to reproduce it; the config was in
+`.artifacts/cpp/gate_design_load.plan` all along (`workers 92`). But that was not the cause --
+48 vs 92 moved acceptance 312 -> 402 of ~6 000 -- and `host_cpu.py` gave the real reason in one
+number: that run got **16.19 cores** and mine got **7.02**, because other users hold ~40 of 48.
+The chain is host-bound by its own headline. And C9 asked where the NV12 work lives: it is
+shipped in shipvision's main since `238a392`, Python and CUDA with tests, not lost in a clone.
+
+**The cache flake was not a timeout.** One unreproduced failure yesterday, written off as
+timing. The box sat at load 66, so I stressed it: 1 failure in 20, and the assertion was
+`assert 2 == 1 -- the second identical request re-ran the model`. `_store_when_done` caches in
+a done-callback, which `set_result` invokes AFTER releasing the condition that woke the caller,
+so the trailing write is not ordered before the response. No production change -- writing
+before resolving puts the copy on the critical path, which that docstring declines. Review then
+found a FOURTH racing test that `entries` could not gate, because entries is already at
+`max_entries` before the put under test; measured 1 in 25.
+
+**Five of my own claims needed correcting, all caught before they mattered**, and the pattern
+is that my hand-probes sample the easy cases while tests sample the ones that count: the ops
+two-slice plan (no such slice existed), torch crop "within float32 noise" (upscale diverges by
+0.30), a test gate on `shipvision_available()` that missed torchvision, "three tests raced it"
+(four), and a `[!]` fix premise refuted by its own probe. **And the `pytest | tail && commit`
+pipe broke the push gate three times** -- `tail`'s exit status is not pytest's. Capturing to a
+file and checking `$?` is the fix, and it is the specific way I keep breaking a rule I can quote.
+
+---
+
+## 13 Sep — the mtmc routing and event-schema run (reconstructed from the merge list)
+
+Thirteen PRs merged (#260-#272). Written from the record rather than from memory, so it is a
+list and not a narrative: a device output may stay on the device (#260) and then gains a stated
+lifetime that is not a stage's (#270); the lane refuses a tracker it does not have (#261); a
+named precision installs the plan it names (#262); both planes route two groups the same way
+(#263); **event schema v5** -- a global id says which group minted it (#264), corrected so the
+key says a tier ANSWERED rather than that a fleet has one group (#265); the non-owning mtmc slot
+goes quiet while the owning one names what it dropped (#266) and its diagnostic becomes
+actionable with an offline guard (#267); the C++ lane is shown to attribute rows already, and
+exactly (#268), with the IoU guard matching a word rather than a substring (#269); csrc's doc
+cap is recorded as a prose rule (#271); and an instant is keyed on the monotonic stamp, ADR-022
+(#272, merged just after midnight).
+
 ## 12 Sep (later) — the gate's fix, measured, and a stray contributor removed
 
 **The loop closed.** Yesterday's third turn ended with a diagnosis and no fix: `min_hits` counts
