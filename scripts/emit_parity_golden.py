@@ -52,6 +52,9 @@ from benchmarks.parity.drive_queue import run_queue_scenario  # noqa: E402
 from benchmarks.parity.drive_records import GOLDEN as RECORD_GOLDEN  # noqa: E402
 from benchmarks.parity.drive_records import load as load_record  # noqa: E402
 from benchmarks.parity.drive_records import render as render_record  # noqa: E402
+from benchmarks.parity.drive_tracking import GOLDEN as TRACKING_GOLDEN  # noqa: E402
+from benchmarks.parity.drive_tracking import load as load_tracking  # noqa: E402
+from benchmarks.parity.drive_tracking import render_tracking  # noqa: E402
 from benchmarks.parity.queue_scenario import load_queue_scenario  # noqa: E402
 from benchmarks.parity.scenario import load_scenario  # noqa: E402
 from benchmarks.parity.trace import Trace, TraceWriter  # noqa: E402
@@ -74,9 +77,10 @@ def main(argv: list[str] | None = None) -> int:
             "identity",
             "gate",
             "cluster",
+            "tracking",
         ),
         default="ingest",
-        help="which seam: the camera actors, the request queue (scenarios/queues/), one\n        perception event (scenarios/events/), a resolved chain (scenarios/plans/), or\n        one frame's stage outputs through the production record builder\n        (scenarios/records/), or a segmentation engine's two outputs through the mask\n        fold (scenarios/masks/), or the cross-camera identity map the reference answers a\n        scenario with (scenarios/identity/), or which observations the gate admits\n        (scenarios/gate/), or the whole composition end to end (scenarios/cluster/)",
+        help="which seam: the camera actors, the request queue (scenarios/queues/), one\n        perception event (scenarios/events/), a resolved chain (scenarios/plans/), or\n        one frame's stage outputs through the production record builder\n        (scenarios/records/), or a segmentation engine's two outputs through the mask\n        fold (scenarios/masks/), or the cross-camera identity map the reference answers a\n        scenario with (scenarios/identity/), or which observations the gate admits\n        (scenarios/gate/), or the whole composition end to end (scenarios/cluster/), or one camera's\n        per-row track ids as each plane maps a tracker's answer back (scenarios/tracking/)",
     )
     parser.add_argument("--out", type=Path, help="write the trace here instead of stdout")
     parser.add_argument(
@@ -88,6 +92,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--force", action="store_true", help="overwrite an existing golden")
     args = parser.parse_args(argv)
 
+    if args.kind == "tracking":
+        # The per-ROW id stream: which row carries an identity, normalised so a process-wide
+        # counter cannot make the golden depend on what ran first.
+        text = render_tracking(load_tracking(args.scenario))
+        name = Path(args.scenario).stem
+        return _emit(text, TRACKING_GOLDEN / f"{name}.txt", args, tally=_lines(text, "line"))
     if args.kind == "cluster":
         # The whole composition -- gate, gram, matcher, clusterer, identities -- which is the
         # only golden that can catch a piece wired to the wrong neighbour.

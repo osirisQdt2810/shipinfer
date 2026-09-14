@@ -45,11 +45,21 @@ class KnownDivergence:
         return self.explains is not None and self.explains(python_record, cpp_record)
 
 
-# doc: long the register's one surviving entry, and why it is a rule and not a missing step
-#: One entry, documentary (``explains=None``): it reaches different ``track_id`` streams for
-#: one chain file, which no golden here holds yet -- there is no tracking driver in
-#: `benchmarks/parity/` at all. P6-D1/D2/D3 and `mtmc_group_routing` (#258, closed by #263)
-#: were closed by converging; #259 and #261 narrowed `tracker_options` to its last knob.
+# doc: long the register's one surviving entry, why it is a rule not a missing step, and its price
+#: One entry, documentary (``explains=None``): it is about ``track_id`` streams, which the
+#: differ never sees. P6-D1/D2/D3 and `mtmc_group_routing` (#258, closed by #263) were closed
+#: by converging; #259 and #261 narrowed `tracker_options` to its last knob.
+#:
+#: PRICED 14 Sep, which is what the entry was missing. `scenarios/tracking/attribution.scn`
+#: now drives both planes over the same boxes and compares the per-row id streams: **42 lines,
+#: 0 differing**, over scenarios chosen to sit ON the edge rather than near it. Sweeping the
+#: width axis across detector scores 0.60-1.00, the lowest posterior IoU any CONTINUED track
+#: reaches is **0.3317 against a 0.30 cut** -- the tracker's own gate gives out before the
+#: attribution threshold does, by ~0.03 IoU. So the divergence below is real as a RULE and
+#: unreached in practice at the shipped defaults, which is an argument for leaving
+#: `SHIPVISION-TRACK-LAST-MATCH` unbuilt, not for closing this entry: the rules still differ,
+#: and `crossing_near_tie` shows the second mechanism -- a global assignment free to pick the
+#: other pairing when two posteriors nearly coincide -- which no threshold protects.
 #:
 #: WHAT SURVIVES IS NOT A MISSING STEP but a different RULE for which rows go null. C++
 #: decides inside the association, on the PREDICTED box, fused with detector score
