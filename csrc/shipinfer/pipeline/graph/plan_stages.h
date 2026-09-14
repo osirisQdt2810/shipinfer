@@ -183,6 +183,23 @@ namespace shipinfer {
     // can (it needs the loaded models), so the two cannot share through `PlanStages`.
     std::optional<MaskAreaSpec> fold_of(const ResolvedPlan& plan, const PlanNode& node);
 
+    // doc: long the twin of the other plane's warning, and why it answers instead
+    //: WHICH OF THESE CAMERAS NO `mtmc` ROSTER NAMES -- the twin of
+    //: `InprocessRunner._warn_if_no_group_owns` (`MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED`).
+    //: With two groups a camera in neither roster is associated by nobody: its objects publish
+    //: a null global id and the event says nothing is missing, so the run looks healthy.
+    //:
+    //: EMPTY BELOW TWO SLOTS, the same floor `MtmcStage`'s `routes` uses: with one group a
+    //: roster is the fleet's placement HINT and not a filter, so the slot associates an
+    //: unlisted camera anyway and there is no orphan to report.
+    //:
+    //: It ANSWERS rather than warns, unlike the Python twin, because that plane's check sits in
+    //: the runner that owns the log and this one is in the CUDA-free reader the offline tier
+    //: gates. `cli/bench.cpp` does the reporting; keeping the question pure is what lets
+    //: `test_plan_stages.cpp` ask it without a fleet.
+    std::vector<std::string> cameras_no_group_owns(const PlanStages& planned,
+                                                   const std::vector<std::string>& cameras);
+
     PlanStages plan_stages(const ResolvedPlan& plan, const std::set<std::string>& loaded);
 
 }  // namespace shipinfer
