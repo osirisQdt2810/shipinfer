@@ -120,8 +120,15 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
-      - name: Install torch (CPU build)
-        run: pip install --index-url https://download.pytorch.org/whl/cpu torch
+      - name: Install torch and torchvision (CPU builds)
+        # TORCHVISION ONLY ON THIS LEG, and only because shipvision's torch image-ops refuse
+        # to construct without it ("Install shipvision[torch]"). #278's first run reddened
+        # here: the submodule was checked out and their torch backend still could not build,
+        # which is this job's own `[solvers]` lesson again -- source without dependencies is
+        # not the dependency. The `test` job above deliberately does NOT get it, because
+        # `runtime/ops/torch_ops.py::_nms_fallback` exists for installs that lack torchvision
+        # and that path has to keep being exercised somewhere that gates a merge.
+        run: pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
       - name: Install the package and its dev tooling
         run: pip install -e ".[dev,cli]"
       - name: Install the kernels' Python half
