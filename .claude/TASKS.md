@@ -3806,6 +3806,11 @@ hook down, for when the operator asked to see something before it is executed.
       `missing_stages` carries. The "every chain here has one group, so the key costs bytes
       for nothing" reasoning was wrong and is recorded here because it was written into four
       files before a review round caught it.
+      THAT LAST SENTENCE IS ITSELF WRONG and was corrected 14 Sep -- see
+      `MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED`. Absence has THREE causes and only the missed
+      instant is a fact `missing_stages` carries; a chain with no `mtmc` slot and a camera no
+      roster names are byte-identical. Left in place because this is a log of what was decided
+      when, with the pointer so the next reader does not re-derive it.
       EVIDENCE: `mixed_frame.scn` names a slot and the other three event goldens do not, so
       the byte gate compares BOTH readings -- with the directive ignored on the C++ side it
       reports `differs at column 854`. The end-to-end is

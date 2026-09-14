@@ -267,10 +267,13 @@ class PerceptionEvent:
         # first is per frame: the tier ran and this frame missed its instant, which
         # `missing_stages` does carry; the chain declares no `mtmc` slot at all; or no slot's
         # roster names this camera. The last two are DEPLOYMENT facts, identical on the wire
-        # and constant for the run, so they are said once at start-up rather than on every
-        # frame -- `InprocessRunner._warn_if_no_group_owns` and, on the other plane,
-        # `cameras_no_group_owns` in `cli/bench.cpp`. A per-frame marker would be the wrong
-        # shape for a fact that cannot change while the process lives.
+        # and constant for the run, so a per-frame marker would be the wrong shape for them.
+        # THE ORPHAN is announced once at start-up, on both planes --
+        # `InprocessRunner._warn_if_no_group_owns` and `cameras_no_group_owns` in
+        # `cli/bench.cpp`; neither fires when the chain has NO slot, because both floor at
+        # two. THE NO-TIER CASE IS ANNOUNCED NOWHERE, deliberately: it is a static property
+        # of the chain file the operator wrote (`topology/detect_only.yaml` is one), not a
+        # fault to report back to them.
         if self.global_id_group is not None:
             payload["global_id_group"] = self.global_id_group
         if self.extra:

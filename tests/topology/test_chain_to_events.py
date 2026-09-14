@@ -327,6 +327,10 @@ def no_mtmc_chain_for(path: Path) -> Topology:
 
     `topology/detect_only.yaml` ships this shape, so it is not a contrivance: a deployment
     that wants boxes and tracks and no fleet identity runs exactly this.
+
+    THE TRACK DOUBLE, not `impl: shipvision`: nothing here turns on a real tracker, and the
+    double is what lets the half of this shape that needs no submodule run in CI, where the
+    submodule is deliberately absent.
     """
     return Topology.from_spec(ChainSpec.from_yaml(textwrap.dedent(f"""
                 name: no_mtmc
@@ -334,8 +338,7 @@ def no_mtmc_chain_for(path: Path) -> Topology:
                   decode: {{impl: replay}}
                   detect: {{impl: events-detect}}
                   embed:  {{impl: events-embed}}
-                  track:  {{impl: shipvision,
-                            params: {{options: {{min_hits: 1, max_age: 3}}}}}}
+                  track:  {{impl: events-track}}
                   output: {{impl: jsonlines, params: {{path: "{path}", flush_every: 0}}}}
                 """)))
 
@@ -593,6 +596,33 @@ class TestTwoIdentitySpacesAreTellableApartOnTheWire:
                 f"{camera}: expected only {owner[camera]!r} to mint its ids, got {slots or 'none'}"
                 " -- another group's counter, the shared `group:`, or a slot that passed over"
                 f" its own camera. Events: {events_in(path)}"
+            )
+
+
+class TestAChainWithNoTierPublishesTheSilentShape:
+    """The half of the guard below that needs no submodule, so CI sees it.
+
+    `MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED`: a chain with no `mtmc` element publishes
+    `partial: false`, an empty `missing_stages` and NO `global_id_group`. The comparison
+    against the orphan row needs the real roster turn-away and is gated below; this half
+    does not, and it is the row an integrator is most likely to meet.
+    """
+
+    def test_no_mtmc_element_means_no_group_key_and_no_missing_stage(
+        self, runner, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "events.jsonl"
+        started = runner(
+            no_mtmc_chain_for(path), settings=settings(), source_factory=scripted(frames=3)
+        )
+        started.add_camera(CameraSpec("cam-a", "injected://a", 0.0))
+
+        assert until(lambda: len(events_in(path)) == 3), events_in(path)
+        for event in events_in(path):
+            assert "global_id_group" not in event, event
+            assert event["partial"] is False and event["missing_stages"] == [], (
+                "a chain that declares no cross-camera tier must not report one as missing: "
+                f"{event}"
             )
 
 

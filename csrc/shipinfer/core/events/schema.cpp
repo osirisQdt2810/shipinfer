@@ -215,8 +215,16 @@ namespace shipinfer::events {
         out += ",\"reason\":";
         append_string(out, reason);
         // OMITTED WHEN EMPTY, and AFTER `reason` because that is where the other plane
-        // appends it. Present exactly when a cross-camera tier answered for THIS frame, so
-        // absence is the frame-level fact `missing_stages` carries.
+        // appends it. Present exactly when a cross-camera tier answered for THIS frame.
+        // ABSENCE DOES NOT SAY WHY, and this comment used to claim it did ("the frame-level
+        // fact `missing_stages` carries"). Three causes share it and only the first is per
+        // frame: the tier ran and this frame missed its instant, which `missing_stages` does
+        // carry; the chain declares no `mtmc` slot at all; or no slot's roster names this
+        // camera. The last two are DEPLOYMENT facts and identical on the wire -- the orphan
+        // is announced at start-up (`cameras_no_group_owns` in `cli/bench.cpp`), the no-tier
+        // case deliberately not at all, being a static property of the plan. The other
+        // plane's `core/events/schema.py::as_dict` carries this same paragraph; the goldens
+        // hold the two readings byte-identical, so the two comments move together.
         if (!global_id_group.empty()) {
             out += ",\"global_id_group\":";
             append_string(out, global_id_group);
