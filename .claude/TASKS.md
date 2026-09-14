@@ -3411,7 +3411,30 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       changed is the estimate of the cost -- a drift here is now a defect one seam already
       documented and the other still had.
 
-- [ ] EVENTS-CHAIN-FLAKE-SEEN-ONCE · `tests/topology/test_chain_to_events.py::
+- [x] EVENTS-CHAIN-FLAKE-SEEN-ONCE · **CHASED 14 Sep, and it found a DIFFERENT defect --
+      mine, in a test I added the day before.** The line predicted the useful next step
+      (reproduce, capture the assertion) and that is what paid.
+      WHAT REPRODUCED. The named test did not: 25 runs of its module, zero failures. The
+      whole `tests/topology/` directory did, 1 in 8 -- and the failure was
+      `TestTheTwoSilencesAreIndistinguishable`, the guard #277/#278 added, not the test
+      this line names.
+      AND IT WAS NOT A DEADLINE. The orphan camera's first event carried
+      `partial: true, missing_stages: ['track']` because the tracker had not answered for
+      that frame -- which is the THIRD cause `as_dict` enumerates, a real frame-level fact,
+      orthogonal to which deployment silence produced the row. My assertion demanded
+      `missing_stages == []`, so it was asserting something about the TRACKER while
+      claiming to compare two silences. On an idle box the first frame usually has tracks,
+      which is why it passed for a day.
+      FIXED by comparing only frames the tracker answered for, and by narrowing the last
+      assertion from "no missing stages" to "`mtmc` is not named" -- the actual claim.
+      Filtering does not make it vacuous (`mtmc` can still appear, and would for the
+      missed-instant cause), and both #277 probes still redden it. 12 directory runs clean
+      at load 46, against 1 in 8 before.
+      THE ORIGINAL SIGHTING IS STILL UNEXPLAINED and stays that way honestly: a single
+      `until(... == 6)` timeout in a full-suite run, not reproduced in 25 module runs or 20
+      directory runs. If it returns, the note below still applies -- stuck below six is a
+      wedge, late is a deadline.
+      ORIGINAL:  `tests/topology/test_chain_to_events.py::
       TestTwoIdentitySpacesAreTellableApartOnTheWire::
       test_each_cameras_events_name_the_slot_that_minted_their_ids` failed once in a full-suite
       run on 14 Sep and passed 3/3 alone straight after, with the next whole-suite run green
