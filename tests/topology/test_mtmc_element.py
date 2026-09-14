@@ -903,18 +903,30 @@ class TestAnNtpStepDoesNotMoveAnInstant:
     def stepped(self, element, cameras: list[str], step_s: float) -> list[Any]:
         """One frame per camera, then one more each with the WALL stamp stepped back.
 
-        `captured_ns` advances the way a monotonic clock does whatever NTP did; only the wall
-        pair moves. That is exactly what a step looks like from inside a process.
+        `captured_ns` advances whatever NTP did; only the wall pair moves, which is what a
+        step looks like from inside a process. ON REAL CLOCKS, not this file's 2023
+        `EPOCH_NS`: the lag is measured against `time.time()`, and a fixed epoch is ~2.8 years
+        of microseconds away -- it swamps a 2 s step and makes any lag assertion pass whichever
+        stamp it came from. `frame_with` on the other plane takes an override for this reason.
         """
+        now_ns, mono_ns = time.time_ns(), time.monotonic_ns()
         out = []
         for index, camera in enumerate(cameras):
             out.append(
                 element.process(
-                    item(
-                        camera,
-                        0,
-                        instant=index * 0.001,
-                        tracks=[track(1, camera, 0, TALL, SAME_A)],
+                    ChainItem(
+                        context=RequestContext(
+                            camera_id=camera,
+                            frame_id=0,
+                            captured_ns=mono_ns + int(index * 0.001 * 1e9),
+                            captured_unix_ns=now_ns + int(index * 0.001 * 1e9),
+                        ),
+                        caps=Caps.parse("meta@cpu"),
+                        payload=None,
+                        meta={
+                            "tracks": [track(1, camera, 0, TALL, SAME_A)],
+                            "frame_hw": (HEIGHT, WIDTH),
+                        },
                     )
                 )
             )
@@ -923,8 +935,8 @@ class TestAnNtpStepDoesNotMoveAnInstant:
                 context=RequestContext(
                     camera_id=camera,
                     frame_id=1,
-                    captured_ns=EPOCH_NS + int((0.10 + index * 0.001) * 1e9),
-                    captured_unix_ns=EPOCH_NS + int((0.10 + index * 0.001 - step_s) * 1e9),
+                    captured_ns=mono_ns + int((0.10 + index * 0.001) * 1e9),
+                    captured_unix_ns=now_ns + int((0.10 + index * 0.001 - step_s) * 1e9),
                 ),
                 caps=Caps.parse("meta@cpu"),
                 payload=None,
@@ -969,7 +981,10 @@ class TestAnNtpStepDoesNotMoveAnInstant:
 
             assert element.barrier is not None
             samples = element.barrier.arrival_lag_us
-            assert samples and max(samples) >= 1_500_000, (
+            # BOUNDED ON BOTH SIDES, which is what makes it a test: a lag taken from the KEY
+            # reads ~0 here, and one taken from a fixed epoch reads ~9e13. Only a lag taken
+            # from the wall pair lands in this range.
+            assert samples and 1_500_000 <= max(samples) <= 3_000_000, (
                 f"a 2 s step should read as ~2 s of lag; got {samples}. The wall pair is the "
                 "only signal left that a clock moved, so it must not follow the key"
             )

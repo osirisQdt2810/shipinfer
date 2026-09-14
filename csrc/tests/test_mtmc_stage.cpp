@@ -5,6 +5,7 @@
 // this stage owns is reading each detection's track id and embedding out of the frame's
 // batches, handing its camera's rows to the barrier, and scattering the group's answer back
 // onto the detector's own indices.
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <map>
@@ -110,7 +111,9 @@ namespace {
         FrameTag tag;
         tag.camera_id = camera;
         tag.frame_id = frame_id;
-        tag.captured_ns = 1'000'000'000LL * frame_id;
+        // NEVER ZERO: the stage refuses a frame with no capture stamp (ADR-022 keys on this
+        // field), so `frame_with(camera, 0, ...)` would be a ConfigError rather than a frame.
+        tag.captured_ns = 1'000'000'000LL * std::max<int64_t>(1, frame_id);
         // BOTH STAMPS, the way `ingest/frame.h` sets them. The instant is keyed on the
         // MONOTONIC one (ADR-022) and the other plane keys on the same field; the wall pair
         // is what the arrival-lag diagnostic reads.

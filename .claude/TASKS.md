@@ -3646,6 +3646,13 @@ hook down, for when the operator asked to see something before it is executed.
       is asked before the bridge loads, and its two cases moved out of the `@needs_shipvision`
       class: on main they SKIP with no submodule, on this branch they PASS.
 
+- [ ] MTMC-THE-NTP-PROPERTY-IS-PYTHON-ONLY · ADR-022's property -- a wall-clock step moves no
+      instant, because the key is monotonic -- is asserted on the Python plane only
+      (`TestAnNtpStepDoesNotMoveAnInstant`). The C++ stage keys on the same field and
+      `test_mtmc_barrier` carries 146 checks, so a twin there is cheap and would put this under
+      the sync rule's "same inputs -> same events" rather than under one plane's word for it.
+      Found by #272's review.
+
 - [ ] MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED · with two groups, a camera NEITHER roster names
       is returned unchanged by every slot, so its event carries no `global_ids`, no marker
       saying why, and `is_partial()` false. Reachable: add a camera by API that the chain

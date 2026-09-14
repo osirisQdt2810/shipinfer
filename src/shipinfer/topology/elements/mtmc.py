@@ -753,13 +753,10 @@ class ShipvisionMtmc(Element):
             )
         capture_s = self._capture_s(item)
         view = self._view(item, camera_id, capture_s, tracks)
-        # HOW LATE THIS FRAME IS: here, because only this place holds both stamps on one
-        # clock. CLAMPED AT ZERO AND COUNTED — a frame arriving before its own capture stamp
-        # is the two clocks disagreeing, and `backward` cannot see that: it compares a
-        # camera's stamps against its OWN history. See `note_arrival_lag_us`.
-        # THE WALL PAIR, named explicitly rather than taken from `capture_s`: the key is the
-        # monotonic stamp now (ADR-022) and this diagnostic is the only thing left that can
-        # see a SOURCE's clock disagreeing with this shard's, so it must not follow the key.
+        # HOW LATE THIS FRAME IS, on the WALL PAIR BY NAME and never on `capture_s`: with a
+        # monotonic key (ADR-022) this is the only thing left that can see a SOURCE's clock
+        # disagree with this shard's. CLAMPED AT ZERO AND COUNTED, because `backward` cannot
+        # see it -- that compares a camera's stamps against its OWN history.
         lag_us = (time.time() - item.context.captured_unix_ns / 1e9) * 1e6
         self._barrier.note_arrival_lag_us(int(max(0.0, lag_us)), negative=lag_us < 0.0)
         try:
@@ -792,17 +789,10 @@ class ShipvisionMtmc(Element):
     def _capture_s(self, item: ChainItem) -> float:
         """When this frame was taken, on the MONOTONIC clock, or a typed refusal.
 
-        ``captured_ns``, not ``captured_unix_ns``, and that is the decision ADR-022 records:
-        a barrier lives in ONE process, so a per-process clock is shared everywhere it has to
-        be, and NTP cannot step it. Both stamps are read in one expression at decode
-        (``ingest/frame/tag.py``), so this is the same instant read off a clock that does not
-        move under the group.
-
-        :attr:`RequestContext.captured_ns` defaults to ``0``, so a source that never stamps it
-        is indistinguishable from one that stamps the epoch — and either way every frame of
-        every camera lands in one instant, which closes once and makes every frame after it
-        ``late`` for the life of the process. A static property of a mis-wired chain, so it
-        gets a refusal that names the fix rather than a per-frame gap that looks like skew.
+        ``captured_ns`` and not ``captured_unix_ns`` — ADR-022 has the reasoning. It defaults
+        to ``0``, and a source that never stamps it would put every frame of every camera into
+        one instant for the life of the process: a static property of a mis-wired chain, so it
+        gets a refusal rather than a gap that looks like clock skew.
 
         Raises:
             ValidationError: the capture clock is zero or negative.
