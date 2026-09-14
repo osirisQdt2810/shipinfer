@@ -3222,6 +3222,28 @@ hook down, for when the operator asked to see something before it is executed.
       obvious candidate is `MTMC-GRAM-WANTS-A-REAL-GEMM` if the gram lands in tree -- and measure
       that loop rather than flipping a flag and claiming a speed-up.
 
+- [ ] EVENTS-MISSING-STAGES-MEANS-TWO-THINGS · the field means one thing on a chain and the
+      opposite on the DeepStream builder, and both are deliberate. On a chain it is PER FRAME:
+      the stage ran and this frame missed it, so `detect_only.yaml` -- which runs no `track`,
+      no `embed` and no `mtmc` -- publishes `partial: false` and an EMPTY `missing_stages`.
+      In `pipeline/deepstream/run.py` it is STATIC: `PR1_MISSING_STAGES` names the two stages
+      that topology does not run on every event it publishes, because that graph is a subset
+      of the Python DAG and silence would publish a partial frame as a complete one (ADR-005,
+      cited there). Both readings are defensible; they are not reconciled, and they share one
+      serialiser -- `pipeline/schema.py` re-exports `core.events.schema`.
+      WHY IT MATTERS: two deployments into one broker. A DeepStream PR1 event carries
+      `partial: true` with a non-empty list for a stage nobody will ever run, and a
+      `detect_only` event carries `partial: false` while running one model of nine. A consumer
+      alarming on `partial` reads the first as a live gap and the second as a complete frame;
+      both are wrong.
+      FOUND BY #277's REVIEW, round 3, while correcting the `global_id_group` paragraph --
+      which is now SCOPED ("on a chain") and names this divergence rather than asserting one
+      convention over the shared serialiser. Deciding it is a schema question and wants its
+      own PR: either `missing_stages` becomes per-frame everywhere and the DeepStream
+      topology's absent stages move to a static field, or the chain plane starts naming the
+      slots its file does not declare. The first looks right -- `partial` is a frame word --
+      but it is not this PR's call.
+
 - [ ] MTMC-TWO-SLOT-CACHED-REGISTRIES · `pipeline/mtmc/cluster.cpp` is
       `pipeline/tracking/associator.cpp` transcribed: `add`/`has`/`names`/`create`, `made_lock`,
       `made`, `made_*`, the (impl, slot) cache and the lane-before-unknown refusal, ~60
@@ -3696,7 +3718,9 @@ hook down, for when the operator asked to see something before it is executed.
       property is expressible. Both halves probed by flipping the stage to the wall key: the
       first check fails alone, and reading the lag off the key fails four.
 
-- [ ] MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED · with two groups, a camera NEITHER roster names
+- [x] MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED · DONE 14 Sep, all three halves: the runner names
+      it (#274), the C++ plane names it (#276), and the event's promise is corrected here.
+      With two groups, a camera NEITHER roster names
       is returned unchanged by every slot, so its event carries no `global_ids`, no marker
       saying why, and `is_partial()` false. Reachable: add a camera by API that the chain
       file never listed. It IS counted -- twice, as `not_mine`, once per slot -- so a run says
@@ -3717,7 +3741,29 @@ hook down, for when the operator asked to see something before it is executed.
       announcing it and `_do_process` turns it away before `submit`, so it enters neither
       `_announced` nor `_seen`. Measured: `cameras_not_mine ['cam-orphan']`,
       `silent_cameras []`, no warning, even with the 100-window latch forced open.
-      WHAT IS STILL OPEN is the EVENT, and the measured table is why it is not obvious:
+      THE EVENT HALF IS SETTLED 14 Sep, BY CORRECTING THE PROMISE rather than by adding a
+      marker, and the measured table below is the reason. Absence of `global_id_group` has
+      THREE causes and only one is a frame-level fact; the schema comment claimed it was
+      always the fact `missing_stages` carries, which is false for two of the three rows.
+      `as_dict` now says what absence does and does not mean, and the convergence is
+      asserted AT THE CHAIN LEVEL, which is the only place the two deployment rows are two
+      different things: `test_chain_to_events.py::TestTheTwoSilencesAreIndistinguishable`
+      runs a chain with no `mtmc` element beside a two-group chain with an orphan camera and
+      holds their key sets and their four cause-bearing fields equal. NOT RUN BY CI: it is
+      `@needs_shipvision`, because the orphan row needs the real roster turn-away in
+      `ShipvisionMtmc._do_process` rather than a double, and CI does not check the submodule
+      out -- so the convergence is local evidence only. The no-tier row alone is pinned
+      offline (`TestAChainWithNoTierPublishesTheSilentShape`). #277's review caught
+      the first version asserting it at the SCHEMA layer, where one factory builds both rows
+      and the comparison is `f(x) == f(x)` -- green for any deterministic serialiser, and
+      blind to the exact regression it advertised. Probed both ways now: a naming `reason`
+      on one configuration reddens it, and so does one of them growing `missing_stages`.
+      WHY NOT A MARKER: the two indistinguishable rows are DEPLOYMENT facts, constant for
+      the life of the process, and a per-frame key is the wrong shape for a fact that cannot
+      change while the process lives. They are said once at start-up instead, on both planes
+      -- `InprocessRunner._warn_if_no_group_owns` (#274) and `cameras_no_group_owns` in
+      `cli/bench.cpp` (#276) -- which is what those two PRs were for.
+      THE TABLE, which is what all of that is about:
         cause                                  partial  missing_stages     global_id_group
         camera no roster names (two groups)    false    []                 ABSENT
         chain has NO mtmc element at all       false    []                 ABSENT
@@ -3726,11 +3772,8 @@ hook down, for when the operator asked to see something before it is executed.
         owning slot, zero or gated tracks      false    []                 present
       The first two rows are BYTE-IDENTICAL, and `topology/detect_only.yaml` ships with no
       mtmc, so both are real. A consumer cannot tell "no group owns this camera" from "this
-      deployment has no cross-camera tier". Worse, `core/events/schema.py` promises of
-      `global_id_group` that "absence is the frame-level fact `missing_stages` carries" --
-      and in row one absence carries no fact at all, so the schema's own sentence is wrong
-      for that row. Fixing THAT is the remaining work: either make the row carry a fact or
-      correct the promise. A kind marker is still the wrong shape, for the reason above.
+      deployment has no cross-camera tier" -- and that is now DOCUMENTED as the decision it
+      is, rather than being a sentence in the schema that was simply wrong.
       AND THE C++ PLANE NOW SAYS IT TOO (V88/V89), 14 Sep. `plan_stages.cpp` already refused
       the two plan-time roster faults -- one camera in two rosters, a second slot naming none
       -- and an orphan is neither: it is a fleet-vs-roster mismatch. THE PLANES DIFFER IN
@@ -3789,6 +3832,11 @@ hook down, for when the operator asked to see something before it is executed.
       `missing_stages` carries. The "every chain here has one group, so the key costs bytes
       for nothing" reasoning was wrong and is recorded here because it was written into four
       files before a review round caught it.
+      THAT LAST SENTENCE IS ITSELF WRONG and was corrected 14 Sep -- see
+      `MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED`. Absence has THREE causes and only the missed
+      instant is a fact `missing_stages` carries; a chain with no `mtmc` slot and a camera no
+      roster names are byte-identical. Left in place because this is a log of what was decided
+      when, with the pointer so the next reader does not re-derive it.
       EVIDENCE: `mixed_frame.scn` names a slot and the other three event goldens do not, so
       the byte gate compares BOTH readings -- with the directive ignored on the C++ side it
       reports `differs at column 854`. The end-to-end is

@@ -371,9 +371,25 @@ class TestTheIdentitySpaceIsAnExtension:
         An array is indexed by row, so a missing one would break the join every consumer
         does. This is a scalar with nothing to stay aligned with. NOT a per-deployment
         saving: a one-group chain writes it on every frame its slot associates, so absence
-        means *this frame* got no cross-camera answer — a missed instant, or no tier at all.
+        means *this frame* got no cross-camera answer. It does not say WHY — see below.
         """
         assert set(self.identified().as_dict()) == V4_KEYS
+
+    def test_only_a_missed_instant_leaves_a_readable_trace(self):
+        """Of the three causes of absence, ONE is a fact this layer can carry.
+
+        A missed instant is per frame and `missing_stages` names it. The other two -- the
+        chain declares no `mtmc` slot, or no slot's roster names this camera -- are
+        DEPLOYMENT facts, and at this layer they are not even two things: one factory with
+        one set of arguments builds both, so a comparison here would be `f(x) == f(x)` and
+        would hold for any deterministic serialiser. The convergence is asserted where the
+        two causes are genuinely two configurations --
+        `tests/topology/test_chain_to_events.py::TestTheTwoSilencesAreIndistinguishable`.
+        """
+        missed = self.identified(missing_stages=("mtmc",)).as_dict()
+
+        assert "global_id_group" not in missed
+        assert missed["missing_stages"] == ["mtmc"] and missed["partial"] is True
 
     def test_two_groups_that_minted_the_same_number_stay_distinguishable(self):
         """The failure this field exists to fix, as the assertion."""
