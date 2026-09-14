@@ -375,34 +375,21 @@ class TestTheIdentitySpaceIsAnExtension:
         """
         assert set(self.identified().as_dict()) == V4_KEYS
 
-    def test_absence_does_not_say_which_of_three_things_happened(self):
-        """The schema comment used to promise absence was the fact `missing_stages` carries.
+    def test_only_a_missed_instant_leaves_a_readable_trace(self):
+        """Of the three causes of absence, ONE is a fact this layer can carry.
 
-        It is not, and this is the measured table as an assertion. A missed instant IS a
-        frame-level fact and `missing_stages` does carry it. The other two are DEPLOYMENT
-        facts — the chain declares no `mtmc` slot, or no slot's roster names this camera —
-        and they are byte-identical here, which is why both planes say them once at
-        start-up instead (`MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED`).
+        A missed instant is per frame and `missing_stages` names it. The other two -- the
+        chain declares no `mtmc` slot, or no slot's roster names this camera -- are
+        DEPLOYMENT facts, and at this layer they are not even two things: one factory with
+        one set of arguments builds both, so a comparison here would be `f(x) == f(x)` and
+        would hold for any deterministic serialiser. The convergence is asserted where the
+        two causes are genuinely two configurations --
+        `tests/topology/test_chain_to_events.py::TestTheTwoSilencesAreIndistinguishable`.
         """
         missed = self.identified(missing_stages=("mtmc",)).as_dict()
-        no_tier_in_the_chain = self.identified().as_dict()
-        no_roster_names_this_camera = self.identified().as_dict()
 
         assert "global_id_group" not in missed
-        assert "global_id_group" not in no_tier_in_the_chain
-        assert "global_id_group" not in no_roster_names_this_camera
-
-        # The one absence a consumer CAN read, and the only one.
         assert missed["missing_stages"] == ["mtmc"] and missed["partial"] is True
-
-        # And the two it cannot tell apart, every key but the two that move on their own.
-        # If this ever stops being true, the comment on `as_dict` has to change with it.
-        volatile = {"emitted_unix_ns", "latency_us"}
-        assert {k: v for k, v in no_tier_in_the_chain.items() if k not in volatile} == {
-            k: v for k, v in no_roster_names_this_camera.items() if k not in volatile
-        }
-        assert no_tier_in_the_chain["missing_stages"] == []
-        assert no_tier_in_the_chain["partial"] is False
 
     def test_two_groups_that_minted_the_same_number_stay_distinguishable(self):
         """The failure this field exists to fix, as the assertion."""

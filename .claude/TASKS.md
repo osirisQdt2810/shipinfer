@@ -3723,10 +3723,15 @@ hook down, for when the operator asked to see something before it is executed.
       marker, and the measured table below is the reason. Absence of `global_id_group` has
       THREE causes and only one is a frame-level fact; the schema comment claimed it was
       always the fact `missing_stages` carries, which is false for two of the three rows.
-      `as_dict` now says what absence does and does not mean, and
-      `test_absence_does_not_say_which_of_three_things_happened` is that table as an
-      assertion -- including that the two deployment rows are byte-identical, so the day
-      they stop being, the comment has to change with them.
+      `as_dict` now says what absence does and does not mean, and the convergence is
+      asserted AT THE CHAIN LEVEL, which is the only place the two deployment rows are two
+      different things: `test_chain_to_events.py::TestTheTwoSilencesAreIndistinguishable`
+      runs a chain with no `mtmc` element beside a two-group chain with an orphan camera and
+      holds their key sets and their four cause-bearing fields equal. #277's review caught
+      the first version asserting it at the SCHEMA layer, where one factory builds both rows
+      and the comparison is `f(x) == f(x)` -- green for any deterministic serialiser, and
+      blind to the exact regression it advertised. Probed both ways now: a naming `reason`
+      on one configuration reddens it, and so does one of them growing `missing_stages`.
       WHY NOT A MARKER: the two indistinguishable rows are DEPLOYMENT facts, constant for
       the life of the process, and a per-frame key is the wrong shape for a fact that cannot
       change while the process lives. They are said once at start-up instead, on both planes

@@ -322,6 +322,24 @@ def two_group_chain_for(path: Path) -> Topology:
                 """)))
 
 
+def no_mtmc_chain_for(path: Path) -> Topology:
+    """The same chain with NO `mtmc` element -- one of the two causes below, as a real chain.
+
+    `topology/detect_only.yaml` ships this shape, so it is not a contrivance: a deployment
+    that wants boxes and tracks and no fleet identity runs exactly this.
+    """
+    return Topology.from_spec(ChainSpec.from_yaml(textwrap.dedent(f"""
+                name: no_mtmc
+                elements:
+                  decode: {{impl: replay}}
+                  detect: {{impl: events-detect}}
+                  embed:  {{impl: events-embed}}
+                  track:  {{impl: shipvision,
+                            params: {{options: {{min_hits: 1, max_age: 3}}}}}}
+                  output: {{impl: jsonlines, params: {{path: "{path}", flush_every: 0}}}}
+                """)))
+
+
 def chain_for(path: Path, *, track: str, mtmc: str, extra: str = "") -> Topology:
     return Topology.from_spec(ChainSpec.from_yaml(textwrap.dedent(f"""
                 name: events
@@ -576,3 +594,69 @@ class TestTwoIdentitySpacesAreTellableApartOnTheWire:
                 " -- another group's counter, the shared `group:`, or a slot that passed over"
                 f" its own camera. Events: {events_in(path)}"
             )
+
+
+@needs_shipvision
+class TestTheTwoSilencesAreIndistinguishable:
+    """Absence of `global_id_group` has three causes; TWO look identical on the wire.
+
+    `as_dict` used to promise absence was "the frame-level fact `missing_stages` carries".
+    It is not: a chain with no `mtmc` element and a camera no roster names both publish
+    `partial: false`, an empty `missing_stages` and no group key.
+
+    AT THE CHAIN LEVEL, the only place the two causes are two different things. From one
+    event factory they are one call and `f(x) == f(x)` holds for any deterministic
+    serialiser, which is how the first version of this guard passed proving nothing (#277).
+    """
+
+    def events_for(self, runner, chain, cameras: list[str], path: Path) -> list[dict]:
+        started = runner(chain, settings=settings(workers=4), source_factory=scripted(frames=3))
+        for camera in cameras:
+            started.add_camera(CameraSpec(camera, f"injected://{camera}", 0.0))
+        assert until(lambda: len(events_in(path)) >= len(cameras)), events_in(path)
+        return events_in(path)
+
+    def test_no_tier_at_all_and_no_roster_that_names_it_publish_the_same_shape(
+        self, runner, tmp_path: Path
+    ) -> None:
+        """The day either grows a distinguishing key, this reddens -- and the `as_dict`
+        comment is what has to change with it."""
+        no_tier = self.events_for(
+            runner, no_mtmc_chain_for(tmp_path / "a.jsonl"), ["cam-a"], tmp_path / "a.jsonl"
+        )
+        orphan = self.events_for(
+            runner,
+            two_group_chain_for(tmp_path / "b.jsonl"),
+            ["cam-orphan"],
+            tmp_path / "b.jsonl",
+        )
+        assert no_tier and orphan
+
+        for event in no_tier + orphan:
+            assert "global_id_group" not in event, event
+
+        # THE KEY SETS, which is what a NEW marker would move. Sets rather than whole
+        # payloads because camera ids, clocks and vectors differ by construction; a key that
+        # named the cause would land in exactly one of these.
+        assert set(no_tier[0]) == set(orphan[0]), (
+            "one of the two silences grew a key the other has not. If that is deliberate, "
+            "the `as_dict` comment in core/events/schema.py no longer describes the wire"
+        )
+
+        # AND THE VALUES OF EVERY FIELD THAT COULD NAME A CAUSE, because a marker need not be
+        # a new key -- `reason` is already there and re-using it would slip past a set
+        # comparison. These four are the whole per-frame vocabulary for "why is there no id".
+        def cause_fields(event: dict) -> dict:
+            return {
+                key: event.get(key) for key in ("reason", "partial", "missing_stages", "extra")
+            }
+
+        assert cause_fields(no_tier[0]) == cause_fields(orphan[0]), (
+            f"the two silences stopped agreeing: no-tier {cause_fields(no_tier[0])} vs "
+            f"orphan {cause_fields(orphan[0])}. One of them now says WHY, which is exactly "
+            "what the `as_dict` comment says the wire cannot do"
+        )
+        for event in no_tier + orphan:
+            assert (
+                event["partial"] is False and event["missing_stages"] == []
+            ), f"a silence started carrying a frame-level fact: {event}"
