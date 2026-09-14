@@ -1302,6 +1302,14 @@ Stated as an observation rather than a new task, and it is accurate: #255, #256 
 all sitting on BLOCKING review verdicts at that moment, plus #214 which is the operator's own
 to merge. Each round is answered in the PR body and re-triggered; the loop is the work.
 
+### V179 — 13 Sep. tiếp tục
+
+> tiếp tục
+
+After I stopped a C++ re-probe mid-build. Read as: the probe is not the work -- #264 is
+approved and its two accepted review notes are already fixed and verified in the tree, so
+what remains is to push, not to re-derive evidence I already have.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
