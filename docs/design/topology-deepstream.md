@@ -47,6 +47,15 @@ another GPU, which is exactly what `service` exists to do.
 The reference sketch (`mtmc_deepstream.py`) puts two GPU branches in one process and sets
 `gpu-id` per element. This topology refuses that, in three places for three reasons:
 
+> **Where that sketch is, because this line cited a file the repository does not contain.**
+> It is the operator's own DeepStream sketch, sitting UNTRACKED at the checkout root -- so a
+> clean tree, a fresh clone or a new worktree has none of it, and this citation resolves to
+> nothing. Not moved or committed here: it is theirs, `references/` is gitignored, and the
+> pre-commit hooks would reformat 21 ruff findings in a file that is a record of what someone
+> else wrote rather than code this project maintains. Recorded so a reader stops looking, and
+> flagged on `T4` so the decision to track it or let it go is made rather than deferred again.
+> The claims below do not depend on it: each cites this repository's own files.
+
 1. **`CUDA_VISIBLE_DEVICES` is already the mechanism.** `Fleet` sets it before the child's
    interpreter starts, which is the only way to win the race against a module-scope `import
    torch` (see `launch/supervisor.py`). The child therefore sees exactly one device, numbered 0,

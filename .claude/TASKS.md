@@ -6338,7 +6338,17 @@ that exposes the four attributes a policy reads.
       frame, so C ≈ B on throughput at every rung; the sizing assumes 10–20 crops/frame at
       50 × 20 fps, and that measurement needs crowded footage (or a synthetic multi-crop
       source). Recorded in #27's body as the open measurement, not overclaimed.
-- [!] **T4 · OPERATOR: pull `nvcr.io/nvidia/deepstream` (~6 GB) onto this box so the fourth topology's running half can be built?** The design + lazy registration half proceeds without it after C8b. INFRA GATE VERIFIED 28 Aug: this box has NO DeepStream anywhere — no nvcr.io/deepstream image (only
+- [!] **T4 · AND A SECOND, SMALLER ASK found 14 Sep: `mtmc_deepstream.py` -- your DeepStream
+      sketch -- has sat UNTRACKED at the checkout root since 25 Aug, and
+      `docs/design/topology-deepstream.md` CITES it. So a clean tree or a fresh clone breaks
+      that citation, and this ledger noted the file as untracked three weeks ago without
+      anything following. TRACK IT OR LET IT GO -- I did neither: it is yours, `references/`
+      is gitignored so it cannot live there, and committing it at the root would put it
+      through hooks that want to reformat 21 ruff findings in a file that records what
+      someone else wrote. If you want it kept, say where and I will add the one pre-commit
+      exclusion it needs. The design doc now says plainly that the sketch is not in the
+      repository, so at least nobody hunts for it.
+      ORIGINAL: OPERATOR: pull `nvcr.io/nvidia/deepstream` (~6 GB) onto this box so the fourth topology's running half can be built?** The design + lazy registration half proceeds without it after C8b. INFRA GATE VERIFIED 28 Aug: this box has NO DeepStream anywhere — no nvcr.io/deepstream image (only
       cuda-base, pytorch, shipinfer-gst:jammy), no host /opt/nvidia/deepstream, no pyds. The image cannot be built
       here either (`docker build` unavailable; the run+commit dance would need the ~6 GB nvcr.io/nvidia/deepstream
       image pulled first — operator/infra step, same class as PHASE-D-NV12's). So T4's FIRST deliverable when its
