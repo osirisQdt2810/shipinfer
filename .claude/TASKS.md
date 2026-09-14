@@ -9375,8 +9375,19 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       crop agreeing off the upscale path and DIFFERING on it, nms identical over 100 random
       fleets, and the numpy pair agreeing exactly with no resample while differing with one.
       A submodule bump that moves either side fails there, with the cost in the message,
-      instead of surfacing mid-refactor. `needs_shipvision`-gated, so it runs on the kernels
-      leg #187 bought.
+      instead of surfacing mid-refactor.
+      WHAT CI ACTUALLY RUNS OF IT, because the submodule is not the whole dependency: the
+      numpy and nms halves run on the kernels leg #187 bought. The TORCH half does not --
+      `shipvision.imgproc.TorchImageOps` refuses to construct without `torchvision`, which
+      this project keeps optional on purpose (`pyproject.toml`'s `vision` extra, and
+      `torch_ops.py::_nms_fallback` exists for installs without it), and that leg installs
+      `.[dev,cli]`. #278's first run reddened on exactly that. So the torch-to-torch premise
+      -- the headline -- is evidence from an install carrying the extra, not from the merge
+      gate, and the test says so in its skip reason rather than reporting a pass it never ran.
+      CLOSING THAT would be one line on the kernels leg (`torchvision` from the CPU index,
+      the same shape as its existing `[solvers]` install). Held out of #278 deliberately: it
+      edits `pr-pipeline.yml`, which cannot pass the review job (CLAUDE.md's known exception)
+      and needs a manual merge, so it does not belong in a test PR.
       SO ROW 10's QUESTION DISSOLVES: the interpolation only ever mattered for the numpy path,
       and the numpy path should not move. Decided under V154 rather than asked -- a
       dependency-free nearest reference is what ADR-001 and the kernel-parity test both

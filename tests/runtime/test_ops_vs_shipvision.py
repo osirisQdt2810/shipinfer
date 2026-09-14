@@ -26,6 +26,20 @@ needs_shipvision = pytest.mark.skipif(
 )
 torch = pytest.importorskip("torch")
 
+# doc: long why the submodule is not the whole dependency, measured on CI rather than guessed
+#: THE SUBMODULE IS NOT THE WHOLE DEPENDENCY, and gating on it alone is what reddened #278's
+#: kernels leg: `shipvision.imgproc.TorchImageOps` refuses to construct without `torchvision`
+#: ("Install shipvision[torch]"), which this project deliberately keeps OPTIONAL --
+#: `pyproject.toml`'s `vision` extra, with `torch_ops.py::_nms_fallback` written for installs
+#: that lack it. So the torch-to-torch comparison needs an install carrying that extra, and
+#: says so rather than reporting a pass it never ran. Same shape as this leg's own `[solvers]`
+#: note: source without dependencies is not the dependency.
+needs_their_torch = pytest.mark.skipif(
+    __import__("importlib.util", fromlist=["util"]).find_spec("torchvision") is None,
+    reason="torchvision is absent, so shipvision's torch backend cannot construct; "
+    "install the `vision` extra (or shipvision[torch]) to run the torch-to-torch premise",
+)
+
 FRAMES_HW = ((480, 640), (300, 300), (720, 1280))
 
 
@@ -46,6 +60,7 @@ def as_array(value) -> np.ndarray:
 
 
 @needs_shipvision
+@needs_their_torch
 class TestTheTorchOpsAlreadyAgree:
     """The half that CAN move: torch is a hard dependency (ADR-003), so delegating it adds
     nothing to the floor -- and these numbers are why it is a move rather than a rewrite."""
