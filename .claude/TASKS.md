@@ -8976,7 +8976,13 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       is what counts and the content is present; those worktrees are leftovers, not gaps. Do not audit
       squash-merged work with `--contains`.
       **TWO REAL GAPS FOUND (new items below).**
-- [!] **V146b · THE PREREQUISITE IS ANSWERED, 9 Sep, and by something already built: #169's
+- [x] **V146b · DONE, and it needed no answer in the end. #169 merged 10 Sep and the
+      offline-g++ arrangement this asked SHIPVISION to grow lives in the PARENT instead:
+      `scripts/build_csrc.py:152` is `EXTERNAL["shipvision"]`, and `cpp.yml:57` builds and
+      runs that lane's binaries on a plain runner with no driver -- every binary, not a
+      prefix glob (`cpp.yml:93`). Extending it to the CUDA-free `mtmc/` subtree is adding
+      sources to that lane, which is a parent-side edit. Used all session.**
+      ORIGINAL: THE PREREQUISITE IS ANSWERED, 9 Sep, and by something already built: #169's
       OWN `shipvision` EXTERNAL LANE. So this is gated on the same click as the tracking chain
       and is no longer a question.** `scripts/build_csrc.py` on `feat/csrc-track-stage` adds
       `EXTERNAL["shipvision"]` with `include_root=3rdparty/shipvision/csrc` and four sources
@@ -9282,7 +9288,13 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       before the next release: an intermittent failure in the tier CLAUDE.md calls "must stay
       green" trains everyone to re-run rather than to read.
 
-- [!] **V124a-PHASE3 · READY TO BUILD, GATED ON YOUR MERGE OF #187 (V124b's half). Thin
+- [ ] **V124a-PHASE3 · UNGATED 14 Sep: #187 merged on 10 Sep, so the reason this was `[!]`
+      is gone and it is mine to build rather than yours to unblock. Its own words were
+      "build it the moment #187 lands; nothing else waits on it", and it then sat blocked
+      for four days. Still sequenced LAST on purpose -- duplication debt, not on the >=5x
+      path (`C1a-kernel`: 1.07-1.12x) -- so it is the work to do when nothing the system
+      needs is available, which is exactly the state while rows 8 and 9 are unanswered.**
+      Thin
       `runtime/ops` to an adapter over shipvision, on the frame-clamp convention decided
       above.** The gate is mine and deliberate: without #187 the moved implementations' tests
       SKIP on CI, so the PR would look green having proved nothing about the code it moved --
@@ -9362,7 +9374,14 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       src change). OWED: a `-m native` container run before the parent adapts onto this
       path (native rows all skip in the unbuilt clone). Detection heads deliberately
       uncapped — max_detections wiring is a separate decision, not phase 1.
-- [!] **V124b · #186 MERGED (52e61af) and it DID what it claimed -- CI went from `3646 passed,
+- [x] **V124b · DONE. #187 was merged by the operator 10 Sep, which is what this line asked
+      for, and the leg it adds is now permanent: `ci.yml:64` runs "Tests (with the kernels'
+      Python half)" and `ci.yml:77` checks the kernels submodule out BY NAME, so the 189
+      shipvision tests run on a machine that gates a merge. Every PR this session shows that
+      leg green. Left `[!]` for four days after the click it was waiting for -- the ledger was
+      saying "blocked on you" about something already done, which is the failure mode a
+      blocked marker exists to prevent.**
+      ORIGINAL: #186 MERGED (52e61af) and it DID what it claimed -- CI went from `3646 passed,
       248 skipped` to `3790 passed, 206 skipped`, so 42 fewer skips and 144 more tests actually
       running. OPERATOR: the other 189 need your manual merge of #187, which edits
       `.github/workflows/**` and therefore cannot mint a review token (the known exception).**
