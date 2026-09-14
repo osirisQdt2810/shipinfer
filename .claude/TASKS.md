@@ -1107,7 +1107,31 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       C++ jobs into `pr-pipeline.yml` is the change that actually prevents it, and it edits
       `.github/workflows/**`, so it needs a manual merge too.
 
-- [!] **C9 · OPERATOR: where does the NV12 work live?** The primary shipvision checkout has no dirty files, so the claimed 1021 uncommitted lines are not there — point at the clone that holds them, or C9 gets re-scoped as not-yet-written (phase D consumes it either way). CHECKED 28 Aug: the primary checkout has NO dirty files (the claimed 1021
+- [x] **C9 · ANSWERED 14 Sep by looking, not asking: the NV12 work is SHIPPED in shipvision's
+      main, so nothing is lost and nobody needs to point at a clone.** It is not uncommitted
+      anywhere -- it landed in `238a392` ("the imgproc package -- letterbox, crop and NMS in
+      three backends", shipvision #3) and is in the pinned tree today: Python in
+      `imgproc/colour.py`, `base.py`, `__init__.py` and BOTH backends; CUDA in
+      `csrc/shipvision/imgproc/image_ops.{cu,h}` and `csrc/bindings/module.cpp`; tests in
+      `tests/imgproc/test_nv12.py`. The API is `bgr_to_nv12`, `nv12_to_rgb`, `nv12_rows`,
+      `nv12_height`, and on `TorchImageOps` the `nv12_letterbox{,_into,_device_into}` trio
+      plus `supports_nv12_device_input`.
+      HONEST CAVEAT: this does NOT account for the specific "1021 uncommitted lines". Those
+      may have been a different effort -- plausibly the zero-copy VRAM path rather than the
+      conversions -- and I cannot reconstruct them. What is settled is the thing the question
+      was for: the capability exists, is tested, and is not lost, so this is not a recovery
+      job. I searched every shipvision checkout under the user's home; there is only the
+      submodule.
+      AND THE MISSING HALF IS THIS REPO'S, which the line's own note predicted: shipinfer's
+      `runtime/ops/` has no nv12 at all, and `elements/decode.py` says `gstreamer-gpu` is
+      deliberately unregistered until phase D puts a DataPool behind it. Producer ready,
+      consumer pending -- tracked on `V124a-PHASE3` (which would bring the `_into` entry
+      points in) and phase D, not here.
+      TWO BOOKKEEPING CORRECTIONS while I was in there: the submodule has FOUR stashes
+      (mtmc, mot, reid, detection), not three, and `scratchpad/nms-pinned-reference/` --
+      where this line says they were exported as patches -- no longer exists, because
+      scratchpads do not survive. The stashes themselves are still in the submodule.
+      ORIGINAL: OPERATOR: where does the NV12 work live?** The primary shipvision checkout has no dirty files, so the claimed 1021 uncommitted lines are not there — point at the clone that holds them, or C9 gets re-scoped as not-yet-written (phase D consumes it either way). CHECKED 28 Aug: the primary checkout has NO dirty files (the claimed 1021
       uncommitted lines are not there; three ancient WIP stashes exported to scratchpad/nms-pinned-reference/ as
       patches, two unpushed branches backup-pushed). If the NV12 work exists it is in a clone this session cannot see —
       ask e1's successor or the operator before declaring it lost. Original: 1021 lines uncommitted in that repo (ADR-010). **28 Aug: shipvision lanes are the
