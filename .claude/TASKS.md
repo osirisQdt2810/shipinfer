@@ -3184,6 +3184,20 @@ hook down, for when the operator asked to see something before it is executed.
       table above states, so the two numbers are comparable. Spending ~1 GB of VRAM and the
       most delicate restructuring in this plane on a number measured under the old default is
       the mistake this line exists to prevent.
+      ATTEMPTED 14 Sep AND IT DID NOT REPRODUCE THE LOAD, recorded so the next person does
+      not spend the GPU time twice. `deploy/rootless/profile.sh --cpp` over the RTSP route
+      runs end to end and leaves the devices clean, but driven by the `--*-engine` flags with
+      hand-picked instance counts (det 2, seg 2, emb 2, ship-emb 1, all fp16) it does not
+      reach the design load on four A5000s: 50x20x60 s READ 13 055 frames (~218/s, not
+      ~1 000/s), ACCEPTED 2 725 and rejected 10 373 at the queue. The 12 Sep run this must be
+      compared against read 37 572 and accepted 32 445 in 40 s. Under nsys at 25 s the window
+      was mostly engine load -- `cuCtxCreate_v2` 758 s over 52 calls, `cuLaunchKernel` 1 125,
+      and `cudaStreamSynchronize` 92 calls totalling 0.6 ms, against 150 629 calls and
+      304.29 s on 12 Sep. So that report measures startup, not steady state, and NO fresh
+      number was obtained: the hold above rests on the #214 argument, not on a measurement.
+      WHAT IT NEEDS is the PLAN the 12 Sep run used -- `.artifacts/cpp/run.plan` is absent and
+      the engine flags are not the same experiment -- plus a window long enough that engine
+      load is not most of it (that run was 80.85 s of process for a 40 s measurement).
 
 - [x] THE-BUILD-NEVER-VECTORISES · MEASURED AND CLOSED 11 Sep. `scripts/build_csrc.py` compiles with `-O2` and nothing else
       (`optimise = ["-O0", "-g"] if args.debug else ["-O2"]`), and this box's g++ is 11.4, where
