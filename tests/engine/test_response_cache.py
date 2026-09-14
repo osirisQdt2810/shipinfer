@@ -11,6 +11,7 @@ model actually run", which is the only way to tell a hit from a fast miss.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import numpy as np
@@ -81,6 +82,29 @@ def _executions(server: InferenceServer) -> int:
     )
 
 
+def _await_cache(server: InferenceServer, timeout_s: float = 5.0, **minimums: int) -> dict:
+    """Wait until the cache's own stats reach `minimums`, and hand back the snapshot.
+
+    ONLY THE TRAILING WRITE IS EXPOSED. `model.py::_store_when_done` caches in a
+    `add_done_callback`, which `set_result` invokes after releasing the condition that woke
+    the caller; puts 1..n-1 are safe because that callback and the next dequeue are both the
+    worker thread's, so put k lands before request k+1 starts. Reproduced at load 66, 1 run
+    in 20. MINIMUMS rather than one count because `entries` cannot express the eviction case
+    -- it is already at `max_entries` before the put under test (#281 review).
+    """
+    deadline = time.monotonic() + timeout_s
+    stats: dict = {}
+    while time.monotonic() < deadline:
+        stats = dict(server.model("m").stats()["cache"])
+        if all(stats.get(key, -1) >= floor for key, floor in minimums.items()):
+            return stats
+        time.sleep(0.005)
+    raise AssertionError(
+        f"the cache stats never reached {minimums}; last seen {stats}. A done-callback that "
+        f"never runs is a real defect, not the ordering this helper exists to absorb"
+    )
+
+
 class TestCacheKeying:
     """Identical inputs hit; different inputs do not. Measured by the backend's own counter."""
 
@@ -89,6 +113,7 @@ class TestCacheKeying:
         with _server(_repo(tmp_path)) as server:
             first = server.infer_sync(_request(1.0), timeout=10)
             assert _executions(server) == 1
+            _await_cache(server, entries=1)
 
             second = server.infer_sync(_request(1.0), timeout=10)
             assert _executions(server) == 1, "the second identical request re-ran the model"
@@ -118,6 +143,10 @@ class TestCachedResponseIntegrity:
         (camera_id, frame_id) invariant exists to prevent."""
         with _server(_repo(tmp_path)) as server:
             server.infer_sync(_request(1.0, camera="cam_first", frame=1), timeout=10)
+            # WITHOUT THIS THE TEST PASSES VACUOUSLY. A miss returns a fresh response, which
+            # carries the asking tag anyway -- so a raced write turns this from a cache test
+            # into an assertion that `infer_sync` echoes its own request.
+            _await_cache(server, entries=1)
             hit = server.infer_sync(_request(1.0, camera="cam_second", frame=99), timeout=10)
 
         assert hit.context.camera_id == "cam_second"
@@ -128,6 +157,7 @@ class TestCachedResponseIntegrity:
         later hit. numpy raises at the offending line instead."""
         with _server(_repo(tmp_path)) as server:
             server.infer_sync(_request(1.0), timeout=10)
+            _await_cache(server, entries=1)
             hit = server.infer_sync(_request(1.0), timeout=10)
 
         with pytest.raises(ValueError):
@@ -151,7 +181,10 @@ class TestCacheAdmissionAndEviction:
         with _server(_repo(tmp_path)) as server:
             for value in range(6):  # max_entries is 4
                 server.infer_sync(_request(float(value)), timeout=10)
-            stats = server.model("m").stats()["cache"]
+            # `entries` CANNOT GATE THIS: it is already 4 after the fifth put, so waiting on
+            # it returns before the sixth -- the one that makes the second eviction -- has
+            # landed. Poll the evictions instead (#281 review).
+            stats = _await_cache(server, evictions=2)
 
         assert stats["entries"] <= 4
         assert stats["evictions"] >= 2
