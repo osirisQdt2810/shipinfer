@@ -38,6 +38,7 @@ from shipinfer.core.errors import (
 )
 from shipinfer.core.request import InferenceRequest, RequestContext, ResponseFuture
 from shipinfer.core.settings import ServerSettings
+from shipinfer.launch.control import CameraSpec
 from shipinfer.runners.inprocess import InprocessRunner
 from shipinfer.scheduling.queues import FairPriorityQueue
 from shipinfer.scheduling.work import WorkItem
@@ -51,6 +52,7 @@ from shipinfer.topology import (
     RowIndexed,
     Topology,
 )
+from shipinfer.topology import bridge as bridge_module
 from shipinfer.topology.registry import registry_for
 
 #: ``topology/ship_person.yaml``'s wiring: the same nine slots, the same ``when:`` conditions
@@ -1679,6 +1681,101 @@ class TestBackpressureAndFailure:
         assert isinstance(error, InferenceError)
         assert "carries no chain item" in str(error)
         assert "submit()" in str(error), "the message says how items are meant to arrive"
+
+
+#: The two-group chain's `mtmc` slots are `impl: shipvision`, so STARTING one needs the
+#: submodule. The third case below uses the ordinary chain and runs everywhere.
+needs_shipvision = pytest.mark.skipif(
+    not bridge_module.shipvision_available(),
+    reason="shipvision.mtmc is not importable; the submodule is not checked out",
+)
+
+
+class TestACameraNoGroupOwnsIsNamed:
+    """`MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED`: it was counted twice and named nowhere.
+
+    A slot cannot tell "another group's camera" from "nobody's" — on a healthy two-group
+    chain the first is every frame of every foreign camera — so the runner, which holds every
+    roster, is the only layer that can. The barrier's `cameras_not_mine` does not cover it:
+    its one reader is gated on `silent_cameras`, and an orphan can never BE silent.
+    """
+
+    def warnings(self, caplog) -> list[str]:
+        return [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno >= logging.WARNING and "no `mtmc` slot" in record.getMessage()
+        ]
+
+    @needs_shipvision
+    def test_a_camera_in_no_roster_is_named(self, running, caplog) -> None:
+        with caplog.at_level(logging.WARNING, logger="shipinfer.runners.inprocess"):
+            started = running(load_two_groups(), settings(workers=2))
+            started.add_camera(CameraSpec(camera_id="cam-orphan", url="replay://x"))
+
+        warned = self.warnings(caplog)
+        assert len(warned) == 1, warned
+        assert "cam-orphan" in warned[0], "the camera"
+        assert "mtmc_north" in warned[0] and "mtmc_south" in warned[0], "and the slots that"
+        " could have claimed it, because the fix is to add it to one of them"
+
+    @needs_shipvision
+    def test_a_camera_a_roster_does_name_is_not(self, running, caplog) -> None:
+        """The other half. On a two-group chain every camera is outside ONE roster, so a
+        check that fired on that would warn about every healthy camera there is."""
+        with caplog.at_level(logging.WARNING, logger="shipinfer.runners.inprocess"):
+            started = running(load_two_groups(), settings(workers=2))
+            started.add_camera(CameraSpec(camera_id="cam-n1", url="replay://x"))
+            started.add_camera(CameraSpec(camera_id="cam-s1", url="replay://y"))
+
+        assert self.warnings(caplog) == []
+
+    def test_a_one_group_chain_says_nothing(self, running, caplog) -> None:
+        """An unrostered chain places by load and the group is whatever ended up together —
+        the stated trade, and every chain in this repository. Warning there would fire on
+        every camera of every deployment."""
+        with caplog.at_level(logging.WARNING, logger="shipinfer.runners.inprocess"):
+            started = running(load(), settings(workers=2))
+            started.add_camera(CameraSpec(camera_id="cam-anything", url="replay://x"))
+
+        assert self.warnings(caplog) == []
+
+    @needs_shipvision
+    def test_one_rostered_slot_is_the_elements_warning_not_this_one(
+        self, running, caplog
+    ) -> None:
+        """Why the check needs TWO slots, which otherwise reads like an off-by-one.
+
+        Below two, a roster is a placement HINT and not a filter: `MtmcElement.camera_added`
+        associates an unlisted camera anyway and says so itself, so the camera has a global
+        id and is not an orphan. The element speaks here and the runner does not, and this
+        asserts exactly that division -- one warning, from the element.
+        """
+        one_rostered = textwrap.dedent("""
+            name: one_rostered
+            elements:
+              decode:   {impl: replay}
+              detect:   {impl: runner-detect, model: ship_detector}
+              track:    {impl: runner-track, after: detect}
+              mtmc_one: {kind: mtmc, impl: shipvision, scope: global,
+                         params: {group: quay, cameras: [cam-n1]}}
+              output:   {impl: runner-sink}
+            """)
+        chain = Topology.from_spec(ChainSpec.from_yaml(one_rostered))
+        with caplog.at_level(logging.WARNING):
+            started = running(chain, settings(workers=2))
+            started.add_camera(CameraSpec(camera_id="cam-orphan", url="replay://x"))
+
+        assert self.warnings(caplog) == [], "the runner stays quiet; the element speaks"
+        associated = [
+            record.getMessage()
+            for record in caplog.records
+            if "associating it anyway" in record.getMessage()
+        ]
+        assert len(associated) == 1 and "cam-orphan" in associated[0], (
+            "the element must still name the camera it associated against the roster; if this "
+            "goes quiet the runner's two-slot floor is hiding a real orphan"
+        )
 
 
 class TestWhatTheElementsAreTold:

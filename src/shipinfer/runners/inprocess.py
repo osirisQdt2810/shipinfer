@@ -445,6 +445,42 @@ class InprocessRunner(Runner):
             # refused from one that was placed and has yet to send a frame. See
             # `Element.camera_added` for what that costs.
             self._announce(Element.camera_added, camera.camera_id)
+            self._warn_if_no_group_owns(camera.camera_id)
+
+    def _warn_if_no_group_owns(self, camera_id: str) -> None:
+        """Say so when a camera belongs to no cross-camera group in a chain that has several.
+
+        HERE AND NOT IN THE ELEMENT, because this is the only layer that can tell the two
+        apart. A slot sees a camera outside its own roster and cannot know whether another
+        slot claims it -- on a healthy two-group chain that is every frame of every foreign
+        camera -- so it counts `not_mine` and says nothing. The runner holds every roster.
+
+        NOT A REFUSAL: a roster is written once and cameras arrive by API, so one unlisted
+        camera must not fail a fleet that is otherwise correct. Its objects simply carry no
+        fleet identity, which is the honest answer and an invisible one -- the event says
+        `partial: false` with no `global_id_group`, exactly like a chain with no `mtmc` at
+        all (`MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED`).
+        """
+        slots = cross_camera_slots(self._topology.nodes)
+        # TWO OR MORE, because below that a roster is a placement HINT and not a filter:
+        # `MtmcElement.camera_added` associates an unlisted camera anyway and warns in its own
+        # words, so there is no orphan to name and this would only say it twice. Routing --
+        # and with it the turn-away that strands a camera -- starts at the second slot.
+        if len(slots) < 2:
+            return
+        for node in slots:
+            declared = node.element.camera_group()
+            if declared is not None and camera_id in declared.cameras:
+                return
+        _LOG.warning(
+            "runner %r: camera %r is in no `mtmc` slot's `cameras:` -- %s name rosters and "
+            "none lists it. It is associated by nobody, so its objects publish a null "
+            "global_id and the event says nothing is missing. Add it to the group it belongs "
+            "to, or accept that it has no fleet identity",
+            self.name,
+            camera_id,
+            ", ".join(sorted(node.name for node in slots)),
+        )
 
     def remove_camera(self, camera_id: str, *, timeout_s: float = 5.0) -> bool:
         """Stop and forget one camera.
