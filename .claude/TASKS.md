@@ -3309,6 +3309,26 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       low enough to leave ~16 cores, then `deploy/rootless/profile.sh --cpp` with `run92.plan`;
       the plan is regenerable (`shipinfer plan -t topology/ship_person_cpu.yaml`, then set
       workers to 92). Nothing here is yours any more.
+      A FRESH CAPTURE AT 12 CAMERAS, 14 Sep, taken because that load FITS the headroom the
+      design load does not: 13.8 of 48 cores were free (measured off `/proc/stat`, not from the
+      load average), against the ~16 a comparable design-load run needs. Five GPUs were free;
+      four were used. 12 cameras x 20 fps x 20 s, `workers 24`, the pan fixture -- the same
+      shape as RESULTS.md's "Where the time actually goes".
+      IT IS REAL STEADY STATE this time, which my earlier attempts were not: 124 585
+      `cudaLaunchKernel` and 8 496 `cudaStreamSynchronize` totalling **11.07 s at 1.30 ms
+      average**, against 1 125 launches and 92 syncs in the startup-only capture.
+        instance threads                   28 (m0.0/m0.1 ... m3.1), confirmed from host_cpu
+        sync share of their wall           1.19% (1.31% net of ~3 s startup)
+        their CPU busy, share of wall      1.93%
+        avg per sync                       1.30 ms  (12 Sep, 12 cam: 0.89 ms; design load: 2.02)
+      AND I AM NOT CONCLUDING "3.2% -> 1.2%, THE LEVERS HELPED", because the confound runs the
+      wrong way for that claim: contention inflates thread WALL, which deflates any share of
+      it, so 1.19% is a LOWER BOUND on what a quiet box would report. The per-call average is
+      the one figure contention does not deflate, and it went UP (0.89 -> 1.30 ms), which is
+      what a timeshared host looks like. So this capture establishes that a usable profile is
+      obtainable at 12 cameras and what the absolute sync cost is; it does not re-price the
+      ring, and the 12-vs-50 camera spread (3.2% vs ~14%) means a 12-camera number never
+      could. The design-load run is still the one that decides it.
       THE HOLD ABOVE DOES NOT DEPEND ON THIS. #214 changed the sync's cost model whatever the
       fresh share turns out to be; the number decides how much the ring is worth, not whether
       the 12 Sep 14% still describes today's default.
