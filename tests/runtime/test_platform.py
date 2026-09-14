@@ -147,6 +147,11 @@ class TestSharingIsKeyedByDevice:
         import shipinfer.runtime.device as device_module
 
         monkeypatch.setattr(device_module, "device_count", lambda: 2)
+        # A fabricated count reaches the DRIVER now that the blocking-sync knob is the
+        # default: `_visible` is non-empty, so the ctor would `cudaSetDeviceFlags` on this
+        # box's device 0 and 1. `tests/conftest.py` refuses the knob for the whole tier; said
+        # here as well, because "the driver is a stub" is this class's own docstring.
+        monkeypatch.setattr(device_module, "prefer_blocking_sync", lambda devices: ())
 
     def test_aligned_with_the_visible_devices(self, two_devices) -> None:
         manager = DeviceManager(DeviceSettings(shared_by=[2, 1], validate_on_start=False))

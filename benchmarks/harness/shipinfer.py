@@ -360,26 +360,41 @@ def last_pipeline_metrics() -> Any:
 
 
 def _announce_blocking_sync(server: Any) -> None:
-    """Say which devices took the blocking-sync knob, and refuse an arm that got none.
+    """Say which devices took the knob, and refuse an arm that ASKED for it and got none.
 
-    Unconditional, into the run's own output, because the C++ arm prints it from
-    `cli/bench.cpp` and this plane only logged it at INFO under a `SHIPINFER_BENCH_LOG` nobody
-    sets: four design-load arms recorded zero lines about the flag two of them were named
-    after. And refused rather than warned -- a requested-but-unapplied arm is the flag-off arm
-    under another name, which is the one way an A/B misreports its own conditions.
+    Unconditional, into the run's own output: the C++ arm prints it from `cli/bench.cpp`
+    while this plane logged it at INFO under a `SHIPINFER_BENCH_LOG` nobody sets.
+
+    The REFUSAL is narrower -- `blocking_sync_asked_for`, an explicit ask rather than every
+    run. Nothing applying is a failed A/B arm when somebody named the variable and an
+    ordinary skip otherwise (no visible device, no loadable libcudart, a device that already
+    has a context), so raising there would abort a run over a diagnostic knob.
     """
-    from shipinfer.runtime.device import BLOCKING_SYNC_ENV, blocking_sync_requested
+    from shipinfer.runtime.device import (
+        BLOCKING_SYNC_ENV,
+        blocking_sync_asked_for,
+        blocking_sync_requested,
+    )
 
     if not blocking_sync_requested():
         return
     applied = tuple(server.devices.blocking_sync)
     print(f"blocking synchronise on device(s) {list(applied) or 'none'}", flush=True)
-    if not applied:
+    if applied:
+        return
+    if blocking_sync_asked_for():
         raise RuntimeError(
             f"{BLOCKING_SYNC_ENV} was set and no visible device took the flag, so this arm "
             f"is the flag-off arm under another name. The driver refuses "
             f"cudaSetDeviceFlags once a device has a primary context."
         )
+    print(
+        f"blocking synchronise is the default and no visible device took it, so this run "
+        f"synchronises by spinning; set {BLOCKING_SYNC_ENV}=1 to be refused instead of "
+        f"warned. Ordinary causes: no visible CUDA device, an image with no loadable "
+        f"libcudart, or a device that already has a context (cudaSetDeviceFlags -> 216).",
+        flush=True,
+    )
 
 
 def run_shipinfer(

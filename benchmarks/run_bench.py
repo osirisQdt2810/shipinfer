@@ -554,6 +554,10 @@ def _print_latency(result: Any) -> None:
     Printed and not only carried: a metric nothing surfaces is a comparison that needs a
     debugger, which is what both of these were until they were printed here.
     """
+    # DIFFERENT POPULATIONS, which the two `N frames` counts make visible and nothing
+    # explained: `reassembly_us` is observed for every finished frame including evictions,
+    # `frame_latency_us` only after a successful emit. So a gap here means EVICTED, not
+    # unstamped -- the opposite of what the same gap means on the C++ plane.
     windows = (
         ("reassembly", getattr(result, "steady_reassembly", None)),
         ("frame     ", getattr(result, "steady_frame_latency", None)),
