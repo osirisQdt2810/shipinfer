@@ -4632,6 +4632,34 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       `ship_detector` and `ship_segmenter` only, so on `ship_person_cpu` the two embedders'
       plans are outside the byte-identity guard entirely.
 
+- [x] MAIN-WENT-RED-ON-A-RACE-NOT-A-FLAKE · **TWO INDEPENDENT REDS, BOTH REAL, BOTH FIXED
+      (15 Sep). #283 and #284.**
+      (1) THE BAND RACE, and it is the ADR-005 inversion this project exists to prevent. CI's
+      coverage leg asserted `{BACKGROUND}` and got `{TRACKING_CRITICAL}` on
+      `test_a_refused_add_does_not_re_band_the_camera_that_is_already_running`, on a commit
+      whose diff was `.claude/*.md` only. `add_camera` wrote the band, called
+      `manager.add_camera`, and rolled back in the `except` -- but a camera refused as a
+      DUPLICATE is by definition already running, its decode thread publishing while this one
+      writes, and the band is read per frame. Between the write and the rollback a running
+      camera's frames went out in the lane a REJECTED request asked for. Fixed by refusing the
+      duplicate before writing anything (`IngestManager.__contains__`); the rollback stays for
+      the narrower case of two threads adding the same NEW id, named in the comment.
+      THE REGRESSION TEST ASSERTS THE PROPERTY, NOT THE TIMING: for an already-running camera
+      `record_placement` is never reached. Mutation-checked -- without the fix it fails showing
+      both writes, `[TRACKING_CRITICAL, BACKGROUND]`, with no interleaving needed. That matters
+      because the ORIGINAL test only fails when a frame lands in the window, which is why a slow
+      CI leg is what caught it and why it would pass on a good day.
+      (2) THE C++ TRACKING LANE, which then blocked #283. `test_a_broken_read_rebuilds_the_source`
+      polls until the factory hands back a second source, then asserts `frames_read >= 1` with
+      NO wait -- two different events, the asserted one strictly later. MEASURED rather than
+      assumed: a probe printing `frames_read` at the instant the old assertion fired reports
+      **2218-20139** over 30 runs here, so the local margin is thousands of frames and 40 runs
+      with the poll removed all passed. The defect is the ORDERING, not the duration; on a
+      contended runner the thread is descheduled between the rebuild and the first read.
+      WHAT I TOOK FROM IT: a green suite on this box is not evidence about either, because both
+      windows are invisible at this load. The coverage leg is slower than anything I run, and
+      that is exactly what made it the one to catch a real inversion.
+
 - [x] HOST-DECODE-IS-THE-HOST-BUDGET · **MEASURED 15 Sep: THE DECODE ROUTE IS WORTH 6-7x THE
       HOST BUDGET, AND IT IS THE ROUTE V156 ALREADY MANDATES.** Interleaved A/B at twelve
       cameras x 20 fps x 20 s on GPUs 1,2,4,6, three replicates each, arms alternating, ONE
