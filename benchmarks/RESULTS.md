@@ -224,6 +224,44 @@ SHIPINFER_BENCH_SOURCE=nvdec SHIPINFER_BENCH_WORKERS=92 \
   scripts/run_cpp_bench.sh wrep_92_1
 ```
 
+### Two knobs at the detector, now that the achieved batch is readable
+
+`per_device_batches` (#288) says the detector — the busiest model on every device at 121–125% —
+fills only **2.74 of its `max_batch` 8**. Both knobs that could change that, at saturation,
+GPUs 1,3,4,6, `workers 92`, three interleaved pairs each:
+
+| knob | achieved detector batch | tracked img/s (mean) | separated? |
+|---|---|---|---|
+| `max_queue_delay_us` 5 000 → 20 000 | 2.88 → **4.20** (1.46×) | 817.5 → 845.3 (+3.4 %) | **no** — ranges overlap |
+| detector instances 2 → 3 per GPU | 2.88 → **2.06** | 831.5 → 778.9 (−6.3 %) | **yes** — 2 wins |
+
+**The batch is fillable and it buys ~3% at most.** A 46% fuller batch moved throughput by less
+than the run-to-run spread, so the detector is not batch-starved in a way that matters.
+
+**A third instance is worse, and it is the only knob today whose ranges do not overlap.** The
+mechanism is the new counter's, and would have been invisible without it: a third instance
+splits one request stream across more queues, so each fills less — the achieved batch *falls*
+2.88 → 2.06 while `busy_pct` climbs 135% → 210%. Read without the batch column that is "more
+instances, more busy, less throughput" with no cause. `busy_pct` above 100% is the queueing.
+
+Latency was not the window's cost here and could not have been: at this offer `frame_us_p50` is
+~210 ms of queueing in both arms, so 15 ms of extra window is invisible. That price has to be
+read at the design load.
+
+So all three knobs measured at saturation today — workers (+5.7% mean, overlapping), the batch
+window (+3.4% mean, overlapping), a third instance (−6.3%, separated) — leave the 1.37× to
+4 500 where `[19.2, 21.2] GPUs at this chain's cost` already put it. The difference is that the
+knob space has now been searched rather than assumed.
+
+```bash
+# each cell, alternating; `model_repository/ship_detector/config.yaml` carries the knob
+#   max_queue_delay_us: 5000 | 20000      instance_groups[0].count: 2 | 3
+SHIPINFER_BENCH_IMAGE=shipinfer-gst:jammy-nvdec SHIPINFER_BENCH_GPUS=1,3,4,6 \
+SHIPINFER_BENCH_CAMERAS=50 SHIPINFER_BENCH_FPS=40 SHIPINFER_BENCH_SECONDS=40 \
+SHIPINFER_BENCH_SOURCE=nvdec SHIPINFER_BENCH_WORKERS=92 \
+  scripts/run_cpp_bench.sh delay_5000_1
+```
+
 ---
 
 ## The two arms

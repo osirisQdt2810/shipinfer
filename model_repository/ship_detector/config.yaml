@@ -33,14 +33,20 @@ instance_groups:
   # Empty `gpus` means "every visible device", so this file is unchanged between a 4-GPU dev
   # box and a 16-GPU node. Two instances per GPU because the detector is the hot path; two
   # streams each so the host-to-device copy of the next batch overlaps the current compute.
+  #
+  # TWO IS MEASURED: three per GPU is -6.3% tracked img/s at saturation, separated over three
+  # interleaved pairs, because more instances split one request stream across more queues --
+  # the achieved batch FALLS 2.88 -> 2.06 while occupancy climbs to 210%, which is queueing.
   - kind: KIND_AUTO
     count: 2
     streams: 2
 
 dynamic_batching:
   enabled: true
-  # 5 ms is well inside a 50 ms frame budget at 20 fps, and it is enough to fill a batch of 8
-  # when 50 cameras feed one pool.
+  # 5 ms is well inside a 50 ms frame budget at 20 fps. It does NOT fill a batch of 8, which
+  # this comment claimed until it was measurable: the achieved batch here is ~2.7-2.9
+  # (`per_device_batches`). Raising it to 20 ms does fill more -- 4.20 -- and buys at most
+  # ~3% throughput, inside the run-to-run spread, so the window stays where the latency is.
   max_queue_delay_us: 5000
   preferred_batch_sizes: [4, 8]
 

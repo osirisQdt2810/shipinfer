@@ -210,6 +210,32 @@ still had headroom — the offer, or the sample. A measurement below saturation 
 measurement; it is a measurement of something else, and a range read off too few runs is the
 same mistake with a different axis.
 
+**Then a counter that was never printed, and what it immediately paid for.** `rows/requests` is
+1.00 for a detector however well its batch window fills — one frame is one WorkItem and one row
+— so it reads as a batching answer and is not one. I treated it as a finding for a while before
+checking. `rows/batches` is the real number; both planes had counted `batches` since #167 and
+neither printed it. #288 prints it, and the first reading says the detector fills **2.74 of
+max_batch 8** while being the busiest model on every device.
+
+**Two knobs aimed at exactly that, and neither is a lever.** The batch window 5 → 20 ms fills
+the batch cleanly (2.88 → 4.20, separated) and moves throughput +3.4% with overlapping ranges.
+A third detector instance per GPU is **worse** — −6.3% tracked, the only knob today whose ranges
+do not overlap — and the counter is what explains it: three instances split one request stream
+across more queues, so each fills less and the achieved batch *falls* to 2.06 while `busy_pct`
+climbs to 210%. Without the batch column that reads as "more instances, more busy, less
+throughput" with no cause.
+
+**So the knob space is now searched rather than assumed**, and all three of today's knobs land
+in the same place: workers +5.7% overlapping, the window +3.4% overlapping, a third instance
+−6.3% separated. 4 500 still wants [19.2, 21.2] GPUs at this chain's cost.
+
+**And the review loop earned its keep.** #287 took seven rounds and every block was real: the
+correction kept quoting the run it was excluding — in the arm, then in the prose, then in the
+*numerator* of the chain-cost ratio (1 845 was the excluded run's partner, so I re-ran the
+matched pair rather than caveating it), then in three more files where the retracted sentence
+still read as current. The lesson is narrower than "review is good": a retraction lands where
+the numbers are, and the conclusion drawn from them lives somewhere else.
+
 ---
 
 ## 14 Sep — ten merged, four blocked items that were not, and a race that was not a timeout

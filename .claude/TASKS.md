@@ -3574,7 +3574,24 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       That is why five sequential puts are safe and the sixth is not. All four wait now; 40/40
       at load 64 against 1-in-20 before.
 
-- [!] API-WEDGED-REPORT-FLAKE-IS-NOT-A-TIMEOUT · **IT RECURRED 15 Sep, AFTER #224, SO THE
+- [!] API-WEDGED-REPORT-FLAKE-IS-NOT-A-TIMEOUT · **THE CHEAP HALF IS DONE (#286, merged
+      15 Sep): THE NEXT OCCURRENCE WILL CARRY ITS OWN DIAGNOSIS.** The failure used to render
+      one line -- `assert watcher.entered.wait(30.0)`. It now renders every live thread with
+      the last four frames of its stack (not the top one: a parked thread's top frame is always
+      `threading.py`, which names no caller) plus the POST task's own `repr`, because a
+      SUSPENDED coroutine has no frame in a stack dump and only the repr says whether the POST
+      ran at all. The dump is built at the `raise`, so a passing run pays nothing.
+      WHY THAT AND NOT A HUNT: at 1-in-25 over a 6.5-minute suite, bisecting costs hours and
+      this session had no hypothesis to aim them at. The first line of the dump is
+      `threading.active_count()`, which IS the one hypothesis nothing has tested -- the load
+      experiment used 60 separate PROCESSES, not threads in this interpreter. In isolation the
+      dump reads `2 live threads`; in the full suite, where the flake lives, that number is the
+      measurement this hunt has never had.
+      [!] WHAT IS LEFT FOR YOU IS A BUDGET QUESTION, NOT A TECHNICAL ONE: wait for the next
+      instrumented occurrence (my default, and it costs nothing), or say the word and I will
+      spend the hours bisecting the full suite for the interacting test. Nothing is blocked
+      either way -- the suite is green and the diagnostic is merged.
+      PREVIOUS: **IT RECURRED 15 Sep, AFTER #224, SO THE
       `[x]` BELOW WAS PREMATURE -- reopened with what today adds.** Same assertion as every
       previous failure: `assert watcher.entered.wait(30.0), "the POST never asked for a
       report"` at `test_streams.py:837`. So #224's rewrite (two tasks, not two threads)
@@ -5249,6 +5266,31 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       hiding in the model mix. **[19.2, 21.2] GPUs** at this chain's cost is the honest shape --
       4 500 over tracked [848.1, 939.2] a quad -- and it was "~22" while the arithmetic ran on
       one run. The sixteen-GPU figure stays an extrapolation from four either way.
+      **AND TWO MORE SCHEDULING KNOBS WERE MEASURED 15 Sep, BOTH AIMED AT THE MEASURED
+      BOTTLENECK, NEITHER A LEVER.** #288's new `per_device_batches` says the detector -- the
+      busiest model on every device at 121-125% -- fills only **2.74 of its max_batch 8**, so
+      the two knobs that could change that were worth trying. Saturation, GPUs 1,3,4,6,
+      `workers 92`, three interleaved pairs each:
+        `max_queue_delay_us` 5 000 -> 20 000   batch 2.88 -> 4.20 (SEPARATED, 1.46x)
+                                               tracked 817.5 -> 845.3 mean, ranges OVERLAP
+        detector instances 2 -> 3 per GPU      batch 2.88 -> **2.06**
+                                               tracked 831.5 -> 778.9, **SEPARATED, 2 wins**
+      SO THE BATCH IS FILLABLE AND IT BUYS ~3% AT MOST -- a 46% fuller batch moved throughput
+      by less than the run-to-run spread, which is the same answer the worker pool gave. The
+      detector is not batch-starved in a way that matters.
+      AND A THIRD INSTANCE IS WORSE, which is the day's only knob whose ranges do not overlap:
+      -6.3% tracked. THE MECHANISM IS THE NEW COUNTER'S and would have been invisible without
+      it -- a third instance splits one request stream across more queues so each fills less,
+      and the achieved batch FALLS 2.88 -> 2.06 while `busy_pct` climbs 135% -> 210%. Read
+      without the batch column that is "more instances, more busy, less throughput" with no
+      cause; `busy_pct` over 100% is the queueing, not the work.
+      LATENCY WAS NOT THE WINDOW'S COST HERE AND COULD NOT HAVE BEEN: at this offer
+      `frame_us_p50` is ~210 ms of queueing in both arms, so 15 ms of extra window is
+      invisible. That price has to be read at the DESIGN load, not at the ceiling.
+      THE TALLY, all three knobs measured at saturation today: workers 92->140 +5.7% mean and
+      overlapping; the batch window +3.4% mean and overlapping; a third instance -6.3% and
+      separated. **No scheduling knob closes 1.37x** -- which is what [19.2, 21.2] GPUs at this
+      chain's cost already says, now with the knob space actually searched rather than assumed.
       WHAT IS STILL YOURS, and it is smaller than before: whether 4 500 on sixteen GPUs is a
       target to keep. Nothing I can measure moves the chain there.
       ORIGINAL: THE QUESTION IT SHARES HAS CHANGED, 14 Sep: both
