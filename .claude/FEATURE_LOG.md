@@ -48,6 +48,8 @@ Two things fell out: #214's -40% host CPU confirmed at the design load for the f
 (19.9 -> 6.9 ms an image), and the worker plateau re-swept — 92 stays, because 140 and 188 buy
 accepted frames and lose tracked ones. Seam change upstream: shipvision #18 decoupled
 torchvision from the torch backend, pinned here by #282.
+**Appended 15 Sep (#287): "lose tracked ones" is WITHDRAWN**, measured below saturation; over
+sixteen runs at the ceiling tracked does not separate. 92 stays on 140's cost, not on its loss.
 
 ## 2026-09-14 — the tracking parity case, and the price it put on the last register entry
 

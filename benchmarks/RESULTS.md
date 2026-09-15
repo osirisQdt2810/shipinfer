@@ -45,11 +45,22 @@ and `videoconvert` present, `nvh264dec` and `nvvideoconvert` absent.
 
 Extrapolated linearly to sixteen GPUs that is [3203, 3278] tracked img/s — **and that is the
 design-load reading, not the chain's capacity.** This run was offered 1 000 img/s, which it
-refuses 13% of; offered 2 000 it tracks **952 img/s** on the same four cards and stays correct
-there (`events_incomplete` 0, `collector_timeouts` 0, mtmc admitting 76%). So the capacity
-reading is **3 809 on sixteen GPUs, 1.27× the 3 000 target**, against 1.07–1.09× from the
-design-load figure. The extrapolation is an assumption either way, and the box was contended,
-so both are lower bounds.
+refuses 13% of; offered 2 000 it tracks **[848.1, 939.2] img/s** over eight interleaved runs on
+four A5000s — **1,3,4,6, against the design-load row's 1,2,4,6**, so offer is not the only thing
+that changed between these two lines. So the capacity reading is **[3392, 3757] on sixteen GPUs,
+[1.13, 1.25]× the 3 000 target**, against 1.07–1.09× from the design-load figure.
+
+**It stays correct at that ceiling, and this is re-captured over the eight rather than carried
+over from the withdrawn run:** `events_incomplete` [0, 13] of 35 374–38 840 complete
+(four of eight are exactly 0), `collector_timeouts` equal to it in every run, and mtmc
+admitting [70.0, 76.0] % of observations with 138–211 global ids.
+
+That row read "952, 3 809, 1.27×" until the eight replicates existed — and **952.4 is not the
+best of the eight; it is the excluded ninth run**, which the eight top out below at 939.2. So
+the headline rested entirely on a run this page now declares a different box state: this is a
+retraction of provenance, not of sampling. The conclusion survives because the retained floor
+still clears the target. The extrapolation is an assumption either way, and the box was
+contended, so these are lower bounds.
 
 ### What the chain actually costs: 12%, not 5.87x
 
@@ -67,15 +78,27 @@ At 1 000 offered that table measures the **offer**, not the system: detect-only 
 `frames_dropped 0` and 83–89% detector busy, so it was keeping up with headroom to spare.
 Offering **2 000** instead finds the ceilings:
 
-| chain | accepted | dropped | detector busy |
-|---|---|---|---|
-| `detect_only.yaml` | **1 845 img/s** | 0.4% | 107–115% |
-| full | **977 img/s** | **48%** | 123–126% |
+Both arms at `workers 92` on GPUs 1,3,4,6, **alternated within one sitting**, three runs each —
+which matters twice over: this page shows the ceiling is worker-count-dependent, and a ratio
+whose two terms come from different sittings is not a ratio.
 
-**The full chain tops out near 977 img/s on four GPUs; detect-only is still barely dropping at
-1 845.** So the ten extra invocations cost **1.89×**. The 1.14× above is an artefact of
-comparing two unsaturated shapes — quoted here only because it is the mistake this table
-exists to correct.
+| chain | accepted (n=3) | dropped (of read) | detector busy |
+|---|---|---|---|
+| `detect_only.yaml` | **[1 805.2, 1 873.6] img/s** | [0.2, 2.4] % | 110–124% |
+| full | **[882.0, 950.5] img/s** | **[49.2, 52.9] %** | 112–127% |
+
+**The ten extra invocations cost [1.90, 2.12]×**, pairing each run with its partner
+(1.90 / 2.02 / 2.12). The 1.14× above is an artefact of comparing two unsaturated shapes —
+quoted here only because it is the mistake this table exists to correct.
+
+This table said `1 845 · 977 · 48% · 1.89×` until the replicates existed, and **both** of those
+figures came from one withdrawn sitting — 977 is the run excluded below, and 1 845 was its
+partner, so the ratio inherited the box state this page had already disowned. Re-running the
+pair settles it rather than caveating it: the old numbers sit *inside* the new intervals
+(1 845 in [1 805.2, 1 873.6]; 1.89× just below [1.90, 2.12]), so the magnitude was right and
+the provenance was not. The full chain's eight-run ceiling across the wider sweep is
+[884.5, 971.1]; the [882.0, 950.5] above is this sitting's own three, which is what the ratio
+is computed from.
 
 Which corrects the like-for-like pair above. That pair compared the baseline's **saturated**
 938.6 against our 821–836 from a run offered only 1 000 img/s — below our own ceiling. Both at
@@ -83,12 +106,21 @@ saturation:
 
 | | frames | × invocations | model-invocations/s |
 |---|---|---|---|
-| baseline | 938.6 | 2.00 | 1 877 |
-| full chain | **977.0** | 11.74 | **11 470** |
-| detect only | 1 845 | 1.00 | 1 845 |
+| baseline | 938.6 (saturated) | 2.00 | 1 877 |
+| full chain | **[884.5, 971.1]**, n=8 | 11.74 | **[10 384, 11 401]** |
+| detect only | **[1 805.2, 1 873.6]**, n=3 | 1.00 | [1 805, 1 874] |
 
-**1.04× by frames, 6.11× by model work, and 0.98× per invocation** — parity per unit of work.
-The 0.85–0.89× deficit was their ceiling against our mid-range.
+**[0.94, 1.03]× by frames — parity, straddling 1.0 — and [5.53, 6.07]× by model work**, with
+**[0.96, 1.00]×** per invocation on the one-model arm. The 0.85–0.89× deficit was their ceiling
+against our mid-range, and that correction stands. The detect-only row read `1 845 (n=1)` and
+`0.98×` until it was re-run three times in one sitting with the full chain — it came from the
+same withdrawn sitting as the 977, and 0.98 falls inside the new interval.
+
+This row read "977.0 · 1.04× · 6.11×" until the replicates existed — and the 977 is the
+**excluded** run, taken an hour earlier by a different script, whose 976.6 sits *above* the
+eight retained runs' top of 971.1. So it was never a best-of-n drawn from the kept sample: the
+figure rested on a box state this page now calls non-comparable. The correction's direction
+still holds; its point figure did not belong to the arm it was quoted for.
 
 Caveat: one process, four GPUs. The deployment is a process per shard, so this ceiling scales
 with processes; what it says is that adding cards to *one* process stops paying early.
@@ -141,6 +173,56 @@ the baseline's 1 877. Which of those a "5×" means is a question about the targe
 these numbers. Note also that at fp16 with 1 000 img/s offered the baseline reports
 **SATURATED**, so in this regime it is a real ceiling rather than the offer-bound behaviour
 recorded at other loads.
+
+### The worker count, re-swept at the ceiling instead of at the design load
+
+An earlier sweep the same day ranked 92 workers above 140 on tracked img/s and concluded that
+more workers *lose* tracked frames. It was run at 1 000 img/s offered — below this chain's own
+ceiling — so it ranked the offer. Re-run at **2 000 offered**: sixteen runs, eight per arm,
+strictly alternated A/B by one script in one sitting, 50 cameras × 40 fps × 40 s,
+`--source nvdec`, GPUs 1,3,4,6, workers the only variable. (The design-load row further up uses
+1,2,4,6. Within this sweep the device set is fixed, so the 92-vs-140 comparison is clean; the
+design-load-to-ceiling comparison at the top of this page is not, and now says so there.)
+
+| workers | n | accepted img/s | untracked | **tracked img/s** | tracked mean (sd) |
+|---|---|---|---|---|---|
+| 92 | 8 | [884.5, 971.1] | [3.0, 4.1] % | **[848.1, 939.2]** | 893.2 (37.1) |
+| 140 | 8 | [979.0, 1149.5] | [9.5, 12.4] % | **[857.7, 1040.8]** | 943.8 (56.2) |
+
+Three readings, and they do not all point the same way:
+
+* **Accepted separates** and 140 wins — the ranges do not touch over sixteen runs, 1.144×.
+* **Untracked separates** too, which *confirms* the mechanism the earlier sweep named: more
+  workers scatter a camera's consecutive frames across more threads, and the tracker refuses
+  roughly three times the fraction. It is the one reading that separates at both loads.
+* **Tracked does not separate.** 140's mean is 5.7% higher, but its floor (857.7) is below
+  92's mean (893.2).
+
+**At four replicates an arm it looked otherwise, and that is worth keeping.** The first eight
+runs gave 92 a ceiling of 939.225 and 140 a floor of 946.175 — separated by **6.95** img/s.
+Four more
+runs per arm turned that gap into an 81.5 img/s overlap. A separation smaller than either
+arm's own spread cannot be seen at n=4.
+
+One earlier run at the same settings (tracked 952.4) is **excluded**: it was taken by a
+different script an hour before and was never part of an alternation, so it is a replicate of
+a different box state rather than of this arm.
+
+So the withdrawal is of the *ranking*, not the mechanism. `WORKERS_PER_GPU=23` stays — now
+because 140 pulls 14.4% more frames through the whole model chain for a tracked mean 5.7%
+higher that no single run can tell from 92's, which is device time spent on frames the tracker
+then refuses.
+
+Extrapolated ×4 to sixteen GPUs, and therefore an extrapolation: 92 → [3392, 3757],
+140 → [3431, 4163]. Both clear 3 000 at the floor; neither reaches 4 500 at the ceiling.
+
+```bash
+# each cell, strictly alternating 92 / 140 so one box cancels drift between its own arms
+SHIPINFER_BENCH_IMAGE=shipinfer-gst:jammy-nvdec SHIPINFER_BENCH_GPUS=1,3,4,6 \
+SHIPINFER_BENCH_CAMERAS=50 SHIPINFER_BENCH_FPS=40 SHIPINFER_BENCH_SECONDS=40 \
+SHIPINFER_BENCH_SOURCE=nvdec SHIPINFER_BENCH_WORKERS=92 \
+  scripts/run_cpp_bench.sh wrep_92_1
+```
 
 ---
 
@@ -347,9 +429,12 @@ page was counting refusals.
 > section at the top of this file. The sweep above ran with decode on the HOST, which is what
 > held it to ~260: at [61.8, 75.7] ms of host CPU a frame the box could not read the offered
 > load, let alone track it. On `--source nvdec` the same chain tracks 3.1× that. What the
-> paragraph above gets right and keeps is the *shape* — tracked rate is what counts and
-> workers past the plateau buy refusals, re-confirmed on the new route (92 → 140 workers
-> moves accepted up and TRACKED down).
+> paragraph above gets right and keeps is the *shape* — tracked rate is what counts, and
+> workers past the plateau buy refusals: 92 → 140 moves accepted UP (1.144×) and triples the
+> refused fraction (3.0–4.1 % → 9.5–12.4 %), both separated over sixteen runs.
+> **What does NOT hold is "and TRACKED down", which this line claimed until 15 Sep:** at n=8
+> tracked does not separate at all. See *The worker count, re-swept at the ceiling instead of
+> at the design load* above.
 
 **Why, and it is not a defect.** One shared worker pool reorders a camera's frames, and a
 per-camera tracker refuses a frame that does not advance its own stream

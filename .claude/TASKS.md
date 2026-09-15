@@ -2924,10 +2924,16 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       AND THE RE-OPEN CONDITION IS TECHNICALLY MET BUT STILL NOT THE DEPLOYMENT'S SHAPE: today's
       fifty-on-four runs do have non-zero `queue_rejected` (13-19.6%), which is what this item
       names as the trigger to re-read. Re-read, and the table says what it said -- at 12.5
-      cameras a device, raising workers 92 -> 140 triples untracked (3.3% -> 10.5%) and LOWERS
-      tracked img/s (`WORKER-PLATEAU-ON-THE-NVDEC-ROUTE`). That is the reordering this item
-      describes, at 4x the deployment's density, so it remains evidence about an overloaded box
-      rather than about the shipping configuration. Fifty on sixteen is still the load this box
+      cameras a device, raising workers 92 -> 140 triples untracked (3.3% -> 10.5%). That is the
+      reordering this item describes, at 4x the deployment's density, so it remains evidence
+      about an overloaded box rather than about the shipping configuration.
+      THE UNTRACKED HALF IS THE HALF THAT REPRODUCED, and only that half: a sixteen-run
+      re-sweep at 2 000 offered separates untracked cleanly (92 in [3.0, 4.1]%, 140 in
+      [9.5, 12.4]%, eight interleaved runs each) -- the mechanism this item names holds at the
+      ceiling too, and it is the only one of the three readings that separates at BOTH loads. The clause
+      that used to follow it here, "and LOWERS tracked img/s", was measured at 1 000 offered
+      and is withdrawn; see `WORKER-PLATEAU-ON-THE-NVDEC-ROUTE`. Nothing about this item's own
+      claim rests on it. Fifty on sixteen is still the load this box
       cannot generate.
       measured 12 Sep. It was OPENED 11 Sep as the chain's real ceiling, and that is the half
       this item closes against -- the new clause was spliced ahead of the old headline and the
@@ -4791,8 +4797,47 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       improvement -- what improved is host CPU an image, 19.9 -> 6.9 ms, which is #214's -40%
       confirmed at the design load. Fixed in row 7 and in `V167-GSTREAMER-ONLY-3000`.
 
-- [x] WORKER-PLATEAU-ON-THE-NVDEC-ROUTE · **RE-SWEPT 15 Sep, AND THE ANSWER IS DON'T: MORE
-      WORKERS BUY ACCEPTED FRAMES AND LOSE TRACKED ONES.** The 23-per-GPU plateau in
+- [x] WORKER-PLATEAU-ON-THE-NVDEC-ROUTE · **THE DEFAULT STAYS AT 23 PER GPU, BUT NOT FOR THE
+      REASON BELOW: "more workers LOSE tracked frames" WAS MEASURED BELOW CAPACITY AND IS
+      WITHDRAWN (15 Sep, re-swept at 2 000 offered).** Same error as `C1`'s and V167's on the
+      same day -- a ranking taken at 1 000 offered ranks the OFFER, and this chain's ceiling
+      is above it. **SIXTEEN runs, EIGHT PER ARM, strictly alternated A/B by one script in one
+      sitting**, 50 cameras x 40 fps x 40 s, `--source nvdec`, GPUs 1,3,4,6, workers the only
+      variable:
+        workers  92  (n=8)  accepted [ 884.5,  971.1] mean  925.2   untracked [ 3.0,  4.1]%
+                            **TRACKED [848.1,  939.2] mean 893.2, sd 37.1**
+        workers 140  (n=8)  accepted [ 979.0, 1149.5] mean 1058.5   untracked [ 9.5, 12.4]%
+                            **TRACKED [857.7, 1040.8] mean 943.8, sd 56.2**
+      READ AS RANGES, and they say three different things at once:
+        * ACCEPTED separates cleanly and 140 wins -- no overlap over sixteen runs, 1.144x.
+        * UNTRACKED separates cleanly too, and **the mechanism this item named is CONFIRMED**:
+          more workers really do scatter a camera's consecutive frames across more threads, and
+          the tracker really does refuse ~3x the fraction. That half was right at both loads.
+        * TRACKED -- the metric V164 fixed -- **does NOT separate**. 140's mean is 5.7% higher,
+          and its FLOOR (857.7) is below 92's MEAN (893.2). Neither "140 loses tracked frames"
+          nor "140 wins" is supported by one run at either setting.
+      **THE n=4 READING SAID THE OPPOSITE, AND THAT IS THE LESSON UNDER THE LESSON.** At four
+      replicates an arm the two separated -- 92 topped out at 939.2, 140 bottomed at 946.2, a
+      **6.95** img/s gap (939.225 against 946.175, unrounded so it can be checked against the
+      table) -- and #287's review was right to compute it. Four more replicates an arm turned that
+      gap into an 81.5 OVERLAP. A separation smaller than either arm's own
+      spread is a coin-flip dressed as a result, and n=4 could not see that.
+      ONE RUN WAS DROPPED FROM THE ARM, deliberately, and #287's review is why: an earlier
+      `sat` run at the same settings (tracked 952.4) was taken by a DIFFERENT script an hour
+      before, so it was never part of an alternation and belongs to a different box state.
+      Keeping 92's low reading while quietly keeping a borrowed high one was an asymmetry, and
+      it is gone -- all sixteen runs above come from one interleaved script.
+      SO THE DEFAULT STAYS, ON AN EFFICIENCY ARGUMENT RATHER THAN A LOSS ONE: 140 workers pull
+      14.4% more frames through the whole model chain for a tracked mean 5.7% higher that no
+      single run can tell from 92's. That is device time spent on frames the tracker refuses.
+      SIXTEEN-GPU EXTRAPOLATION, x4 and therefore an extrapolation rather than a measurement:
+      92 -> [3392, 3757], 140 -> [3431, 4163]. Both clear V167's 3 000 at the floor; neither
+      reaches V165's 4 500 at the ceiling.
+      WHAT WOULD SETTLE IT is not more replicates -- sixteen runs is where this stopped paying,
+      and the arms still overlap. It is a metric that charges for the refused frames, or the
+      reordering fixed at the source (`PIPELINE-WORKERS-NEED-CAMERA-AFFINITY`), after which the
+      accepted-frame win would carry through to tracked.
+      ORIGINAL (drawn at 1 000 offered; its conclusion is the one withdrawn above): The 23-per-GPU plateau in
       `run_cpp_bench.sh` was measured on the HOST-DECODE route and its own comment says
       "re-sweep before trusting it", so with decode off the host it was worth redoing. Design
       load, `--source nvdec`, four GPUs, one variable:
@@ -4815,6 +4860,9 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       CONCLUSION: `WORKERS_PER_GPU=23` stays, now for a measured reason on THIS route rather
       than an inherited one. `run_cpp_bench.sh`'s comment that the per-GPU form is an
       assumption still stands -- this re-sweep was at four devices, like the last one.
+      (The 188 arm was not re-run at saturation: it lost on BOTH accepted and tracked at
+      1 000 offered, and its stated cause -- ingest threads and workers competing for cores --
+      gets worse, not better, when the offer doubles.)
 - [x] **V167-GSTREAMER-ONLY-3000 · ANSWERED 15 Sep: 3 000 IS MET ON THE ROUTE YOU MANDATED,
       and the lever was that route rather than a choice you had to make.** [3203, 3278] tracked
       img/s extrapolated to sixteen GPUs from three runs at the design load, host [4.9, 5.2] of
@@ -4825,13 +4873,24 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       `--source nvdec` against `--source gstreamer`, [9.7, 10.2] ms of host CPU an image
       against [61.8, 75.7] -- and V156 had already mandated that route.
       **AND THE FIGURE ABOVE IS UNDERSTATED, because it too was taken at 1 000 offered -- below
-      this chain's own ceiling (15 Sep, same mistake as `C1`'s).** Offered 2 000 the chain
-      tracks **952 img/s** on four GPUs, and stays correct at that ceiling: `events_complete`
-      39 064, `events_incomplete` **0**, `collector_timeouts` **0**, mtmc still admitting 76%
-      with 157 identities. So:
-        at the design load (1 000 offered)   tracked [800.8, 819.6]   16 GPUs [3203, 3278]
-        at its CEILING     (2 000 offered)   tracked **952**          16 GPUs **3809**
-      Against the 3 000 target that is **1.27x rather than 1.07-1.09x**. Both readings are
+      this chain's own ceiling (15 Sep, same mistake as `C1`'s).** So:
+        at the design load (1 000 offered, GPUs 1,2,4,6)   tracked [800.8, 819.6]   16 GPUs [3203, 3278]
+        at its CEILING     (2 000 offered, GPUs 1,3,4,6)   tracked [848.1, 939.2]   16 GPUs [3392, 3757]
+      Against the 3 000 target that is **[1.13, 1.25]x rather than 1.07-1.09x**.
+      THE DEVICE SETS DIFFER AND THE ROWS NOW SAY SO (#287 r4): GPU 2 against GPU 3, so the
+      offer is not the only variable between these two lines. It was "the same four cards"
+      until the ceiling row became the new sweep's, whose quad this page knows.
+      IT STAYS CORRECT AT THAT CEILING, AND THESE COUNTERS ARE THE RETAINED EIGHT'S OWN --
+      not the withdrawn run's, which is what this line said for one round: `events_complete`
+      35 374-38 840, `events_incomplete` **[0, 13]** (four of the eight exactly 0),
+      `collector_timeouts` equal to it every time, mtmc admitting **[70.0, 76.0]%** with
+      138-211 global ids.
+      THE CEILING ROW IS A RANGE AND WAS BRIEFLY A POINT: it read "tracked 952, 16 GPUs 3809,
+      1.27x" from ONE run. **That run is the EXCLUDED ninth, not the best of the eight** --
+      the eight top out at 939.2 and never reach 952.4 -- so the headline rested entirely on a
+      box state this item now calls non-comparable. That is a retraction of PROVENANCE rather
+      than of sampling, and it is the stronger of the two. The conclusion is unchanged because
+      the retained FLOOR clears the target -- 3 392 against 3 000. Both readings are
       real and they answer different questions: the first is what 50 cameras x 20 fps costs on
       FOUR cards (12.5 cameras a card, where it refuses 13%); the second is what the chain can
       do. The target question -- can sixteen GPUs carry 3 000 -- is a capacity question, so the
@@ -5119,9 +5178,16 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       3 000 is MET on this route, V165's 4 500 is not. 4 500 needs 1 125 tracked img/s a
       GPU-quad, i.e. **1.37x** what the chain now does.
       WHAT 1.37x CANNOT COME FROM, because this session measured each: not the host budget --
-      it is [4.9, 5.2] of 48 cores, so the host is no longer the wall; not more workers --
-      92 -> 140 -> 188 LOWERS tracked img/s (`WORKER-PLATEAU-ON-THE-NVDEC-ROUTE`); not the two
-      merged host-budget levers, which act on 4-19% of host CPU. The devices are the wall now,
+      it is [4.9, 5.2] of 48 cores, so the host is no longer the wall; not the two merged
+      host-budget levers, which act on 4-19% of host CPU.
+      **AND NOT MORE WORKERS EITHER, but the reason changed under re-measurement (15 Sep).**
+      This line used to cite "92 -> 140 -> 188 LOWERS tracked img/s"; that ranking was taken at
+      1 000 offered and is withdrawn (`WORKER-PLATEAU-ON-THE-NVDEC-ROUTE`). At 2 000 offered
+      over sixteen interleaved runs, 140 tracks [857.7, 1040.8] against 92's [848.1, 939.2] --
+      a 5.7% higher MEAN whose ranges overlap, bought with 14.4% more accepted frames. So the
+      thread pool is not nothing and it is not a lever either: x4 that is [3431, 4163] against
+      4 500, where even 140's best run is 7.5% short and its floor is below 92's ceiling.
+      A knob whose gain no single run can confirm does not close a 1.37x gap. The devices are the wall now,
       and this item's own table says where: **11.74 model invocations per image**, of which
       `person_embedder` is 7.80 and `ship_segmenter` 1.47 at a 640x640 crop.
       **AND THE CHEAPER-CHAIN LEVER WAS MEASURED RATHER THAN ASSUMED, 15 Sep -- IT IS NOT
@@ -5152,26 +5218,37 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       ceiling of any kind can be read off it.
       SO I OFFERED 2 000 INSTEAD OF 1 000, AND THAT CHANGES THE ANSWER AGAIN -- the third time
       in this thread, and the reason is always the same: a comparison below saturation measures
-      the offer, not the system. 50 cameras x 40 fps, same four GPUs:
-        detect only   accepted **1 845 img/s**   dropped 0.4%   detector 107-115% busy
-        full chain    accepted **977 img/s**     dropped **48%**  detector 123-126% busy
-      **The full chain's ceiling on four GPUs is ~977 img/s. Detect-only is still barely
-      dropping at 1 845.** So the 10.74 extra invocations cost **1.89x**, not the 1.14x the
-      1 000-offered run showed and not the 12% I wrote from it -- BOTH WITHDRAWN. At 1 000
+      the offer, not the system. 50 cameras x 40 fps, GPUs 1,3,4,6, both at `workers 92` -- which
+      this page now knows is part of the specification, since the ceiling moves with it -- and
+      **the two chains ALTERNATED within one sitting, three runs each**:
+        detect only   accepted **[1 805.2, 1 873.6]**  dropped [0.2, 2.4]% of read   110-124% busy
+        full chain    accepted **[  882.0,   950.5]**  dropped [49.2, 52.9]% of read 112-127% busy
+      **So the 10.74 extra invocations cost [1.90, 2.12]x**, pairing each run with its partner
+      (1.90 / 2.02 / 2.12) -- not the 1.14x the 1 000-offered run showed and not the 12% I wrote
+      from it, BOTH WITHDRAWN.
+      THIS ROW READ "1 845 / 977 / 48% / 1.89x" AND **BOTH ARMS CAME FROM ONE WITHDRAWN SITTING**
+      (#287 r3 found the 977, r4 found that 1 845 was its partner). A ratio whose numerator and
+      denominator come from a box state the page has disowned is not saved by labelling the
+      denominator `n=8`. RE-RUN RATHER THAN CAVEATED, and the answer is reassuring: 1 845 falls
+      INSIDE the new [1 805.2, 1 873.6] and 1.89x just below [1.90, 2.12], so the magnitude was
+      right and only the provenance was wrong. The eight-run ceiling from the wider sweep is
+      [884.5, 971.1]; the [882.0, 950.5] above is this sitting's own three, which is what the
+      ratio is computed from. At 1 000
       offered neither shape was at its ceiling, so that comparison measured the offer.
       WHICH ALSO RETIRES THE SEGMENTER NUMBER ABOVE: 1.01-1.05x was taken at 1 000 offered,
       below both ceilings, so it does not price the segmenter either. What survives from it is
       the methodological point -- occupancy percentages did not predict it -- and that point is
-      now stronger, because occupancy did not predict THIS either (detect-only at 107-115% busy
-      still had 1 845 img/s in it).
+      now stronger, because occupancy did not predict THIS either (detect-only at 110-124% busy
+      still had [1 805, 1 874] img/s in it).
       SO THE MODELS DO COST, AND THE OPERATOR'S LEVER IS REAL AFTER ALL: a chain doing one
-      invocation an image runs 1.89x one doing 11.74. What that buys against 4 500 is a
+      invocation an image runs [1.90, 2.12]x one doing 11.74. What that buys against 4 500 is a
       product question I cannot answer -- detect-only is not the product.
       SO THE ANSWER TO THIS ITEM IS NOT A PRODUCT DECISION AFTER ALL: 4 500 NEEDS DEVICES, and
       specifically more SHARDS rather than more cards per shard.**
       Trimming the chain's largest non-detector model gets 1-5%; the remaining 1.31x is not
-      hiding in the model mix. ~22 GPUs at this chain's cost is the honest shape, and the
-      sixteen-GPU figure stays an extrapolation from four either way.
+      hiding in the model mix. **[19.2, 21.2] GPUs** at this chain's cost is the honest shape --
+      4 500 over tracked [848.1, 939.2] a quad -- and it was "~22" while the arithmetic ran on
+      one run. The sixteen-GPU figure stays an extrapolation from four either way.
       WHAT IS STILL YOURS, and it is smaller than before: whether 4 500 on sixteen GPUs is a
       target to keep. Nothing I can measure moves the chain there.
       ORIGINAL: THE QUESTION IT SHARES HAS CHANGED, 14 Sep: both
@@ -6347,15 +6424,27 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       **CORRECTED 15 Sep, AND IT INVERTS THE HEADLINE: 0.85-0.89x WAS MEASURED BELOW OUR OWN
       CEILING.** The baseline's 938.6 is a SATURATED figure -- the harness says so -- while our
       821-836 came from a run offered 1 000 img/s, which our chain does not saturate at. Offered
-      2 000 it accepts **977** (48% dropped, so that IS the ceiling). Both arms at saturation:
-        baseline     938.6 img/s x  2.00 invocations =  1 877 model-invocations/s
-        full chain   977.0 img/s x 11.74 invocations = **11 470** model-invocations/s
-        detect only  1 845 img/s x  1.00             =  1 845
-      **BY FRAMES WE ARE 1.04x THE BASELINE, NOT 0.85-0.89x. BY MODEL WORK, 6.11x.** And the
-      third reading is now exact rather than suggestive: our one-model chain does 1 845
-      invocations/s against the baseline's 1 877 -- **0.98x, parity per unit of work.**
+      2 000 it accepts [884.5, 971.1] over eight interleaved runs, dropping [48.3, 52.1]% of
+      what it reads -- so that IS the ceiling. Both arms at saturation:
+        baseline     938.6 img/s          x  2.00 invocations =  1 877 model-invocations/s
+        full chain   [884.5, 971.1] img/s x 11.74 invocations = **[10 384, 11 401]**
+        detect only  [1805.2, 1873.6]    x  1.00             =  [1 805, 1 874]
+      **BY FRAMES WE ARE AT PARITY -- [0.94, 1.03]x -- NOT 0.85-0.89x AND NOT 1.04x. BY MODEL
+      WORK, [5.53, 6.07]x.** The third reading: our one-model chain does [1 805, 1 874]
+      invocations/s against the baseline's 1 877 -- **[0.96, 1.00]x, parity per unit of work**.
+      That was "0.98x" from the excluded sitting until it was re-run three times (#287 r4);
+      0.98 falls inside the interval, so the reading survives its own provenance fix.
       SO THE DEFICIT NEVER EXISTED; it was a comparison of their ceiling against our
       mid-range. I recorded 0.85-0.89x earlier today and it stood for hours.
+      **AND THEN I QUOTED A RUN THAT IS NOT IN THE SAMPLE AT ALL.** The correction above first
+      read "accepts 977 ... 1.04x ... 6.11x" from ONE run -- and that run is the EXCLUDED one,
+      taken an hour earlier by a different script. Its 976.6 sits ABOVE the eight retained runs'
+      top of 971.1, so it was never a best-of-n from the kept sample: the figure rested on a box
+      state this session has since called non-comparable. The DIRECTION of the correction
+      survives intact (the 0.85-0.89x deficit was an artefact of comparing a saturated figure
+      with an unsaturated one), but the frame ratio is parity that straddles 1.0, not a win.
+      Which does not change what this item waits on: at [0.94, 1.03]x by frames the chain is
+      still ~5x short of a 5x frame target, and still past it on work.
       WHAT IS STILL YOURS, and it is narrower than before: which of those ratios the 5x is
       against. If it is FRAMES through the full chain, 5x means 4 693 img/s on four GPUs and
       the chain is 5.6x short. If it is MODEL WORK, it is already met. The honest note is that
