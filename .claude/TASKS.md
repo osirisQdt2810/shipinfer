@@ -5139,7 +5139,16 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       gstreamer-RTSP route with `--source nvdec`, at [4.9, 5.2] of 48 host cores. The 544.4
       in the table below is the `--source replay` arm of 10 Sep; what changed is the decode
       route (`HOST-DECODE-IS-THE-HOST-BUDGET`), not the models.
-      THE SAME-SESSION RATIO IS BLOCKED BY A GATE THAT IS RIGHT TO BLOCK IT. `bench.sh
+      **THE RATIO IS TAKEN, 15 Sep, AND THE GATE NEEDED NO REBUILD.** baseline **938.6 img/s
+      SATURATED** against ours accepted [821.4, 836.5] / tracked [800.8, 819.6], matched fp16,
+      same four cards, same afternoon: **0.85-0.89x by frames, 5.14-5.23x by model work** (the
+      baseline runs 2 invocations an image, this chain 11.74). `C1` carries the reading.
+      WHAT THE GATE ACTUALLY WANTED, since the message says "rebuild both from one ONNX" and
+      that would have restated every number in this file: the mismatch was PRECISION, not a
+      missing build. The repository's plan is byte-identical to `models/yolo26n_fp16.engine`
+      and the baseline defaults to the fp32 engine, so `--precision fp16` matches them from
+      files already on disk. Nothing was rebuilt, nothing installed, no earlier number stranded.
+      PREVIOUS READING, kept because it was right about the block and wrong about the cost: `bench.sh
       --systems baseline` refuses: "the baseline loads `yolo26n_fp32.engine` and the server
       loads `model_repository/ship_detector/1/model.plan`, and they are different files. A
       comparison across two engines measures the engines." So the 934.8 below and the 821-836
@@ -6194,7 +6203,31 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       `C2c`/`C2d` are the shipvision-side and Python-side halves and are both closed; this is
       the C++ half nobody opened.
 
-- [!] **C1 · THE QUESTION IT WAITS ON WAS ANSWERED FOUR DAYS AGO. `C1-WHAT-IS-THE-5x-AGAINST?`
+- [!] **C1 · THE RATIO EXISTS NOW, MEASURED LIKE FOR LIKE (15 Sep), AND IT IS TWO NUMBERS
+      RATHER THAN ONE -- WHICH IS THE ANSWER TO "5x AGAINST WHAT?".** Both arms at **matched
+      fp16**, the same four cards, the same afternoon:
+        baseline `sim_pipeline_v2`   **938.6 img/s SATURATED** (det 470.8 + seg 467.9)
+        ours, full chain             accepted [821.4, 836.5]   tracked [800.8, 819.6]
+      **BY FRAMES we are 0.85-0.89x the baseline. BY WORK we are 5.14-5.23x it.** The baseline
+      runs TWO model invocations an image; this chain runs **11.74** (`V165`'s table), so
+      9 643-9 821 model-invocations/s against its 1 877. Both figures are true and they are the
+      whole disagreement this item has carried.
+      THE ENGINE GATE THAT BLOCKED THIS FOR DAYS DID NOT NEED A REBUILD. `bench.sh` refuses
+      when the two sides load different engine files and says "rebuild both from one ONNX";
+      the actual mismatch was PRECISION -- `model_repository/ship_detector/1/model.plan` is
+      byte-identical to `models/yolo26n_fp16.engine` while the baseline defaults to the fp32
+      one. `--precision fp16` matches them from files that already exist, touches no
+      repository and strands no earlier number.
+      WHAT IS STILL YOURS, and it is narrower than before: which of those two ratios the 5x is
+      against. If it is FRAMES through the full chain, 5x means 4 693 img/s on four GPUs and
+      the chain is 5.6x short. If it is MODEL WORK, it is already met. The honest note is that
+      the baseline does no tracking, no embedding and no identity at all, so a frame ratio
+      compares a counting simulation against a perception pipeline.
+      CAVEATS ON THE RUN: the box was at load 50-57 and the harness says so itself ("treat the
+      ratio as indicative only"); the baseline generates its own load while our figure comes
+      from the C++ plane's own bench, so the harnesses differ even though precision, cards and
+      day do not.
+      ORIGINAL: THE QUESTION IT WAITS ON WAS ANSWERED FOUR DAYS AGO. `C1-WHAT-IS-THE-5x-AGAINST?`
       is `[x]` -- the operator settled it on 10 Sep under V164: the metric is FPS, the target
       5x the baseline, on FOUR GPUs. This line kept saying "waiting on the operator's one
       question" for four days after it was answered, which is the fifth stale `[!]` found in
