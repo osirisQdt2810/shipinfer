@@ -9928,6 +9928,20 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       landed ALONE -- this is the shared-helper-lands-first shape; (2) here, the submodule bump
       in its own commit (ADR-010) and `torch_ops.py` reduced to an adapter. Attempting (2)
       first would ship the regression above and a reviewer would be right to block it.
+      STEP (1) IS BUILT AND OPEN: **shipvision PR #18**, `fix/torch-ops-without-torchvision`,
+      3 files / +98 -9, `automerge` on. Splits the import, requires torch alone to construct,
+      and classic NMS falls back to `imgproc.nms.suppress` when torchvision is absent. The
+      test is a SUBPROCESS with a `sys.meta_path` hook that makes `import torchvision` raise,
+      because the defect is at import time and this process has torchvision loaded already --
+      my first two attempts monkeypatched the attribute and were VACUOUS (the old `__init__`
+      checked `torch`, not `torchvision`), so they were deleted rather than shipped. Both
+      halves verified by mutation: reverting the split fails the subprocess test, removing the
+      NMS fallback fails both. shipvision's own suite `4 failed, 2297 passed, 6 errors`, and
+      those ten are pre-existing TensorRT ones -- confirmed by stashing and re-running on
+      `origin/main` for the identical set.
+      THE SUBMODULE POINTER IS DELIBERATELY NOT BUMPED. The parent shows `3rdparty/shipvision`
+      modified because the checkout sits on that branch; that pointer moves in its OWN commit
+      once #18 merges, never as a side effect of this work (ADR-010).
       THE REMAINING PRICE AFTER THAT FIX is the one this item already quantified: the
       plain leg would exercise numpy only for ops, and `test_ops_parity.py`'s three-way
       comparison would degenerate to numpy-vs-numpy there. #279 made that survivable by
