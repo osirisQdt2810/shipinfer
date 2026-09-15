@@ -8,6 +8,65 @@ says which. `README.md` says how to reproduce them; this file says what came bac
 **Supersedes nothing outside itself.** When a run disagrees with a number here, replace the
 number and date it.
 
+## 15 Sep 2026 — the decode route, and the design load on four GPUs
+
+Everything below this section is the 8–9 Sep measurement on **five** GPUs and stands as it was
+taken. This section is **four** GPUs on a busier box, so the two are not a before/after pair;
+what changed between them is where H.264 decode happens.
+
+### The finding: `--source gstreamer` against `--source nvdec`
+
+Interleaved A/B, 12 cameras × 20 fps × 20 s, three replicates each, the same container image
+so `--source` is the only variable:
+
+| | host CPU per frame READ | frames read of 4 800 offered | accepted |
+|---|---|---|---|
+| `--source gstreamer` | **[61.8, 75.7] ms** | 26–33% | [1 068, 1 402] |
+| `--source nvdec` | **[9.7, 10.2] ms** | 98% | [4 715, 4 738] |
+
+Non-overlapping. The gstreamer arm could not keep up with *reading* the offered frames. The
+cost hid because the hot thread reports as `rtpjitterbuffer`: `gstreamer_pipeline.h:270` puts
+no `queue` between `rtspsrc` and `appsink`, so software decode and the NV12→BGR convert run on
+that element's srcpad task, and Linux truncates `comm` at 15 characters where that name is
+exactly 15. `gst-inspect` in the bench image confirms what was available to run — `avdec_h264`
+and `videoconvert` present, `nvh264dec` and `nvvideoconvert` absent.
+
+### The design load, three runs, read as ranges
+
+50 cameras × 20 fps × 40 s, `--source nvdec`, four A5000s, `workers 92`, box at load 44–47:
+
+| | range over three runs |
+|---|---|
+| accepted | [821.4, 836.5] img/s |
+| **tracked** | **[800.8, 819.6] img/s** |
+| host | [4.9, 5.2] of 48 cores, [6.8, 7.5] ms an image |
+| mtmc | admitted [80.9%, 81.9%], 145–230 global identities |
+| frames | 38 110–38 289 READ of 40 000 offered; incomplete events 0/2/0 |
+
+Extrapolated linearly to sixteen GPUs that is **[3203, 3278] tracked img/s**. The
+extrapolation is an assumption, not a measurement, and the box was contended — both make these
+lower bounds rather than upper ones.
+
+### The like-for-like pair, at matched precision
+
+The engine-parity gate refuses a run whose two sides load different engine files. The mismatch
+was **precision**, not a missing build: the repository's plan is byte-identical to
+`models/yolo26n_fp16.engine` while the baseline defaults to the fp32 engine, so
+`--precision fp16` matches them from files already on disk.
+
+| | throughput | model invocations an image |
+|---|---|---|
+| baseline `sim_pipeline_v2` | **938.6 img/s** SATURATED (det 470.8 + seg 467.9) | 2 |
+| ShipInfer, full chain | accepted [821.4, 836.5] · tracked [800.8, 819.6] | **11.74** |
+
+**0.85–0.89× by frames, 5.14–5.23× by model work** — 9 643–9 821 model-invocations/s against
+the baseline's 1 877. Which of those a "5×" means is a question about the target, not about
+these numbers. Note also that at fp16 with 1 000 img/s offered the baseline reports
+**SATURATED**, so in this regime it is a real ceiling rather than the offer-bound behaviour
+recorded at other loads.
+
+---
+
 ## The two arms
 
 | | baseline | ShipInfer |
@@ -203,9 +262,17 @@ One variable: `workers`.
 
 **The tracked rate is flat.** Accepted frames rise 1.67× across that range and the frames that
 leave with track ids do not move: every worker past ~24 buys a frame the tracker refused, and a
-frame with no ids is one `mtmc` cannot associate. So **~260 img/s** is this chain's answer on
+frame with no ids is one `mtmc` cannot associate. So ~260 img/s was this chain's answer on
 four A5000s, and the "throughput scales with workers" reading of the numbers further up this
 page was counting refusals.
+
+> **SUPERSEDED 15 Sep, on the same four A5000s: [800.8, 819.6] tracked img/s** — see the
+> section at the top of this file. The sweep above ran with decode on the HOST, which is what
+> held it to ~260: at [61.8, 75.7] ms of host CPU a frame the box could not read the offered
+> load, let alone track it. On `--source nvdec` the same chain tracks 3.1× that. What the
+> paragraph above gets right and keeps is the *shape* — tracked rate is what counts and
+> workers past the plateau buy refusals, re-confirmed on the new route (92 → 140 workers
+> moves accepted up and TRACKED down).
 
 **Why, and it is not a defect.** One shared worker pool reorders a camera's frames, and a
 per-camera tracker refuses a frame that does not advance its own stream
