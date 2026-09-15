@@ -9959,6 +9959,8 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       improvement (it would help any caller with a preallocated output), it is bigger than #18,
       and it is NOT something to start at the end of a long session. Named here with its
       reason so the next attempt does not rediscover it mid-refactor.
+      OPEN AS **#282** (`refactor/torch-ops-over-shipvision`, automerge): the bump plus the
+      comment fix, with the blocker above as its Context.
       WHAT LANDED INSTEAD, because it is true and small: the pin bump, plus the correction of
       a comment in `tests/runtime/test_ops_vs_shipvision.py` that #18 made false -- it said
       shipvision's torch backend "refuses to construct without torchvision". It no longer does.
