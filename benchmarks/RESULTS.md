@@ -46,13 +46,20 @@ and `videoconvert` present, `nvh264dec` and `nvvideoconvert` absent.
 Extrapolated linearly to sixteen GPUs that is [3203, 3278] tracked img/s — **and that is the
 design-load reading, not the chain's capacity.** This run was offered 1 000 img/s, which it
 refuses 13% of; offered 2 000 it tracks **[848.1, 939.2] img/s** on the same four cards over
-eight interleaved runs and stays correct there (on the first of them `events_incomplete` 0,
-`collector_timeouts` 0, mtmc admitting 76%). So the capacity reading is **[3392, 3757] on
-sixteen GPUs, [1.13, 1.25]× the 3 000 target**, against 1.07–1.09× from the design-load
-figure. That row said "952, 3 809, 1.27×" until the eight replicates existed; 952.4 was their
-best, and a best-of-n quoted as the figure is the error this page spent the day correcting.
-The conclusion is unchanged because the floor clears the target. The extrapolation is an
-assumption either way, and the box was contended, so these are lower bounds.
+eight interleaved runs. So the capacity reading is **[3392, 3757] on sixteen GPUs,
+[1.13, 1.25]× the 3 000 target**, against 1.07–1.09× from the design-load figure.
+
+**It stays correct at that ceiling, and this is re-captured over the eight rather than carried
+over from the withdrawn run:** `events_incomplete` [0, 13] of 35 916–38 840 complete
+(four of eight are exactly 0), `collector_timeouts` equal to it in every run, and mtmc
+admitting [70.0, 76.0] % of observations with 138–211 global ids.
+
+That row read "952, 3 809, 1.27×" until the eight replicates existed — and **952.4 is not the
+best of the eight; it is the excluded ninth run**, which the eight top out below at 939.2. So
+the headline rested entirely on a run this page now declares a different box state: this is a
+retraction of provenance, not of sampling. The conclusion survives because the retained floor
+still clears the target. The extrapolation is an assumption either way, and the box was
+contended, so these are lower bounds.
 
 ### What the chain actually costs: 12%, not 5.87x
 
@@ -94,10 +101,11 @@ saturation:
 0.98× per invocation on the one-model arm. The 0.85–0.89× deficit was their ceiling against our
 mid-range, and that correction stands.
 
-This row read "977.0 · 1.04× · 6.11×" until the replicates existed. 977 was the best of nine
-runs at those settings, so the first correction quoted one end of a distribution after
-criticising a comparison for quoting the other. The eight strictly-interleaved runs are the
-range above; the ninth, from a different script an hour earlier, gave 976.6.
+This row read "977.0 · 1.04× · 6.11×" until the replicates existed — and the 977 is the
+**excluded** run, taken an hour earlier by a different script, whose 976.6 sits *above* the
+eight retained runs' top of 971.1. So it was never a best-of-n drawn from the kept sample: the
+figure rested on a box state this page now calls non-comparable. The correction's direction
+still holds; its point figure did not belong to the arm it was quoted for.
 
 Caveat: one process, four GPUs. The deployment is a process per shard, so this ceiling scales
 with processes; what it says is that adding cards to *one* process stops paying early.
@@ -174,7 +182,8 @@ Three readings, and they do not all point the same way:
   92's mean (893.2).
 
 **At four replicates an arm it looked otherwise, and that is worth keeping.** The first eight
-runs gave 92 a ceiling of 939.2 and 140 a floor of 946.2 — separated by 6.9 img/s. Four more
+runs gave 92 a ceiling of 939.225 and 140 a floor of 946.175 — separated by **6.95** img/s.
+Four more
 runs per arm turned that gap into an 81.5 img/s overlap. A separation smaller than either
 arm's own spread cannot be seen at n=4.
 

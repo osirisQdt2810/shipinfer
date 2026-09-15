@@ -4818,8 +4818,9 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
           nor "140 wins" is supported by one run at either setting.
       **THE n=4 READING SAID THE OPPOSITE, AND THAT IS THE LESSON UNDER THE LESSON.** At four
       replicates an arm the two separated -- 92 topped out at 939.2, 140 bottomed at 946.2, a
-      6.9 img/s gap -- and #287's review was right to compute it. Four more replicates an arm
-      turned that 6.9 gap into an 81.5 OVERLAP. A separation smaller than either arm's own
+      **6.95** img/s gap (939.225 against 946.175, unrounded so it can be checked against the
+      table) -- and #287's review was right to compute it. Four more replicates an arm turned that
+      gap into an 81.5 OVERLAP. A separation smaller than either arm's own
       spread is a coin-flip dressed as a result, and n=4 could not see that.
       ONE RUN WAS DROPPED FROM THE ARM, deliberately, and #287's review is why: an earlier
       `sat` run at the same settings (tracked 952.4) was taken by a DIFFERENT script an hour
@@ -4872,19 +4873,21 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       `--source nvdec` against `--source gstreamer`, [9.7, 10.2] ms of host CPU an image
       against [61.8, 75.7] -- and V156 had already mandated that route.
       **AND THE FIGURE ABOVE IS UNDERSTATED, because it too was taken at 1 000 offered -- below
-      this chain's own ceiling (15 Sep, same mistake as `C1`'s).** Offered 2 000 the chain
-      tracks more, and stays correct at that ceiling: on the first such run `events_complete`
-      39 064, `events_incomplete` **0**, `collector_timeouts` **0**, mtmc still admitting 76%
-      with 157 identities. So:
+      this chain's own ceiling (15 Sep, same mistake as `C1`'s).** So:
         at the design load (1 000 offered)   tracked [800.8, 819.6]   16 GPUs [3203, 3278]
         at its CEILING     (2 000 offered)   tracked [848.1, 939.2]   16 GPUs [3392, 3757]
       Against the 3 000 target that is **[1.13, 1.25]x rather than 1.07-1.09x**.
+      IT STAYS CORRECT AT THAT CEILING, AND THESE COUNTERS ARE THE RETAINED EIGHT'S OWN --
+      not the withdrawn run's, which is what this line said for one round: `events_complete`
+      35 916-38 840, `events_incomplete` **[0, 13]** (four of the eight exactly 0),
+      `collector_timeouts` equal to it every time, mtmc admitting **[70.0, 76.0]%** with
+      138-211 global ids.
       THE CEILING ROW IS A RANGE AND WAS BRIEFLY A POINT: it read "tracked 952, 16 GPUs 3809,
-      1.27x" from ONE run, and #287's review was right that a best-of-n quoted as the figure is
-      the same error this page spent the day correcting. Eight interleaved runs at exactly those
-      settings (`workers 92`, 2 000 offered, `--source nvdec`, GPUs 1,3,4,6) give the range
-      above; the 952 was their best. The conclusion is unchanged because the FLOOR clears the
-      target -- 3 392 against 3 000. Both readings are
+      1.27x" from ONE run. **That run is the EXCLUDED ninth, not the best of the eight** --
+      the eight top out at 939.2 and never reach 952.4 -- so the headline rested entirely on a
+      box state this item now calls non-comparable. That is a retraction of PROVENANCE rather
+      than of sampling, and it is the stronger of the two. The conclusion is unchanged because
+      the retained FLOOR clears the target -- 3 392 against 3 000. Both readings are
       real and they answer different questions: the first is what 50 cameras x 20 fps costs on
       FOUR cards (12.5 cameras a card, where it refuses 13%); the second is what the chain can
       do. The target question -- can sixteen GPUs carry 3 000 -- is a capacity question, so the
@@ -6407,8 +6410,8 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       **CORRECTED 15 Sep, AND IT INVERTS THE HEADLINE: 0.85-0.89x WAS MEASURED BELOW OUR OWN
       CEILING.** The baseline's 938.6 is a SATURATED figure -- the harness says so -- while our
       821-836 came from a run offered 1 000 img/s, which our chain does not saturate at. Offered
-      2 000 it accepts [884.5, 971.1] (48% dropped, so that IS the ceiling). Both arms at
-      saturation:
+      2 000 it accepts [884.5, 971.1] over eight interleaved runs, dropping [48.3, 52.1]% of
+      what it reads -- so that IS the ceiling. Both arms at saturation:
         baseline     938.6 img/s          x  2.00 invocations =  1 877 model-invocations/s
         full chain   [884.5, 971.1] img/s x 11.74 invocations = **[10 384, 11 401]**
         detect only  1 845 img/s          x  1.00             =  1 845
@@ -6418,10 +6421,11 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       and should be read as such.
       SO THE DEFICIT NEVER EXISTED; it was a comparison of their ceiling against our
       mid-range. I recorded 0.85-0.89x earlier today and it stood for hours.
-      **AND THEN I QUOTED THE OTHER END OF THE SAME DISTRIBUTION.** The correction above first
-      read "accepts 977 ... 1.04x ... 6.11x" from ONE run, which was the best of nine at those
-      settings. Eight strictly-interleaved runs give the range above; a ninth, an hour earlier
-      by a different script, gave 976.6 -- just outside its top. The DIRECTION of the correction
+      **AND THEN I QUOTED A RUN THAT IS NOT IN THE SAMPLE AT ALL.** The correction above first
+      read "accepts 977 ... 1.04x ... 6.11x" from ONE run -- and that run is the EXCLUDED one,
+      taken an hour earlier by a different script. Its 976.6 sits ABOVE the eight retained runs'
+      top of 971.1, so it was never a best-of-n from the kept sample: the figure rested on a box
+      state this session has since called non-comparable. The DIRECTION of the correction
       survives intact (the 0.85-0.89x deficit was an artefact of comparing a saturated figure
       with an unsaturated one), but the frame ratio is parity that straddles 1.0, not a win.
       Which does not change what this item waits on: at [0.94, 1.03]x by frames the chain is

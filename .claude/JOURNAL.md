@@ -149,15 +149,18 @@ Offered 2 000 instead of 1 000, the picture inverts:
 | full chain at its ceiling | accepted [884.5, 971.1], tracked [848.1, 939.2], n=8 | **[0.94, 1.03]x by frames — parity — and [5.53, 6.07]x by model work** |
 | detect only | 1 845 | 0.98x per invocation — parity |
 
-(Written that evening from ONE run as "977 accepted, 952 tracked, 1.04x, 6.11x"; the ranges are
-eight interleaved runs, taken later the same night. The correction's direction holds; its point
-figures were the best of the nine.)
+(Written that evening from ONE run as "977 accepted, 952 tracked, 1.04x, 6.11x" — and that run
+is the one later EXCLUDED as a different box state. Its 976.6 accepted sits above the eight
+retained runs' top of 971.1 and its 952.4 tracked above their 939.2, so it was never a
+best-of-n from the kept sample. The correction's direction holds; its point figures belonged to
+an arm this session then discarded.)
 
 So the 0.85–0.89x deficit I reported for hours never existed; it compared their saturated
 figure against our mid-range. The segmenter's 1.01–1.05x and the chain's "12% cost" went with
 it. And the session's own headline was understated: at the ceiling it is **[3392, 3757] on
 sixteen GPUs, [1.13, 1.25]x the 3 000 target**, not the 1.07–1.09x I had been quoting. (Written
-that evening as a point figure, 952 / 3 809 / 1.27x, from one run; the range is eight.)
+that evening as 952 / 3 809 / 1.27x from the single run that was later excluded; the range is
+the eight replicates, which never reach 952.)
 
 **The rule, now in memory:** `frames_dropped 0` means you found the offer, not the ceiling.
 Stable, reproducible numbers below saturation measure the generator, and they look exactly
@@ -181,15 +184,19 @@ through the whole model chain for a gain no single run can confirm.
 **It took two goes to get even that right, which is the more useful half.** The first version of
 this correction quoted nine runs — but one of them was an earlier run by a different script, and
 it was 92's best. #287's review caught it, and dropping it flipped the reading: the remaining
-4-vs-4 *separated*, 140 ahead by 6.9 img/s. Four more replicates per arm turned that 6.9 gap
+4-vs-4 *separated*, 140 ahead by 6.95 img/s (939.225 against 946.175). Four more replicates
+per arm turned that gap
 into an 81.5 overlap. So the review was right to block, right that the guest run was
 illegitimate, and its 4-vs-4 conclusion was itself an artefact of n=4. A separation smaller than
 either arm's own spread is not visible at four runs.
 
-**And the same widening was owed one level up.** The day's headline — "952 tracked at the
-ceiling, 3 809 on sixteen GPUs, 1.27×" — was one run. Eight interleaved runs at exactly those
-settings give [848.1, 939.2], i.e. [3392, 3757] and [1.13, 1.25]×. The conclusion survives
-because the floor still clears 3 000, but the figure was a best-of-n.
+**And the same widening was owed one level up — except it was not a widening.** The day's
+headline, "952 tracked at the ceiling, 3 809 on sixteen GPUs, 1.27×", came from the very run
+the guest-run finding excluded. Eight interleaved runs at those settings give [848.1, 939.2],
+i.e. [3392, 3757] and [1.13, 1.25]×, and they never reach 952. So the headline was not an
+unlucky best-of-n inside a kept sample; it rested on a box state that is no longer in the
+sample at all. The conclusion survives because the retained floor still clears 3 000. The
+review caught this twice — once for the arm, once for the prose that still leaned on it.
 
 **Which is the shape of the whole day.** Five numbers retired and two more widened from points
 to ranges, and not one of them was wrong arithmetic. Each was a number taken where something
