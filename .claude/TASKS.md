@@ -2894,6 +2894,20 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       golden.
 
 - [x] PIPELINE-WORKERS-NEED-CAMERA-AFFINITY · NOT WORTH BUILDING at the deployment's density,
+      **RE-CONFIRMED 15 Sep ON THE NVDEC ROUTE, which matters because the closure above rests on
+      HOST-DECODE-route evidence.** At the deployment's own density -- 12 cameras on four
+      devices, 3.0 per device, the arm this item says is the right one -- `--source nvdec` gives
+      **16 frames untracked of 4 738, 0.34%**, with `frames_dropped 0` and `queue_rejected 0`.
+      The same shape on the host-decode route gives 85-91 untracked of ~1 100-1 400 (~7%) and
+      refuses at the queue. So the closure holds, and holds more comfortably than it did.
+      AND THE RE-OPEN CONDITION IS TECHNICALLY MET BUT STILL NOT THE DEPLOYMENT'S SHAPE: today's
+      fifty-on-four runs do have non-zero `queue_rejected` (13-19.6%), which is what this item
+      names as the trigger to re-read. Re-read, and the table says what it said -- at 12.5
+      cameras a device, raising workers 92 -> 140 triples untracked (3.3% -> 10.5%) and LOWERS
+      tracked img/s (`WORKER-PLATEAU-ON-THE-NVDEC-ROUTE`). That is the reordering this item
+      describes, at 4x the deployment's density, so it remains evidence about an overloaded box
+      rather than about the shipping configuration. Fifty on sixteen is still the load this box
+      cannot generate.
       measured 12 Sep. It was OPENED 11 Sep as the chain's real ceiling, and that is the half
       this item closes against -- the new clause was spliced ahead of the old headline and the
       line asserted both at once (#256 r1).
