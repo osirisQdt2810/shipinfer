@@ -1156,10 +1156,14 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       row.** That is a defect, not noise, and it is C27. Two consequences for C1: the fused
       kernels are not where the 5x is, and a per-frame budget built on the 50x figure is wrong.
 - [!] **C27 · RE-VERIFIED 14 Sep against the PINNED commit, and one citation of it in this
-      repo was wrong.** `3rdparty/shipvision` pins `d247d5f`, which IS shipvision's `main`, and
-      the defect is live there: `imgproc/image_ops.cu:362` still downloads the bitmask into a
-      fresh pageable `std::vector<unsigned long long>`, and `NmsScratch` (image_ops.h:126)
-      still carries only device pointers. The recovered work is safe --
+      repo was wrong.** `3rdparty/shipvision` pins **`dd967d9`** (bumped 15 Sep, was `d247d5f`), and
+      the defect is live there too -- RE-VERIFIED against the NEW pin, because moving a pin is
+      exactly when a "verified against the pinned commit" line goes stale:
+      `csrc/shipvision/imgproc/image_ops.cu:362` still downloads the bitmask into a fresh
+      pageable `std::vector<unsigned long long>`, and `NmsScratch` (**image_ops.h:124**, was
+      :126 -- the file moved under `csrc/shipvision/`) still carries only device pointers.
+      NOTE the three PRs behind that bump (#18, #19, #20) are all in the PYTHON `imgproc`
+      backends; none of them touches this `.cu`, so nothing about them was going to fix it. The recovered work is safe --
       `origin/backup/csrc-native-pinned-nms` survives on shipvision's remote, though the
       scratchpad patch copy this line mentions is long gone, as scratchpads are.
       THE CITATION: `runtime/ops/torch_ops.py::_to_host` said the C++ plane "had" this defect
@@ -9146,7 +9150,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       two refusal tests + delete track's private copy.
 
 - [!] **SV-LICENSE · HALF OF THIS IS ANSWERED, re-checked 14 Sep against the pinned commit
-      (`d247d5f`, which is shipvision's main). The ask is now much smaller than the line says.**
+      (`d247d5f` then; the pin is `dd967d9` since 15 Sep and this claim was re-checked against it). The ask is now much smaller than the line says.**
       WHAT LANDED, in `4c8f137` (the mcbyte tracker, shipvision #14): `LICENSES/Apache-2.0.txt`
       is tracked, and so is `THIRD_PARTY_NOTICES.md` -- the file this line said "already exists
       on the McByte branch" has since merged. So the Apache-2.0 §4(a) half, the one with an
@@ -9155,9 +9159,15 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `pyproject.toml:11` (`license = "MIT"`) and `README.md:95` ("MIT, with one exception: the
       `mcbyte` tracker is ported from roboflow/trackers under the Apache License 2.0") -- and
       carries no file with the MIT text in it. A declared licence with no text is the gap.
+      AND THE REPO ALREADY HAS THE CONVENTION, re-checked at the new pin: `LICENSES/` exists
+      and holds `Apache-2.0.txt`, so the missing file is most likely `LICENSES/MIT.txt` beside
+      it rather than a `LICENSE` at the root -- matching what is there beats inventing a second
+      layout. THE ONLY UNKNOWN IN IT IS THE COPYRIGHT LINE: MIT needs "Copyright (c) <year>
+      <holder>", and the Apache text carries the unfilled placeholder form
+      (`Copyright [yyyy] [name of copyright owner]`), so nothing in the repo answers it.
       STILL YOURS, and only because of what it is rather than how big: it is another repo, and
-      choosing what a project is licensed under is the owner's call, not a maintenance edit I
-      should make. ONE FILE if the answer is yes: `LICENSE` at shipvision's root with the MIT
+      choosing what a project is licensed under -- and whose name goes on it -- is the owner's
+      call, not a maintenance edit I should make. ONE FILE if the answer is yes, with the MIT
       text and the copyright line you want on it.
       ORIGINAL: shipvision has NO LICENSE file at all (found by McByte's reviewer) — not even
       for its own MIT claim, and Apache-2.0 §4(a) vendoring for the McByte port wants one to sit
