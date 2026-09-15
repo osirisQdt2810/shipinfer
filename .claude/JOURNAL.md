@@ -92,6 +92,26 @@ checked `torch`. The defect is at IMPORT time, so the test has to be a subproces
 `sys.meta_path` hook that makes the import raise. Reverting each half of the fix now fails the
 tests that cover it — which is the only evidence that they test anything.
 
+**And the last ledger item turned into four PRs and a decision not to do it.** `V124a-PHASE3`
+wanted this plane's torch ops delegated to shipvision. Pricing it found three upstream
+problems in a row, each one only visible by reading the code the change would rely on:
+`torch` and `torchvision` shared an import `try`, so a torch-only install lost the whole
+backend over one method (#18); `letterbox_into` assembled a canvas and copied it into the
+caller's buffer, 66.07 MB peak against 15.74 (#19); `crop_batch_into` did the same, 285.26
+against 184.60 (#20). All three merged, all three mutation-checked on a GPU, and they are
+improvements for any caller of that library whatever this plane does next.
+
+**Then the adapter ran and the answer was to not ship it.** `test_torch_crop_batch.py` keeps a
+FROZEN copy of the old loop, deliberately unable to follow the implementation, and against it
+the delegated crop goes 21 failed / 31 passed, up to 0.66 in normalised units on synthetic
+input. That is the divergence this ledger already priced -- 0.0057 on real footage, <=2.7e-5
+at the embedding -- so it is expected rather than alarming. But finishing means re-baselining
+21 numeric expectations onto a different sampler, and editing tests until they agree with a
+new implementation is exactly how a regression ships. The gain is ~250 deleted lines on a path
+measured at 1.07-1.12x; the accuracy evidence rests on a ResNet-50 whose own config says
+"embedding accuracy is not claimed here". Marked `[-]` with a re-open condition that is a
+checkpoint rather than a mood.
+
 **The lesson.** A thread group's name is not evidence of what it does, and `comm`'s
 15-character truncation hides a whole pipeline under its first element. The check that catches
 it in one step is dividing the group's CPU by the frames it handled and asking whether the
