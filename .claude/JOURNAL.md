@@ -112,6 +112,30 @@ measured at 1.07-1.12x; the accuracy evidence rests on a ResNet-50 whose own con
 "embedding accuracy is not claimed here". Marked `[-]` with a re-open condition that is a
 checkpoint rather than a mood.
 
+**With the measurements in hand, five ledger items answered themselves.** The design-load run
+and the profile behind it closed four and sharpened the fifth:
+
+* `V167` (3 000 img/s) MET -- and by none of the three levers it asked the operator to choose
+  between. The route did it, and V156 had already mandated the route.
+* `V165` (4 500) NOT met, short 27-29%, needing 1.37x. The host is no longer the wall, more
+  workers lose tracked frames, and both host-budget levers are spent -- so the remaining lever
+  is fewer or cheaper models, which is a product decision.
+* `EXECUTE-BLOCKS` NOT worth building. `cudaStreamSynchronize` is 6.7% of instance-thread wall
+  -- higher than the 1.7% estimate, so the profile was worth taking -- but the devices are
+  oversubscribed in the same run (detector 164-174%), so that 6.7% is a thread waiting on a
+  saturated device. Moving decode off the host is what inverted this: the profile that opened
+  the item had the devices 25% busy.
+* `FPS-ON-FOUR-GPUS` DONE, and `C1` finally has its ratio: **0.85-0.89x by frames, 5.14-5.23x
+  by model work**, matched fp16, same cards, same afternoon.
+
+**Two of my own recorded claims fell in the process.** I had filed the engine-parity gate as a
+decision about the benchmark's whole history, because its message says "rebuild both from one
+ONNX". The mismatch was PRECISION -- the repository's plan is byte-identical to
+`models/yolo26n_fp16.engine` while the baseline defaults to fp32 -- so `--precision fp16`
+matched them from files already on disk, rebuilding nothing. And the baseline is not
+"offer-bound and does no inference" in this regime: at fp16 with 1 000 offered it reports
+SATURATED at 938.6, which changes what a frame ratio against it means.
+
 **The lesson.** A thread group's name is not evidence of what it does, and `comm`'s
 15-character truncation hides a whole pipeline under its first element. The check that catches
 it in one step is dividing the group's CPU by the frames it handled and asking whether the
