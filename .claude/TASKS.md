@@ -9959,8 +9959,13 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       improvement (it would help any caller with a preallocated output), it is bigger than #18,
       and it is NOT something to start at the end of a long session. Named here with its
       reason so the next attempt does not rediscover it mid-refactor.
-      OPEN AS **#282** (`refactor/torch-ops-over-shipvision`, automerge): the bump plus the
-      comment fix, with the blocker above as its Context.
+      **#282 MERGED** (review APPROVE, all four C++ tiers green): the bump plus the comment fix,
+      with the blocker above as its Context. shipvision #18 merged before it.
+      AND THE NEXT STEP NEEDS A GPU THIS BOX NO LONGER HAS. Making `letterbox_into` write in
+      place is a DEVICE path: `supports_device_output` is false on CPU by construction, so the
+      change cannot be verified without CUDA. All eight GPUs are now held by other tenants
+      (ten processes at ~23 GB a card), so this is parked on hardware rather than on a
+      decision -- the same blocker shape as the design-load re-run had before today.
       WHAT LANDED INSTEAD, because it is true and small: the pin bump, plus the correction of
       a comment in `tests/runtime/test_ops_vs_shipvision.py` that #18 made false -- it said
       shipvision's torch backend "refuses to construct without torchvision". It no longer does.
