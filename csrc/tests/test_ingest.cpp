@@ -849,6 +849,12 @@ namespace {
         for (int i = 0; i < 200 && script.builds.load() < 2; ++i)
             std::this_thread::sleep_for(2ms);
         check(script.builds.load() == 2, "and a fresh one is built by the factory");
+        // A REBUILD IS NOT A READ, and polling for the first while asserting the second is
+        // why this flaked on CI: the factory has handed back a source and the actor has yet
+        // to pull a frame off it. Wait for the thing being checked, the way the sink wait
+        // below already does.
+        for (int i = 0; i < 200 && actor.health().frames_read == 0; ++i)
+            std::this_thread::sleep_for(2ms);
         check(actor.health().frames_read >= 1, "after which frames arrive again");
         finish(actor, gate);
     }
