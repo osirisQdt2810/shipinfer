@@ -9796,7 +9796,26 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       before the next release: an intermittent failure in the tier CLAUDE.md calls "must stay
       green" trains everyone to re-run rather than to read.
 
-- [ ] **V124a-PHASE3 · UNGATED 14 Sep: #187 merged on 10 Sep, so the reason this was `[!]`
+- [-] **V124a-PHASE3 · DECIDED 15 Sep: NOT WORTH THE NUMERICS CHANGE, and the re-open
+      condition is a checkpoint rather than a mood.** Both upstream blockers are gone (#19,
+      #20) and the adapter is written and runs, so what is left is not effort -- it is a
+      choice, and the ledger's own numbers argue against it. The gain is deleting ~250 lines
+      of duplicated implementation on a path `C1a-kernel` measured at 1.07-1.12x, i.e. no
+      throughput. The cost is re-baselining 21 numeric expectations onto a different sampler,
+      giving up an exact-size crop's bit-exactness, and doing so on an accuracy claim this
+      item states is not made: `person_embedder/config.yaml` says it is ResNet-50 with
+      IMAGENET weights and "embedding accuracy is not claimed here".
+      RE-OPEN WHEN either of these is true: a reid-TRAINED checkpoint exists to re-run the
+      embedder A/B against, so the <=2.7e-5 cosine number means what it needs to mean; or the
+      duplication starts costing something real -- a third ops backend, or a change that has
+      to be made twice. Until then the two implementations are cheap and the numerics are
+      known-good.
+      WHAT WAS BANKED ANYWAY, and it is the part that mattered: shipvision #18 (torchvision
+      decoupled from the torch backend), #19 and #20 (both device paths write in place --
+      66.07 -> 15.74 MB and 285.26 -> 184.60 MB peak allocation). Those stand on their own for
+      any caller of that library, including the C++ plane's future use of it, and the pin here
+      carries them. The adapter patch is in the scratchpad if the decision changes.
+      ORIGINAL: **UNGATED 14 Sep: #187 merged on 10 Sep, so the reason this was `[!]`
       is gone and it is mine to build rather than yours to unblock. Its own words were
       "build it the moment #187 lands; nothing else waits on it", and it then sat blocked
       for four days. Still sequenced LAST on purpose -- duplication debt, not on the >=5x
@@ -9989,7 +10008,56 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       reason so the next attempt does not rediscover it mid-refactor.
       **#282 MERGED** (review APPROVE, all four C++ tiers green): the bump plus the comment fix,
       with the blocker above as its Context. shipvision #18 merged before it.
-      AND THE NEXT STEP NEEDS A GPU THIS BOX NO LONGER HAS. Making `letterbox_into` write in
+      **THE UPSTREAM FIX LANDED (shipvision #19) AND I THEN WROTE THE ADAPTER AND BACKED IT
+      OUT, 15 Sep.** `letterbox_into` now writes in place: 66.07 MB peak allocation against
+      15.74 MB on a 50.33 MB batch, measured on a CUDA device, mutation-checked. Pinned here.
+      THE ADAPTER ITSELF IS ~80% WRITTEN AND NOT COMMITTED (patch kept in the scratchpad, 585
+      lines: `torch_ops.py` 614 -> 395, four methods delegating, eight dead helpers removed).
+      It works: `test_ops_parity.py` green and the numpy half of `test_ops_vs_shipvision.py`
+      green. WHAT STOPPED IT is a regression it would ship, found by reading the code the same
+      way the last three were:
+      `crop_batch_into` STILL ALLOCATES AND COPIES. #19 fixed `letterbox_into` only, and the
+      crop path kept `_write_through_owner`. Our `crop_batch` allocates a device tensor and
+      stages it home with NO device-to-device copy in between; delegating through
+      `crop_batch_into` adds one -- ~7.9 MB for a 20-crop batch at 256x128 -- on the embedder's
+      hot path, which runs at ~15 000 crops/s by this project's own sizing.
+      THAT PREREQUISITE IS DONE: shipvision **#20** gives `_crop_tensor` an `into=` the way
+      #19 gave `_letterbox_tensor` one. 285.26 MB peak -> 184.60 MB on a 50.33 MB batch, two
+      whole batches saved, mutation-checked. Both device paths now write in place and the
+      pin here carries both.
+      SO THE ADAPTER WAS REAPPLIED AND RUN, AND IT STOPS ON A NUMERICS DECISION RATHER THAN A
+      BLOCKER. `test_ops_parity.py` green, and `test_torch_crop_batch.py` -- whose
+      `_reference_crop_batch` is a FROZEN copy of the old loop, deliberately unable to follow
+      the implementation -- goes **21 failed, 31 passed**, max absolute difference up to 0.66
+      in normalised units on its synthetic cases. That is the SAME divergence this item already
+      priced (0.05-0.43 on `rng.integers` noise, 0.0057 on the pan fixture, <=2.7e-5 at the
+      embedding), so it is expected, not a surprise -- but finishing means RE-BASELINING 21
+      numeric expectations onto a different sampler, and those tests guard the embedder's input.
+      WHY I STOPPED THERE RATHER THAN RE-BASELINING. Editing tests until they agree with a new
+      implementation is the easiest way to ship a regression, and the accuracy evidence has a
+      limit this item states itself: `person_embedder/config.yaml` says in its own words that
+      it is ResNet-50 with IMAGENET weights and "embedding accuracy is not claimed here". So
+      the A/B measures how sensitive a network of that SHAPE is, which is the right question
+      but not a reid-trained answer.
+      ALSO LOST IN THE MOVE, and not previously listed: an exact-size crop stops being a
+      BIT-EXACT copy. `grid_sample` at scale 1 carries float32 rounding where the old gather
+      copied, which is the 1.5e-05 this item measured -- small, but
+      `test_an_exact_size_crop_is_a_bit_exact_copy` asserts equality, and that property was
+      deliberate.
+      THREE THINGS THE ATTEMPT SETTLED, so the next one does not rediscover them: (1) the CPU
+      path CANNOT go through the `_into` doors -- `DeviceBuffer` refuses a host tensor -- so
+      the adapter branches on `on_device` and uses their host-returning entry points off it;
+      (2) shipvision's crop is ONE `grid_sample` for the whole batch, so the O(1)-launch
+      property this plane tests for survives delegation; (3) `interpolation="nearest"` has to
+      be refused at construction (they have no knob) -- no production caller passes it, and
+      the nearest reference the kernels are matched against is `numpy_ops.py`, which stays.
+      AND THE TEST COST IS MEASURED NOW RATHER THAN GUESSED: ~980 lines across
+      `test_torch_crop_batch.py` and `test_torch_ops_staging.py` test deleted internals
+      (`_bilinear_axis`, `_crop_chunks`, `_normalization`, `_channel_order`), and
+      `TestTheTorchOpsAlreadyAgree` in `test_ops_vs_shipvision.py` must go with the
+      implementation it was evidence for -- once there is one sampler,
+      `test_crop_DIVERGES_once_it_upscales` fails by construction.
+      THE OLD NOTE, KEPT: the next step needs a GPU this box may not have. Making `letterbox_into` write in
       place is a DEVICE path: `supports_device_output` is false on CPU by construction, so the
       change cannot be verified without CUDA. All eight GPUs are now held by other tenants
       (ten processes at ~23 GB a card), so this is parked on hardware rather than on a
