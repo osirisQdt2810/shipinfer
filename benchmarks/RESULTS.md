@@ -396,6 +396,13 @@ placement and the waiter budget has to cover it.
 **711.5 tracked img/s on four A5000s**, and TWO things moved between that and the ~260 this
 page used to report, so the page separates them rather than crediting one:
 
+> **UPDATED 15 Sep: [800.8, 819.6] on the same four cards**, three runs — and a THIRD thing
+> moved, which the two below do not cover. This row still had decode on the host: 15.5 of 48
+> cores, 21 ms of host CPU an image, 23% refused at the queue. On `--source nvdec` the same
+> load costs [4.9, 5.2] cores and [6.8, 7.5] ms an image. The host-CPU drop is #214's
+> blocking-sync default (19.9 → 6.9 ms an image, confirmed at the design load for the first
+> time); the rest is decode leaving the host. See the section at the top.
+
 | same four GPUs, same 92 workers | fixture | load | tracked img/s |
 |---|---|---|---|
 | the flat-rate table above | slideshow | 12 × 200 fps | 257.3 |
