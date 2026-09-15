@@ -3309,6 +3309,17 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       low enough to leave ~16 cores, then `deploy/rootless/profile.sh --cpp` with `run92.plan`;
       the plan is regenerable (`shipinfer plan -t topology/ship_person_cpu.yaml`, then set
       workers to 92). Nothing here is yours any more.
+      THE PROFILABLE CEILING ON THIS BOX IS 12 CAMERAS, measured 15 Sep so nobody repeats the
+      runs. Under nsys, with ~12 of 48 cores free:
+        12 cameras   124 585 `cudaLaunchKernel`, 8 496 `cudaStreamSynchronize`  steady state
+        24 cameras        24 `cudaLaunchKernel`, no `cudaStreamSynchronize`     startup only
+        50 cameras     1 125 `cudaLaunchKernel`, 92 syncs totalling 0.6 ms      startup only
+      The 24-camera arm read 838 frames of the ~9 600 offered and rejected 530, at 3.4 of 48
+      cores. So it is not that nsys is unusable here: nsys PLUS this contention starves
+      anything above twelve cameras before it reaches steady state, and a capture holding two
+      dozen launches describes engine loading and nothing else.
+      DO NOT re-run 24 or 50 under nsys until the box is quiet. Use 12, or use the interleaved
+      knob A/Bs, which need no profiler and cancel contention between their arms.
       A FRESH CAPTURE AT 12 CAMERAS, 14 Sep, taken because that load FITS the headroom the
       design load does not: 13.8 of 48 cores were free (measured off `/proc/stat`, not from the
       load average), against the ~16 a comparable design-load run needs. Five GPUs were free;
