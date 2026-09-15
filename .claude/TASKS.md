@@ -4874,9 +4874,12 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       against [61.8, 75.7] -- and V156 had already mandated that route.
       **AND THE FIGURE ABOVE IS UNDERSTATED, because it too was taken at 1 000 offered -- below
       this chain's own ceiling (15 Sep, same mistake as `C1`'s).** So:
-        at the design load (1 000 offered)   tracked [800.8, 819.6]   16 GPUs [3203, 3278]
-        at its CEILING     (2 000 offered)   tracked [848.1, 939.2]   16 GPUs [3392, 3757]
+        at the design load (1 000 offered, GPUs 1,2,4,6)   tracked [800.8, 819.6]   16 GPUs [3203, 3278]
+        at its CEILING     (2 000 offered, GPUs 1,3,4,6)   tracked [848.1, 939.2]   16 GPUs [3392, 3757]
       Against the 3 000 target that is **[1.13, 1.25]x rather than 1.07-1.09x**.
+      THE DEVICE SETS DIFFER AND THE ROWS NOW SAY SO (#287 r4): GPU 2 against GPU 3, so the
+      offer is not the only variable between these two lines. It was "the same four cards"
+      until the ceiling row became the new sweep's, whose quad this page knows.
       IT STAYS CORRECT AT THAT CEILING, AND THESE COUNTERS ARE THE RETAINED EIGHT'S OWN --
       not the withdrawn run's, which is what this line said for one round: `events_complete`
       35 374-38 840, `events_incomplete` **[0, 13]** (four of the eight exactly 0),
@@ -5215,26 +5218,30 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       ceiling of any kind can be read off it.
       SO I OFFERED 2 000 INSTEAD OF 1 000, AND THAT CHANGES THE ANSWER AGAIN -- the third time
       in this thread, and the reason is always the same: a comparison below saturation measures
-      the offer, not the system. 50 cameras x 40 fps, same four GPUs, both at `workers 92` --
-      which this page now knows is part of the specification, since the ceiling moves with it:
-        detect only   accepted **1 845 img/s** (n=1)         dropped 0.4%            107-115% busy
-        full chain    accepted **[884.5, 971.1]** (n=8)      dropped **[48.3, 52.1]%** 121-126% busy
-      **The full chain's ceiling on four GPUs is [884.5, 971.1] img/s. Detect-only is still
-      barely dropping at 1 845.** So the 10.74 extra invocations cost **[1.90, 2.09]x**, not
-      the 1.14x the 1 000-offered run showed and not the 12% I wrote from it -- BOTH WITHDRAWN.
-      THIS ROW READ "977 / 48% / 1.89x" FOR ONE ROUND AND EVERY FIGURE IN IT WAS THE EXCLUDED
-      RUN's (#287 r3). The cost estimate 1.89x sits BELOW the whole corrected interval, so it
-      was not merely imprecise; anyone sizing a fleet from it was reading one run of a sample
-      that spans 9.8%. The `dropped` figure divides by frames READ, which is what that counter
-      does and what the widened pair states. At 1 000
+      the offer, not the system. 50 cameras x 40 fps, GPUs 1,3,4,6, both at `workers 92` -- which
+      this page now knows is part of the specification, since the ceiling moves with it -- and
+      **the two chains ALTERNATED within one sitting, three runs each**:
+        detect only   accepted **[1 805.2, 1 873.6]**  dropped [0.2, 2.4]% of read   110-124% busy
+        full chain    accepted **[  882.0,   950.5]**  dropped [49.2, 52.9]% of read 112-127% busy
+      **So the 10.74 extra invocations cost [1.90, 2.12]x**, pairing each run with its partner
+      (1.90 / 2.02 / 2.12) -- not the 1.14x the 1 000-offered run showed and not the 12% I wrote
+      from it, BOTH WITHDRAWN.
+      THIS ROW READ "1 845 / 977 / 48% / 1.89x" AND **BOTH ARMS CAME FROM ONE WITHDRAWN SITTING**
+      (#287 r3 found the 977, r4 found that 1 845 was its partner). A ratio whose numerator and
+      denominator come from a box state the page has disowned is not saved by labelling the
+      denominator `n=8`. RE-RUN RATHER THAN CAVEATED, and the answer is reassuring: 1 845 falls
+      INSIDE the new [1 805.2, 1 873.6] and 1.89x just below [1.90, 2.12], so the magnitude was
+      right and only the provenance was wrong. The eight-run ceiling from the wider sweep is
+      [884.5, 971.1]; the [882.0, 950.5] above is this sitting's own three, which is what the
+      ratio is computed from. At 1 000
       offered neither shape was at its ceiling, so that comparison measured the offer.
       WHICH ALSO RETIRES THE SEGMENTER NUMBER ABOVE: 1.01-1.05x was taken at 1 000 offered,
       below both ceilings, so it does not price the segmenter either. What survives from it is
       the methodological point -- occupancy percentages did not predict it -- and that point is
-      now stronger, because occupancy did not predict THIS either (detect-only at 107-115% busy
-      still had 1 845 img/s in it).
+      now stronger, because occupancy did not predict THIS either (detect-only at 110-124% busy
+      still had [1 805, 1 874] img/s in it).
       SO THE MODELS DO COST, AND THE OPERATOR'S LEVER IS REAL AFTER ALL: a chain doing one
-      invocation an image runs [1.90, 2.09]x one doing 11.74. What that buys against 4 500 is a
+      invocation an image runs [1.90, 2.12]x one doing 11.74. What that buys against 4 500 is a
       product question I cannot answer -- detect-only is not the product.
       SO THE ANSWER TO THIS ITEM IS NOT A PRODUCT DECISION AFTER ALL: 4 500 NEEDS DEVICES, and
       specifically more SHARDS rather than more cards per shard.**
@@ -6421,11 +6428,12 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       what it reads -- so that IS the ceiling. Both arms at saturation:
         baseline     938.6 img/s          x  2.00 invocations =  1 877 model-invocations/s
         full chain   [884.5, 971.1] img/s x 11.74 invocations = **[10 384, 11 401]**
-        detect only  1 845 img/s          x  1.00             =  1 845
+        detect only  [1805.2, 1873.6]    x  1.00             =  [1 805, 1 874]
       **BY FRAMES WE ARE AT PARITY -- [0.94, 1.03]x -- NOT 0.85-0.89x AND NOT 1.04x. BY MODEL
-      WORK, [5.53, 6.07]x.** The third reading: our one-model chain does 1 845 invocations/s
-      against the baseline's 1 877 -- **0.98x, parity per unit of work** -- which is one run
-      and should be read as such.
+      WORK, [5.53, 6.07]x.** The third reading: our one-model chain does [1 805, 1 874]
+      invocations/s against the baseline's 1 877 -- **[0.96, 1.00]x, parity per unit of work**.
+      That was "0.98x" from the excluded sitting until it was re-run three times (#287 r4);
+      0.98 falls inside the interval, so the reading survives its own provenance fix.
       SO THE DEFICIT NEVER EXISTED; it was a comparison of their ceiling against our
       mid-range. I recorded 0.85-0.89x earlier today and it stood for hours.
       **AND THEN I QUOTED A RUN THAT IS NOT IN THE SAMPLE AT ALL.** The correction above first

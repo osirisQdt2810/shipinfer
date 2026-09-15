@@ -45,8 +45,9 @@ and `videoconvert` present, `nvh264dec` and `nvvideoconvert` absent.
 
 Extrapolated linearly to sixteen GPUs that is [3203, 3278] tracked img/s — **and that is the
 design-load reading, not the chain's capacity.** This run was offered 1 000 img/s, which it
-refuses 13% of; offered 2 000 it tracks **[848.1, 939.2] img/s** on the same four cards over
-eight interleaved runs. So the capacity reading is **[3392, 3757] on sixteen GPUs,
+refuses 13% of; offered 2 000 it tracks **[848.1, 939.2] img/s** over eight interleaved runs on
+four A5000s — **1,3,4,6, against the design-load row's 1,2,4,6**, so offer is not the only thing
+that changed between these two lines. So the capacity reading is **[3392, 3757] on sixteen GPUs,
 [1.13, 1.25]× the 3 000 target**, against 1.07–1.09× from the design-load figure.
 
 **It stays correct at that ceiling, and this is re-captured over the eight rather than carried
@@ -77,22 +78,27 @@ At 1 000 offered that table measures the **offer**, not the system: detect-only 
 `frames_dropped 0` and 83–89% detector busy, so it was keeping up with headroom to spare.
 Offering **2 000** instead finds the ceilings:
 
-Both rows are at `workers 92`, which matters: this page also shows the ceiling is
-worker-count-dependent, so "the chain's ceiling on four GPUs" is underspecified without it.
+Both arms at `workers 92` on GPUs 1,3,4,6, **alternated within one sitting**, three runs each —
+which matters twice over: this page shows the ceiling is worker-count-dependent, and a ratio
+whose two terms come from different sittings is not a ratio.
 
-| chain | accepted | dropped (of read) | detector busy |
+| chain | accepted (n=3) | dropped (of read) | detector busy |
 |---|---|---|---|
-| `detect_only.yaml` | **1 845 img/s** (n=1) | 0.4% | 107–115% |
-| full | **[884.5, 971.1] img/s** (n=8) | **[48.3, 52.1] %** | 121–126% |
+| `detect_only.yaml` | **[1 805.2, 1 873.6] img/s** | [0.2, 2.4] % | 110–124% |
+| full | **[882.0, 950.5] img/s** | **[49.2, 52.9] %** | 112–127% |
 
-**The full chain tops out in [884.5, 971.1] img/s on four GPUs; detect-only is still barely
-dropping at 1 845.** So the ten extra invocations cost **[1.90, 2.09]×**. The 1.14× above is an
-artefact of comparing two unsaturated shapes — quoted here only because it is the mistake this
-table exists to correct.
+**The ten extra invocations cost [1.90, 2.12]×**, pairing each run with its partner
+(1.90 / 2.02 / 2.12). The 1.14× above is an artefact of comparing two unsaturated shapes —
+quoted here only because it is the mistake this table exists to correct.
 
-This row said `977 img/s · 48% · 1.89×` until the replicates existed, and 977 is the **excluded**
-run — so the point estimate 1.89× sits *below* the whole corrected interval. Anyone sizing a
-fleet from this table was reading a single run of a sample that spans 9.8%.
+This table said `1 845 · 977 · 48% · 1.89×` until the replicates existed, and **both** of those
+figures came from one withdrawn sitting — 977 is the run excluded below, and 1 845 was its
+partner, so the ratio inherited the box state this page had already disowned. Re-running the
+pair settles it rather than caveating it: the old numbers sit *inside* the new intervals
+(1 845 in [1 805.2, 1 873.6]; 1.89× just below [1.90, 2.12]), so the magnitude was right and
+the provenance was not. The full chain's eight-run ceiling across the wider sweep is
+[884.5, 971.1]; the [882.0, 950.5] above is this sitting's own three, which is what the ratio
+is computed from.
 
 Which corrects the like-for-like pair above. That pair compared the baseline's **saturated**
 938.6 against our 821–836 from a run offered only 1 000 img/s — below our own ceiling. Both at
@@ -102,11 +108,13 @@ saturation:
 |---|---|---|---|
 | baseline | 938.6 (saturated) | 2.00 | 1 877 |
 | full chain | **[884.5, 971.1]**, n=8 | 11.74 | **[10 384, 11 401]** |
-| detect only | 1 845 (n=1) | 1.00 | 1 845 |
+| detect only | **[1 805.2, 1 873.6]**, n=3 | 1.00 | [1 805, 1 874] |
 
 **[0.94, 1.03]× by frames — parity, straddling 1.0 — and [5.53, 6.07]× by model work**, with
-0.98× per invocation on the one-model arm. The 0.85–0.89× deficit was their ceiling against our
-mid-range, and that correction stands.
+**[0.96, 1.00]×** per invocation on the one-model arm. The 0.85–0.89× deficit was their ceiling
+against our mid-range, and that correction stands. The detect-only row read `1 845 (n=1)` and
+`0.98×` until it was re-run three times in one sitting with the full chain — it came from the
+same withdrawn sitting as the 977, and 0.98 falls inside the new interval.
 
 This row read "977.0 · 1.04× · 6.11×" until the replicates existed — and the 977 is the
 **excluded** run, taken an hour earlier by a different script, whose 976.6 sits *above* the
@@ -173,7 +181,8 @@ more workers *lose* tracked frames. It was run at 1 000 img/s offered — below 
 ceiling — so it ranked the offer. Re-run at **2 000 offered**: sixteen runs, eight per arm,
 strictly alternated A/B by one script in one sitting, 50 cameras × 40 fps × 40 s,
 `--source nvdec`, GPUs 1,3,4,6, workers the only variable. (The design-load row further up uses
-1,2,4,6; both are stated, and nothing here is compared across the two device sets.)
+1,2,4,6. Within this sweep the device set is fixed, so the 92-vs-140 comparison is clean; the
+design-load-to-ceiling comparison at the top of this page is not, and now says so there.)
 
 | workers | n | accepted img/s | untracked | **tracked img/s** | tracked mean (sd) |
 |---|---|---|---|---|---|

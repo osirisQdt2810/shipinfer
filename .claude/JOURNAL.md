@@ -147,13 +147,15 @@ Offered 2 000 instead of 1 000, the picture inverts:
 | | tracked / accepted | vs baseline |
 |---|---|---|
 | full chain at its ceiling | accepted [884.5, 971.1], tracked [848.1, 939.2], n=8 | **[0.94, 1.03]x by frames — parity — and [5.53, 6.07]x by model work** |
-| detect only | 1 845 | 0.98x per invocation — parity |
+| detect only | [1 805.2, 1 873.6], n=3 | [0.96, 1.00]x per invocation — parity |
 
 (Written that evening from ONE run as "977 accepted, 952 tracked, 1.04x, 6.11x" — and that run
 is the one later EXCLUDED as a different box state. Its 976.6 accepted sits above the eight
 retained runs' top of 971.1 and its 952.4 tracked above their 939.2, so it was never a
-best-of-n from the kept sample. The correction's direction holds; its point figures belonged to
-an arm this session then discarded.)
+best-of-n from the kept sample. The detect-only row was that run's PARTNER, from the same
+sitting, which is why the per-invocation ratio was re-run rather than caveated — three matched
+pairs, and 0.98 falls inside the interval they give. The correction's direction holds; its point
+figures belonged to a sitting this session then discarded.)
 
 So the 0.85–0.89x deficit I reported for hours never existed; it compared their saturated
 figure against our mid-range. The segmenter's 1.01–1.05x and the chain's "12% cost" went with
