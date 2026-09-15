@@ -72,6 +72,26 @@ be chased this way either: at 188 they nearly vanish and that arm is the worst, 
 READ collapse 21% -- ingest and workers are competing for the same cores, so the refusals move
 upstream rather than away. `WORKERS_PER_GPU=23` stays, now for a measured reason on this route.
 
+**With the measurements answered, the last ledger item turned out to need an upstream PR
+first.** `V124a-PHASE3` wants shipinfer's torch ops to delegate to shipvision's. Its own text
+argued for doing it sooner because shipvision's `TorchImageOps` "already has" the NV12 device
+entry points — it does not: that file contains the string `nv12` zero times, and the ABC
+defaults `supports_nv12` to False. Those live on the NATIVE backend. Withdrawn, and the
+sequencing reverts to last.
+
+Reading further found a real blocker. `torch` and `torchvision` shared an import `try` there,
+so a missing torchvision nulled `torch` too and refused the whole backend — including
+`letterbox` and `crop_batch`, which contain no torchvision. Delegating would have made this
+project's torch rung require an optional dependency, dropping torchvision-free installs to
+numpy. shipvision PR #18 splits the imports and lets classic NMS fall back to the pure-numpy
+`suppress` it already ships.
+
+**Two of my three tests for it were vacuous and I caught it by mutation, not by review.**
+Monkeypatching `torchvision = None` does not fail on the old code, because the old `__init__`
+checked `torch`. The defect is at IMPORT time, so the test has to be a subprocess with a
+`sys.meta_path` hook that makes the import raise. Reverting each half of the fix now fails the
+tests that cover it — which is the only evidence that they test anything.
+
 **The lesson.** A thread group's name is not evidence of what it does, and `comm`'s
 15-character truncation hides a whole pipeline under its first element. The check that catches
 it in one step is dividing the group's CPU by the frames it handled and asking whether the
