@@ -4735,7 +4735,23 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       CONCLUSION: `WORKERS_PER_GPU=23` stays, now for a measured reason on THIS route rather
       than an inherited one. `run_cpp_bench.sh`'s comment that the per-GPU form is an
       assumption still stands -- this re-sweep was at four devices, like the last one.
-- [!] **V167-GSTREAMER-ONLY-3000 · **OPERATOR: WHICH LEVER?** RE-MEASURED 11 Sep AT THE DESIGN
+- [x] **V167-GSTREAMER-ONLY-3000 · ANSWERED 15 Sep: 3 000 IS MET ON THE ROUTE YOU MANDATED,
+      and the lever was that route rather than a choice you had to make.** [3203, 3278] tracked
+      img/s extrapolated to sixteen GPUs from three runs at the design load, host [4.9, 5.2] of
+      48 cores. The question this line carried -- **OPERATOR: WHICH LEVER?** -- is closed by
+      measurement: none of the three it offered. Not (a) the host budget, whose two merged
+      levers act on 4-19% of host CPU; not (b) more devices, since sixteen is the deployment's
+      own number; not (c) fewer models, which was never needed for 3 000. What moved it was
+      `--source nvdec` against `--source gstreamer`, [9.7, 10.2] ms of host CPU an image
+      against [61.8, 75.7] -- and V156 had already mandated that route.
+      CAVEAT ON THE CLOSURE, stated rather than buried: sixteen GPUs is a LINEAR extrapolation
+      from four, which this file has always flagged as an assumption, and the box was contended
+      (load 44-47), which makes these lower bounds rather than upper ones. A run on more than
+      four devices is what would turn the extrapolation into a measurement, and nothing here
+      blocks on it.
+      **4 500 IS A DIFFERENT ANSWER AND LIVES IN `V165-WHOLE-PIPELINE-4500`**, which this run
+      also settled: short by 27-29%, and that one still needs you.
+      ORIGINAL: **OPERATOR: WHICH LEVER?** RE-MEASURED 11 Sep AT THE DESIGN
       **MEASURED 15 Sep AND THE TARGET IS MET ON THIS ROUTE, three runs, read as ranges.**
       50 cameras x 20 fps x 40 s, `--source nvdec`, four A5000s (1,2,4,6), `workers 92`, the
       full chain, on a box at load 44-47:
@@ -4998,7 +5014,26 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       (3) the C++ plane still has no `mtmc`, so "decode -> mtmc track" cannot be measured end
       to end until PR 3 lands (the barrier half is built and green).
 
-- [!] **V165-WHOLE-PIPELINE-4500 · THE QUESTION IT SHARES HAS CHANGED, 14 Sep: both
+- [!] **V165-WHOLE-PIPELINE-4500 · THE RE-RUN HAPPENED AND 4 500 IS NOT MET: [3203, 3278],
+      SHORT BY 27-29% (15 Sep). THIS IS THE ANSWER THIS LINE WAS WAITING FOR.** The line above
+      said "nothing here needs an answer until the re-run says whether the target is met", and
+      it now says. Same measurement as `V167-GSTREAMER-ONLY-3000`: 50x20x40 s, `--source
+      nvdec`, four A5000s, three runs, **TRACKED [800.8, 819.6] img/s** extrapolated linearly
+      to sixteen GPUs.
+      SO THE TWO TARGETS SPLIT HERE, and that is the useful thing this run settled: V167's
+      3 000 is MET on this route, V165's 4 500 is not. 4 500 needs 1 125 tracked img/s a
+      GPU-quad, i.e. **1.37x** what the chain now does.
+      WHAT 1.37x CANNOT COME FROM, because this session measured each: not the host budget --
+      it is [4.9, 5.2] of 48 cores, so the host is no longer the wall; not more workers --
+      92 -> 140 -> 188 LOWERS tracked img/s (`WORKER-PLATEAU-ON-THE-NVDEC-ROUTE`); not the two
+      merged host-budget levers, which act on 4-19% of host CPU. The devices are the wall now,
+      and this item's own table says where: **11.74 model invocations per image**, of which
+      `person_embedder` is 7.80 and `ship_segmenter` 1.47 at a 640x640 crop.
+      **SO THE QUESTION FOR YOU IS THE ONE THIS ITEM ALWAYS POSED, now with the arithmetic
+      behind it: 4 500 needs either ~22 GPUs at this chain's cost, or a cheaper chain.** The
+      segmenter alone is 385.8% of a device for 1.47 invocations; dropping or shrinking it is
+      the single largest lever left, and it is a product decision rather than a measurement.
+      ORIGINAL: THE QUESTION IT SHARES HAS CHANGED, 14 Sep: both
       host-budget levers are MERGED (#214 today, #232/#239 on 11-12 Sep), so
       `V167-GSTREAMER-ONLY-3000` is now a measurement waiting on a quiet box rather than a
       lever decision waiting on you. This line inherits that: nothing here needs an answer
@@ -9810,6 +9845,10 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       duplication starts costing something real -- a third ops backend, or a change that has
       to be made twice. Until then the two implementations are cheap and the numerics are
       known-good.
+      THE GPU TIER WAS RUN FOR THE BUMP, which CLAUDE.md requires after touching the kernels
+      submodule and which I nearly skipped: `deploy/rootless/test.sh -m gpu` **73 passed, 1
+      skipped** (the system-tier video fixture is unset) and `-m multigpu` **1 passed, 1
+      skipped**, on GPUs 1,2,6 in the container. So the pin is not merely offline-green.
       WHAT WAS BANKED ANYWAY, and it is the part that mattered: shipvision #18 (torchvision
       decoupled from the torch backend), #19 and #20 (both device paths write in place --
       66.07 -> 15.74 MB and 285.26 -> 184.60 MB peak allocation). Those stand on their own for
