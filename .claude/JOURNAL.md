@@ -136,6 +136,28 @@ matched them from files already on disk, rebuilding nothing. And the baseline is
 "offer-bound and does no inference" in this regime: at fp16 with 1 000 offered it reports
 SATURATED at 938.6, which changes what a frame ratio against it means.
 
+**And then the day's last thread cost me four numbers and improved the headline.** Chasing
+V165's "cheaper chain" lever, I ran detect-only against the full chain at the design load and
+concluded the models were nearly free — the framework was the wall. Both wrong, and the
+counters said so: detect-only had `frames_dropped 0`. It was OFFER-BOUND. Every comparison I
+had run that day was below at least one side's ceiling.
+
+Offered 2 000 instead of 1 000, the picture inverts:
+
+| | tracked / accepted | vs baseline |
+|---|---|---|
+| full chain at its ceiling | 977 accepted, 952 tracked | **1.04x by frames, 6.11x by model work** |
+| detect only | 1 845 | 0.98x per invocation — parity |
+
+So the 0.85–0.89x deficit I reported for hours never existed; it compared their saturated
+figure against our mid-range. The segmenter's 1.01–1.05x and the chain's "12% cost" went with
+it. And the session's own headline was understated: 952 tracked at the ceiling is **3 809 on
+sixteen GPUs, 1.27x the 3 000 target**, not the 1.07–1.09x I had been quoting.
+
+**The rule, now in memory:** `frames_dropped 0` means you found the offer, not the ceiling.
+Stable, reproducible numbers below saturation measure the generator, and they look exactly
+like measurements.
+
 **The lesson.** A thread group's name is not evidence of what it does, and `comm`'s
 15-character truncation hides a whole pipeline under its first element. The check that catches
 it in one step is dividing the group's CPU by the frames it handled and asking whether the
