@@ -538,7 +538,13 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       warm-up file could escape its version directory. Plus `execution.cuda_graph_batch_sizes`
       is now a **filter** on a mixed repository rather than a per-model assertion — treating a
       deployment-wide setting as a claim about each model made it unusable at all.
-- [!] **D5 · RE-CHECKED 14 Sep against the pinned commit: the lane delivered the MOVE, and
+- [!] **D5 · RE-CHECKED AGAIN 15 Sep at the new pin (`dd967d9`) -- UNCHANGED, and that is the
+      finding.** The matchers are still there (`shipvision/mtmc/matchers/{appearance,gated,
+      spatial}`) and `mtmc/backends/native.py` still reaches `_C` through FREE FUNCTIONS, not
+      the class this item named: `_C.mtmc_to_distance` (:114), `_C.mtmc_threshold_similarity`
+      (:141), `_C.mtmc_ground_distances` (:185), `_C.mtmc_spatial_similarity` (:201). Bumping
+      the pin twice today moved nothing here, because #18/#19/#20 are all in `imgproc`.
+      ORIGINAL: RE-CHECKED 14 Sep against the pinned commit: the lane delivered the MOVE, and
       the original complaint is still true in a sharper form.** `core -> matchers` landed --
       `shipvision/mtmc/matchers/{appearance,gated,spatial}` all exist -- and a native gated
       path IS reachable from shipping code now: `MTMC_MATCHERS.build('gated',
@@ -903,7 +909,18 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       native class merged into its algorithm's `tracker.py`; (2) the imgproc library lifted
       out of `bindings/module.cpp` (891 → 130 lines); (3) the new `strongsort`/`boosttrack`
       trackers with their Optuna spaces; (4) the native MTMC tracker (C13).
-- [!] **C13 · THE PREMISE IS GONE, re-checked 14 Sep against the pinned commit.** This line
+- [!] **C13 · RE-CHECKED AGAIN 15 Sep AT THE NEW PIN (`dd967d9`), AND THE OPEN HALF NOW HAS AN
+      ANSWER: there is NO native C++ MTMC tracker.** `csrc/shipvision/mtmc/` holds `matcher`,
+      `matchers/appearance`, `clustering/agglomerative` and `topology/homography`; a grep for
+      `class .*Tracker` or `struct .*Tracker` under it returns nothing, and the bindings expose
+      `similarities`, `build`, `gate`, `ground_positions`, `ground_distances` and `fit_predict`
+      -- the pieces a tracker USES, with no object holding state across frames. So the original
+      ask (a native tracker, not a lock) is still unbuilt, and now it is unbuilt *specifically*:
+      what is missing is the stateful shell over primitives that already exist.
+      The lock half stays gone: `shipvision/mtmc/trackers/cluster/` is still nothing but
+      `__pycache__` and `threading.Lock` appears nowhere in `shipvision/mtmc/`.
+      STILL THE PEER'S LANE, unchanged -- this is a shipvision question and V146/L4 assigns it.
+      ORIGINAL: THE PREMISE IS GONE, re-checked 14 Sep against the pinned commit.** This line
       is about `mtmc/trackers/cluster/tracker.py` holding a Python `threading.Lock` around
       `track()`. That file no longer exists -- `shipvision/mtmc/trackers/cluster/` contains
       nothing but stale `__pycache__` -- and a grep of the whole `shipvision/mtmc/` tree for
