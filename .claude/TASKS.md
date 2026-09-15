@@ -9854,22 +9854,31 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
         shipvision's bilinear oracle.
       * `nms` agrees exactly, but it reaches this repo through `numpy_ops.py` too, so it moves
         with torch or not at all.
-      AND THE MOVE IS WORTH MORE THAN DEDUPLICATION, which is new: shipvision's
-      `TorchImageOps` already has `nv12_letterbox`, `nv12_letterbox_into`,
-      `nv12_letterbox_device_into` and `supports_nv12_device_input` -- NV12 straight into a
-      `DeviceBuffer`. The Python ops seam has NO nv12 anywhere (`grep -rni nv12
-      src/shipinfer/runtime/ops/` is empty), so the plane that V156 mandates a route for
-      (gstreamer rtsp -> nv12 -> all on VRAM) cannot letterbox an NV12 frame at all today.
+      THAT "WORTH MORE THAN DEDUPLICATION" ARGUMENT WAS WRONG AND IS WITHDRAWN (15 Sep). It
+      said shipvision's `TorchImageOps` already has `nv12_letterbox`, `nv12_letterbox_into`,
+      `nv12_letterbox_device_into` and `supports_nv12_device_input`. It does not:
+      `shipvision/imgproc/backends/torch_ops.py` contains the string `nv12` ZERO times,
+      `TorchImageOps(ImageOps)` inherits straight from the ABC, and the ABC defaults
+      `supports_nv12` and `supports_nv12_device_input` to **False** (`imgproc/base.py:644,655`).
+      The NV12 entry points live on `NativeImageOps` -- which needs `shipvision._C` BUILT --
+      and `nv12_letterbox` alone on its numpy oracle. So taking shipvision's TORCH ops brings
+      no NV12 with them, and this item's only non-duplication-debt argument does not hold.
+      WHAT IS STILL TRUE from that paragraph: the Python ops seam has no NV12 anywhere
+      (`grep -rni nv12 src/shipinfer/runtime/ops/` is empty), and `elements/decode.py:29` plus
+      `elements/pool.py:376` say that hole is SEQUENCED behind phase D rather than missed. The
+      correction is only about where the fix would come from: a native build, not the torch move.
+      SO THE SEQUENCING REVERTS TO WHAT IT WAS -- duplication debt, last, after anything the
+      system needs. I checked this before starting the refactor precisely because the claim was
+      load-bearing for doing it sooner.
       NOT A DEFECT, and the distinction matters: it is sequenced. `elements/decode.py:29` says
       `gstreamer-gpu`, which keeps NV12 in VRAM, is "deliberately not registered until phase D
       puts a DataPool behind it (arch.md §10)", and `elements/pool.py:376` refuses a
       device-resident payload in so many words because the pixel-reading elements letterbox on
       the host. So the hole is planned, not missed.
-      WHAT CHANGES IS THIS ITEM'S PRICE: taking shipvision's torch ops brings phase D's
-      device-side NV12 entry points in with them, rather than phase D having to write them.
-      That is an argument for doing it BEFORE phase D rather than last, and it is the first
-      reason to touch this item that is not duplication debt. The `_into` surface is confirmed
-      present, so the adapter shape the plan describes is buildable as written.
+      WHAT SURVIVES OF THE PRICE PARAGRAPH: the `_into` surface IS confirmed present on
+      shipvision's torch backend (`letterbox_into`, `crop_batch_into`, `supports_device_output`),
+      so the adapter shape the plan describes is buildable as written. What does NOT survive is
+      the claim that this pulls phase D's NV12 work forward -- see the withdrawal above.
       AND THE PREMISE IS PINNED NOW rather than left as a note:
       `tests/runtime/test_ops_vs_shipvision.py` asserts all of the above -- letterbox exact,
       crop agreeing off the upscale path and DIFFERING on it, nms identical over 100 random
