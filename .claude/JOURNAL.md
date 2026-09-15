@@ -32,6 +32,23 @@ So row 7's host budget is repriced: ~10 ms an image is ~30 cores at 3 000, not 6
 merged lever was what moved it. It does not settle the device ceiling -- twelve cameras offer
 240 fps to four A5000s -- so the design-load run is still owed and still needs a quiet box.
 
+**And then the run that had been blocked for days went through on a busy box.** Every
+"needs a quiet box" item was waiting on a design-load measurement that kept ending
+startup-only. That was the same host-bound decode: at ~70 ms an image the host could not read
+50 cameras' frames. At ~7 ms it can. 50 x 20 fps x 40 s, `--source nvdec`, four A5000s,
+`workers 92`, three runs at load 44-47:
+
+    TRACKED   [800.8, 819.6] img/s      accepted [821.4, 836.5]
+    host      [4.9, 5.2] of 48 cores    [6.8, 7.5] ms an image
+    mtmc      admitted [80.9%, 81.9%]   145-230 global identities
+
+Linearly on 16 GPUs that is [3203, 3278] tracked img/s against the 3 000 target, host ~22 of
+48 cores. And identity survives the design load, which every previous reading denied: 0.30%
+admitted with zero global ids became ~81% with 145-230. That was never an ordering problem --
+it was starvation, because `min_hits` counts CONSECUTIVE instants and the host was dropping
+three frames in four. Still an extrapolation from four GPUs, still 13% refused at the queue,
+and the box was contended so these are lower bounds.
+
 **The lesson.** A thread group's name is not evidence of what it does, and `comm`'s
 15-character truncation hides a whole pipeline under its first element. The check that catches
 it in one step is dividing the group's CPU by the frames it handled and asking whether the
