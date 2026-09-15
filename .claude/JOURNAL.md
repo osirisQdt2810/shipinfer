@@ -43,11 +43,24 @@ startup-only. That was the same host-bound decode: at ~70 ms an image the host c
     mtmc      admitted [80.9%, 81.9%]   145-230 global identities
 
 Linearly on 16 GPUs that is [3203, 3278] tracked img/s against the 3 000 target, host ~22 of
-48 cores. And identity survives the design load, which every previous reading denied: 0.30%
-admitted with zero global ids became ~81% with 145-230. That was never an ordering problem --
-it was starvation, because `min_hits` counts CONSECUTIVE instants and the host was dropping
-three frames in four. Still an extrapolation from four GPUs, still 13% refused at the queue,
-and the box was contended so these are lower bounds.
+48 cores.
+
+**And then I overclaimed on that run and had to walk it back within the hour.** I wrote that
+identity newly survived the design load, comparing against "0.30% admitted, zero global ids".
+Opening the archived logs showed that comparand came from a host-decode run with `workers 4`,
+never from the nvdec design load -- and that `gate_design_load` on 12 Sep, same route, already
+admitted 84.2% with 167 ids. So identity has survived since 12 Sep, and today's throughput is
+not an improvement either (885.4 img/s then against 821-836 now, on a busier box). What DID
+change is host CPU an image: 19.9 -> 6.9 ms on the same route, which is #214's claimed -40%
+confirmed at the design load for the first time. The A/B and the decode finding stand; the
+identity and throughput headlines were mine, not the data's.
+
+The same check also refuted a suspicion I had filed an item for: I thought `RESULTS.md` might
+be describing a route it had not run, because one 50-camera log showed 49 ms/frame of decode
+on a page that says `--source nvdec`. Dividing every archived run's per-camera thread cost by
+its frames separates the two routes cleanly -- 27-35 ms against 0.3-1.5 -- and every published
+run is on the right side. The 49 ms one was my own scratch run. The artefacts had the answer
+on disk the whole time; reasoning from the one file I happened to have open was the error.
 
 **The lesson.** A thread group's name is not evidence of what it does, and `comm`'s
 15-character truncation hides a whole pipeline under its first element. The check that catches
