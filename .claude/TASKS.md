@@ -4668,6 +4668,31 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       with 167 ids. So identity did NOT newly survive today, and today's throughput is not an
       improvement -- what improved is host CPU an image, 19.9 -> 6.9 ms, which is #214's -40%
       confirmed at the design load. Fixed in row 7 and in `V167-GSTREAMER-ONLY-3000`.
+
+- [x] WORKER-PLATEAU-ON-THE-NVDEC-ROUTE · **RE-SWEPT 15 Sep, AND THE ANSWER IS DON'T: MORE
+      WORKERS BUY ACCEPTED FRAMES AND LOSE TRACKED ONES.** The 23-per-GPU plateau in
+      `run_cpp_bench.sh` was measured on the HOST-DECODE route and its own comment says
+      "re-sweep before trusting it", so with decode off the host it was worth redoing. Design
+      load, `--source nvdec`, four GPUs, one variable:
+        workers  92   accepted 755.4 img/s   untracked  3.3%   **TRACKED 730.8**
+        workers 140   accepted 794.2 img/s   untracked 10.5%   **TRACKED 711.2**
+        workers 188   accepted 717.5 img/s   untracked 10.1%   **TRACKED 644.9**
+      READ AS RANGES, which changes what can be claimed: the four workers=92 runs today span
+      [30 217, 33 459] accepted (10.7%), and 140's 31 769 sits INSIDE that, so at n=1 a point
+      THIS SWEEP DOES NOT SEPARATE 92 FROM 140 on accepted frames. What it does separate is
+      TRACKED: 92's four runs give [730.8, 819.6] and both 140 and 188 fall below all four.
+      THE MECHANISM IS THE ONE `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` NAMES. More workers
+      means a camera's consecutive frames land on more threads, so they arrive at the tracker
+      more reordered and it refuses more of them -- untracked triples, 3.3% -> 10.5%. The
+      metric V164 fixed is images PROCESSED, and a frame the tracker refused is not one.
+      SO THE 13% QUEUE REFUSALS ARE NOT TO BE CHASED WITH WORKERS. At 188 they nearly vanish
+      (3.3% of read) and it is the WORST arm, because frames READ collapse 21% (29 649 against
+      37 414-38 289) -- the ingest threads and the workers are competing for the same cores.
+      Refusals move upstream rather than away. The remaining headroom is camera affinity, which
+      is that item's territory, not a bigger thread pool.
+      CONCLUSION: `WORKERS_PER_GPU=23` stays, now for a measured reason on THIS route rather
+      than an inherited one. `run_cpp_bench.sh`'s comment that the per-GPU form is an
+      assumption still stands -- this re-sweep was at four devices, like the last one.
 - [!] **V167-GSTREAMER-ONLY-3000 · **OPERATOR: WHICH LEVER?** RE-MEASURED 11 Sep AT THE DESIGN
       **MEASURED 15 Sep AND THE TARGET IS MET ON THIS ROUTE, three runs, read as ranges.**
       50 cameras x 20 fps x 40 s, `--source nvdec`, four A5000s (1,2,4,6), `workers 92`, the
