@@ -62,6 +62,16 @@ its frames separates the two routes cleanly -- 27-35 ms against 0.3-1.5 -- and e
 run is on the right side. The 49 ms one was my own scratch run. The artefacts had the answer
 on disk the whole time; reasoning from the one file I happened to have open was the error.
 
+**One more thing the route change made worth redoing: the worker plateau.** 23 per GPU was
+measured when decode was on the host, and the file says to re-sweep before trusting it. At the
+design load on nvdec, 92 / 140 / 188 workers give accepted 755 / 794 / 718 img/s -- but
+untracked goes 3.3% / 10.5% / 10.1%, so TRACKED goes 730.8 / 711.2 / 644.9 and 92 wins. More
+workers spread a camera's consecutive frames over more threads, the tracker refuses what does
+not advance its stream, and a refused frame carries no ids. The 13% queue refusals are not to
+be chased this way either: at 188 they nearly vanish and that arm is the worst, because frames
+READ collapse 21% -- ingest and workers are competing for the same cores, so the refusals move
+upstream rather than away. `WORKERS_PER_GPU=23` stays, now for a measured reason on this route.
+
 **The lesson.** A thread group's name is not evidence of what it does, and `comm`'s
 15-character truncation hides a whole pipeline under its first element. The check that catches
 it in one step is dividing the group's CPU by the frames it handled and asking whether the
