@@ -50,7 +50,7 @@ eight interleaved runs. So the capacity reading is **[3392, 3757] on sixteen GPU
 [1.13, 1.25]× the 3 000 target**, against 1.07–1.09× from the design-load figure.
 
 **It stays correct at that ceiling, and this is re-captured over the eight rather than carried
-over from the withdrawn run:** `events_incomplete` [0, 13] of 35 916–38 840 complete
+over from the withdrawn run:** `events_incomplete` [0, 13] of 35 374–38 840 complete
 (four of eight are exactly 0), `collector_timeouts` equal to it in every run, and mtmc
 admitting [70.0, 76.0] % of observations with 138–211 global ids.
 
@@ -77,15 +77,22 @@ At 1 000 offered that table measures the **offer**, not the system: detect-only 
 `frames_dropped 0` and 83–89% detector busy, so it was keeping up with headroom to spare.
 Offering **2 000** instead finds the ceilings:
 
-| chain | accepted | dropped | detector busy |
-|---|---|---|---|
-| `detect_only.yaml` | **1 845 img/s** | 0.4% | 107–115% |
-| full | **977 img/s** | **48%** | 123–126% |
+Both rows are at `workers 92`, which matters: this page also shows the ceiling is
+worker-count-dependent, so "the chain's ceiling on four GPUs" is underspecified without it.
 
-**The full chain tops out near 977 img/s on four GPUs; detect-only is still barely dropping at
-1 845.** So the ten extra invocations cost **1.89×**. The 1.14× above is an artefact of
-comparing two unsaturated shapes — quoted here only because it is the mistake this table
-exists to correct.
+| chain | accepted | dropped (of read) | detector busy |
+|---|---|---|---|
+| `detect_only.yaml` | **1 845 img/s** (n=1) | 0.4% | 107–115% |
+| full | **[884.5, 971.1] img/s** (n=8) | **[48.3, 52.1] %** | 121–126% |
+
+**The full chain tops out in [884.5, 971.1] img/s on four GPUs; detect-only is still barely
+dropping at 1 845.** So the ten extra invocations cost **[1.90, 2.09]×**. The 1.14× above is an
+artefact of comparing two unsaturated shapes — quoted here only because it is the mistake this
+table exists to correct.
+
+This row said `977 img/s · 48% · 1.89×` until the replicates existed, and 977 is the **excluded**
+run — so the point estimate 1.89× sits *below* the whole corrected interval. Anyone sizing a
+fleet from this table was reading a single run of a sample that spans 9.8%.
 
 Which corrects the like-for-like pair above. That pair compared the baseline's **saturated**
 938.6 against our 821–836 from a run offered only 1 000 img/s — below our own ceiling. Both at
@@ -165,7 +172,8 @@ An earlier sweep the same day ranked 92 workers above 140 on tracked img/s and c
 more workers *lose* tracked frames. It was run at 1 000 img/s offered — below this chain's own
 ceiling — so it ranked the offer. Re-run at **2 000 offered**: sixteen runs, eight per arm,
 strictly alternated A/B by one script in one sitting, 50 cameras × 40 fps × 40 s,
-`--source nvdec`, GPUs 1,3,4,6, workers the only variable.
+`--source nvdec`, GPUs 1,3,4,6, workers the only variable. (The design-load row further up uses
+1,2,4,6; both are stated, and nothing here is compared across the two device sets.)
 
 | workers | n | accepted img/s | untracked | **tracked img/s** | tracked mean (sd) |
 |---|---|---|---|---|---|

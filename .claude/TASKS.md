@@ -4879,7 +4879,7 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       Against the 3 000 target that is **[1.13, 1.25]x rather than 1.07-1.09x**.
       IT STAYS CORRECT AT THAT CEILING, AND THESE COUNTERS ARE THE RETAINED EIGHT'S OWN --
       not the withdrawn run's, which is what this line said for one round: `events_complete`
-      35 916-38 840, `events_incomplete` **[0, 13]** (four of the eight exactly 0),
+      35 374-38 840, `events_incomplete` **[0, 13]** (four of the eight exactly 0),
       `collector_timeouts` equal to it every time, mtmc admitting **[70.0, 76.0]%** with
       138-211 global ids.
       THE CEILING ROW IS A RANGE AND WAS BRIEFLY A POINT: it read "tracked 952, 16 GPUs 3809,
@@ -5215,12 +5215,18 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       ceiling of any kind can be read off it.
       SO I OFFERED 2 000 INSTEAD OF 1 000, AND THAT CHANGES THE ANSWER AGAIN -- the third time
       in this thread, and the reason is always the same: a comparison below saturation measures
-      the offer, not the system. 50 cameras x 40 fps, same four GPUs:
-        detect only   accepted **1 845 img/s**   dropped 0.4%   detector 107-115% busy
-        full chain    accepted **977 img/s**     dropped **48%**  detector 123-126% busy
-      **The full chain's ceiling on four GPUs is ~977 img/s. Detect-only is still barely
-      dropping at 1 845.** So the 10.74 extra invocations cost **1.89x**, not the 1.14x the
-      1 000-offered run showed and not the 12% I wrote from it -- BOTH WITHDRAWN. At 1 000
+      the offer, not the system. 50 cameras x 40 fps, same four GPUs, both at `workers 92` --
+      which this page now knows is part of the specification, since the ceiling moves with it:
+        detect only   accepted **1 845 img/s** (n=1)         dropped 0.4%            107-115% busy
+        full chain    accepted **[884.5, 971.1]** (n=8)      dropped **[48.3, 52.1]%** 121-126% busy
+      **The full chain's ceiling on four GPUs is [884.5, 971.1] img/s. Detect-only is still
+      barely dropping at 1 845.** So the 10.74 extra invocations cost **[1.90, 2.09]x**, not
+      the 1.14x the 1 000-offered run showed and not the 12% I wrote from it -- BOTH WITHDRAWN.
+      THIS ROW READ "977 / 48% / 1.89x" FOR ONE ROUND AND EVERY FIGURE IN IT WAS THE EXCLUDED
+      RUN's (#287 r3). The cost estimate 1.89x sits BELOW the whole corrected interval, so it
+      was not merely imprecise; anyone sizing a fleet from it was reading one run of a sample
+      that spans 9.8%. The `dropped` figure divides by frames READ, which is what that counter
+      does and what the widened pair states. At 1 000
       offered neither shape was at its ceiling, so that comparison measured the offer.
       WHICH ALSO RETIRES THE SEGMENTER NUMBER ABOVE: 1.01-1.05x was taken at 1 000 offered,
       below both ceilings, so it does not price the segmenter either. What survives from it is
@@ -5228,13 +5234,14 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       now stronger, because occupancy did not predict THIS either (detect-only at 107-115% busy
       still had 1 845 img/s in it).
       SO THE MODELS DO COST, AND THE OPERATOR'S LEVER IS REAL AFTER ALL: a chain doing one
-      invocation an image runs 1.89x one doing 11.74. What that buys against 4 500 is a
+      invocation an image runs [1.90, 2.09]x one doing 11.74. What that buys against 4 500 is a
       product question I cannot answer -- detect-only is not the product.
       SO THE ANSWER TO THIS ITEM IS NOT A PRODUCT DECISION AFTER ALL: 4 500 NEEDS DEVICES, and
       specifically more SHARDS rather than more cards per shard.**
       Trimming the chain's largest non-detector model gets 1-5%; the remaining 1.31x is not
-      hiding in the model mix. ~22 GPUs at this chain's cost is the honest shape, and the
-      sixteen-GPU figure stays an extrapolation from four either way.
+      hiding in the model mix. **[19.2, 21.2] GPUs** at this chain's cost is the honest shape --
+      4 500 over tracked [848.1, 939.2] a quad -- and it was "~22" while the arithmetic ran on
+      one run. The sixteen-GPU figure stays an extrapolation from four either way.
       WHAT IS STILL YOURS, and it is smaller than before: whether 4 500 on sixteen GPUs is a
       target to keep. Nothing I can measure moves the chain there.
       ORIGINAL: THE QUESTION IT SHARES HAS CHANGED, 14 Sep: both
