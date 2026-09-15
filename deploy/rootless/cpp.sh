@@ -16,6 +16,10 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_gpus.sh"
 IMAGE="${SHIPINFER_BENCH_IMAGE:-shipinfer-gst:jammy}"
 TRT_DIR="${SHIPINFER_TENSORRT_DIR:-/usr/local/TensorRT}"
 LIBS="$REPO/benchmarks/build/baseline-libs"
+# FORWARDED, not only read here. `cpp_bench_over_rtsp.sh` picks the binary by this name from
+# INSIDE the container, so without the `-e` below the RTSP path checked one binary on the host
+# and then silently ran `bench`. The replay path never showed it: there the name is
+# interpolated into `SHIPINFER_CPP_COMMAND` on the host before the container starts.
 BINARY="$REPO/csrc/build/${SHIPINFER_CPP_BINARY:-bench}"
 
 if [ ! -x "$BINARY" ]; then
@@ -52,6 +56,7 @@ exec docker run --rm --pid=host "${GPU_DEVICES[@]}" \
   -e SHIPINFER_IN_CONTAINER=1 \
   -e SHIPINFER_CUDA_BLOCKING_SYNC -e SHIPINFER_DEVICE_FOLD \
   -e SHIPINFER_RTSP_PERSON_DATA -e SHIPINFER_RTSP_SHIP_DATA -e SHIPINFER_RTSP_PORT \
+  -e SHIPINFER_CPP_BINARY \
   -v "$REPO:/work" \
   -v "$TRT_DIR:/tensorrt:ro" \
   "${mount_libs[@]}" \

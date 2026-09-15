@@ -326,7 +326,9 @@ class TestTheDeviceTableIsPrintedByOneFunction:
     impossible rather than merely unintended.
     """
 
-    def _printed(self, capsys, per_device, per_device_rows, per_device_batches=None) -> list[str]:
+    def _printed(
+        self, capsys, per_device, per_device_rows, per_device_batches=None
+    ) -> list[str]:
         from benchmarks import run_bench
 
         tables = {"per_device": per_device, "per_device_rows": per_device_rows}
