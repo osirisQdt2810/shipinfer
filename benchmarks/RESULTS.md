@@ -47,6 +47,37 @@ Extrapolated linearly to sixteen GPUs that is **[3203, 3278] tracked img/s**. Th
 extrapolation is an assumption, not a measurement, and the box was contended — both make these
 lower bounds rather than upper ones.
 
+### How to re-run the three above
+
+The sections this one supersedes each carry their command; so does this one.
+
+```bash
+# the design load (the [800.8, 819.6] row)
+SHIPINFER_BENCH_IMAGE=shipinfer-gst:jammy-nvdec SHIPINFER_BENCH_GPUS=1,2,4,6 \
+SHIPINFER_BENCH_CAMERAS=50 SHIPINFER_BENCH_WORKERS=92 SHIPINFER_BENCH_FPS=20 \
+SHIPINFER_BENCH_SECONDS=40 SHIPINFER_BENCH_SOURCE=nvdec \
+  scripts/run_cpp_bench.sh design_nvdec_50
+
+# the decode A/B: the same, CAMERAS=12 WORKERS=24 SECONDS=20, alternating
+#   SHIPINFER_BENCH_SOURCE=gstreamer  and  =nvdec
+# interleaved off/on/off/on -- one box cancels contention between its own arms.
+
+# the baseline arm, at MATCHED precision (this is what clears the engine gate)
+SHIPINFER_GPUS=1,2,4,6 deploy/rootless/bench.sh --precision fp16 --systems baseline \
+  --cameras 50 --fps 20 --gpus 0,1,2,3 --seconds 40
+```
+
+`--precision fp16` is the part worth knowing: without it `bench.sh` refuses the baseline arm
+because the repository's plan and `models/yolo26n_fp32.engine` are different files, and its
+message suggests rebuilding both from one ONNX. No rebuild is needed — the repository's plan
+is byte-identical to `models/yolo26n_fp16.engine`, so naming fp16 matches them from files
+already on disk.
+
+A 50-camera run cannot be driven from the Python harness: its in-process generator delivers
+~137 img/s against a 1 000 target and the harness refuses to report throughput against a load
+never offered. That is why our arm comes from `run_cpp_bench.sh` and the baseline from
+`bench.sh`.
+
 ### The like-for-like pair, at matched precision
 
 The engine-parity gate refuses a run whose two sides load different engine files. The mismatch
