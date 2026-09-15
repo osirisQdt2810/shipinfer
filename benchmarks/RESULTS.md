@@ -47,6 +47,30 @@ Extrapolated linearly to sixteen GPUs that is **[3203, 3278] tracked img/s**. Th
 extrapolation is an assumption, not a measurement, and the box was contended — both make these
 lower bounds rather than upper ones.
 
+### What the chain actually costs: 12%, not 5.87x
+
+The asymmetry this page opens with — "one baseline image passes through one model, one
+ShipInfer frame passes through the chain" — is real but it is not what limits us. Same load,
+same shape, varying only how many models hang off the frame:
+
+| chain | model invocations an image | accepted img/s | detector busy |
+|---|---|---|---|
+| full | 11.74 | [821.4, 836.5] | 164–174% |
+| no segmenter | 10.27 | [840.1, 856.3] | — |
+| `detect_only.yaml` | 1.00 | **[949.5, 949.6]** | **83–89%** |
+
+**Stripping 91% of the model work buys 1.14×.** Detect-only reads 95% of the offered frames
+with its detector *under* 100% occupied, so the devices are not the wall there either. One
+process caps near ~950 img/s and the whole perception chain costs 12% against that.
+
+Which reframes the like-for-like pair above. At comparable model work our arm is not behind:
+the baseline saturates at **938.6** running two models; our detect-only runs **949.5** running
+one. The 0.85–0.89× frame ratio is what the other ten invocations cost, and they cost 12% —
+not the 5.87× the invocation count suggests.
+
+Caveat: one process, four GPUs. The deployment is a process per shard, so this ceiling scales
+with processes; what it says is that adding cards to *one* process stops paying early.
+
 ### How to re-run the three above
 
 The sections this one supersedes each carry their command; so does this one.

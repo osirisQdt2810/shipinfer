@@ -6294,7 +6294,15 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       byte-identical to `models/yolo26n_fp16.engine` while the baseline defaults to the fp32
       one. `--precision fp16` matches them from files that already exist, touches no
       repository and strands no earlier number.
-      WHAT IS STILL YOURS, and it is narrower than before: which of those two ratios the 5x is
+      **AND A THIRD READING, measured 15 Sep, which may be the one that settles it: at
+      COMPARABLE MODEL WORK we are not behind at all.** The baseline saturates at 938.6 running
+      TWO models; our `detect_only.yaml` runs **[949.5, 949.6]** running ONE. So the 0.85-0.89x
+      frame ratio is not the chain being slower per unit of work -- it is what the other ten
+      invocations cost, and they cost **12%** (stripping 91% of the model work buys 1.14x, see
+      `V165-WHOLE-PIPELINE-4500`). A frame ratio against a two-model simulation was always
+      going to read as a deficit; what it actually measures is that we do nine more models for
+      12% more time.
+      WHAT IS STILL YOURS, and it is narrower than before: which of those ratios the 5x is
       against. If it is FRAMES through the full chain, 5x means 4 693 img/s on four GPUs and
       the chain is 5.6x short. If it is MODEL WORK, it is already met. The honest note is that
       the baseline does no tracking, no embedding and no identity at all, so a frame ratio
