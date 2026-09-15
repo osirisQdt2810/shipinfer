@@ -336,7 +336,7 @@ prose, and inline `[!] OPERATOR:` sub-markers parse as items. An advisory list t
 false positives gets ignored, which is no better than the reminder it replaces. Done by hand it
 is twenty minutes and it found four.
 
-AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contract, per frame on a chain or per topology in the DeepStream builder. Row 8 answered itself on 14 Sep (the config was in the artefacts; the gap was host CPU, not configuration). Everything else is `[x]`/`[!]`/`[-]`; the one remaining `[ ]` is `SHIPVISION-TRACK-LAST-MATCH`, which the parity register PINS open by test and which is a decision rather than work in flight.
+AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is this repo's `pipeline/deepstream/run.py` deployed anywhere outside this box? It has never run HERE (no deepstream image; T4 still asks you to pull it), so if the answer is no I will make `missing_stages` per-frame everywhere and keep schema v5. Row 1's remaining half is the other one: which of the two measured ratios the 5x means (frames 0.85-0.89x, model work 5.14-5.23x). Everything else is `[x]`/`[!]`/`[-]`; the one `[ ]` is `SHIPVISION-TRACK-LAST-MATCH`, which the parity register PINS open by test.
 
 > ## Z · The final gate — never remove this line (V61)
 >
@@ -3433,12 +3433,24 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       own PR: either `missing_stages` becomes per-frame everywhere and the DeepStream
       topology's absent stages move to a static field, or the chain plane starts naming the
       slots its file does not declare. The first looks right -- `partial` is a frame word.
-      [!] OPERATOR: WHICH READING IS THE CONTRACT? This is not a refactor: whichever way it
-      goes, one set of live consumers sees different bytes. Moving DeepStream's absent stages
-      to `extra` keeps schema v5 (no version bump, no `motservice` rebuild) but flips that
-      deployment's `partial` from true to false and empties its `missing_stages`. Leaving it
-      alone keeps `partial` meaning two things across producers. I can build either in an
-      afternoon; I should not pick which consumers to break.
+      **THE QUESTION IS NARROWER THAN IT WAS, 15 Sep, because I checked whether the consumers
+      it protects exist.** The DeepStream path has NEVER RUN ON THIS BOX: `docker images` has
+      no `deepstream` tag, and `T4` -- still open -- is the line asking you to pull
+      `nvcr.io/nvidia/deepstream` (~6 GB) so it can be tried. Its enabling step is outstanding,
+      so on this machine it publishes to nobody and there are no bytes to change.
+      SO THE ONLY THING I CANNOT SEE is whether you run this repo's
+      `pipeline/deepstream/run.py` somewhere else. That is a yes/no, not a schema debate.
+      [!] OPERATOR, AND A DEFAULT RATHER THAN AN OPEN QUESTION: **if your DeepStream path is
+      not deployed outside this box, say nothing and I will make `missing_stages` per-frame
+      everywhere** -- the reading this item already judges right, since `partial` is a frame
+      word -- moving PR1's static absences to `extra`. That keeps **schema v5** (no version
+      bump, no `motservice` rebuild) and changes only a producer that currently produces
+      nothing. **If it IS deployed, say so and I will leave the divergence alone**, because
+      then the flip empties a live consumer's `missing_stages` and turns its `partial` false.
+      WHAT IT COSTS EITHER WAY: `tests/pipeline/test_deepstream.py:741,954` pin the current
+      behaviour and would be re-baselined deliberately; nothing on the chain side moves. I can
+      still build either in an afternoon -- what I have removed is the need for you to weigh
+      two readings, leaving one fact only you hold.
 
 - [-] MTMC-TWO-SLOT-CACHED-REGISTRIES · HELD 14 Sep, deliberately, and the trigger below
       is the whole decision: the template is written by whoever adds the THIRD caller, not
