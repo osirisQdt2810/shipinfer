@@ -959,3 +959,33 @@ Measured before the change against the real barrier: a 2 s backward step at 50 c
 60 ms window cost 40 of 80 instants, counted as `late` rather than `backward` — which reads as
 "the chain is too slow". The backward guard stays load-bearing for the DeepStream path, whose
 stamp is the camera's own clock. Nothing on the wire changes.
+
+## ADR-023 — Decode belongs on the device; the host route is a fallback, not a default
+
+**Status:** Accepted · 2026-09-15 · records the measurement behind V156's mandate
+
+**Context.** Where H.264 decoding happens was an operator instruction (V156, `gstreamer rtsp
+-> nv12 -> all on VRAM`) with no ADR and no number, so nothing stopped a later change routing
+ingest back through the host — and the host-budget analysis had been weighing two
+inference-side levers for weeks without noticing decode dominated.
+
+**Decision.** The design-load route is `--source nvdec`: GStreamer carries the bitstream off
+RTSP, NVDEC decodes into NV12 on the device. `--source gstreamer` (software `avdec_h264` plus
+an NV12->BGR `videoconvert` on the host) stays for machines without NVDEC and for parity work.
+
+**Why, measured.** Interleaved A/B, 12 cameras × 20 fps, three replicates each, `--source` the
+only variable: **[61.8, 75.7] ms of host CPU per frame READ on `gstreamer` against [9.7, 10.2]
+on `nvdec`**, non-overlapping, reading 26–33% of the offered frames against 98%. At the design
+load that decides feasibility: 50 × 20 on four A5000s costs [4.9, 5.2] of 48 cores and retires
+[800.8, 819.6] tracked img/s; on the host route the box cannot read the frames at all.
+
+**Why it was invisible.** The cost reports as `rtpjitterbuffer`: `gstreamer_pipeline.h` puts no
+`queue` between `rtspsrc` and `appsink`, so depay, parse, decode, convert and appsink all run
+on that element's srcpad task, and `comm` truncates at 15 where that name is exactly 15.
+Divide a thread group's CPU by the frames it handled before believing its name.
+
+**Consequences.** Inference-side host work is bounded by the model threads — 12–19% of host CPU
+at twelve cameras, 4% at fifty — which is all the two merged levers (#214, #232/#239) can
+touch. With decode off the host the DEVICES are the wall (detector 164–174% occupied), which is
+why `EXECUTE-BLOCKS-THE-INSTANCE-THREAD` closed unbuilt: a thread blocked on a saturated device
+has nothing better to do. A machine without NVDEC still runs, on the host route, slower.
