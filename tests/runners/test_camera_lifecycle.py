@@ -1127,6 +1127,53 @@ class TestThePriorityBandComesFromTheCameraConfig:
         assert runner.cameras == ()
         assert after_refusal == {Priority.BACKGROUND}
 
+    def test_a_refused_add_never_writes_the_band_table_at_all(self) -> None:
+        """The stronger invariant, and the one that is not a race.
+
+        The test above only fails when a frame lands inside the window between the write and
+        the rollback. That window is real -- CI's coverage leg hit it, its instrumentation
+        being slow enough to widen it -- but a test needing the right interleaving passes on
+        a good day. This asserts what the fix has instead: for a camera that is ALREADY
+        RUNNING the refusal precedes any write, so `record_placement` is never reached.
+        """
+        chain = load()
+        queue = RecordingQueue("recording", 64)
+        runner = InprocessRunner(
+            chain,
+            settings=settings(),
+            queue=queue,
+            source_factory=scripted(frames=64, finite=False),
+        )
+        runner.start()
+        try:
+            runner.add_camera(CameraSpec("cam-x", "injected://x", priority=Priority.BACKGROUND))
+            assert until(lambda: queue.band_of("cam-x")), queue.bands
+
+            writes: list[tuple[str, object]] = []
+            original = runner._bands.record_placement
+
+            def spy(camera_id: str, band: object) -> None:
+                writes.append((camera_id, band))
+                original(camera_id, band)
+
+            runner._bands.record_placement = spy  # type: ignore[method-assign]
+            try:
+                with pytest.raises(DuplicateCameraError, match="already running"):
+                    runner.add_camera(
+                        CameraSpec(
+                            "cam-x", "injected://again", priority=Priority.TRACKING_CRITICAL
+                        )
+                    )
+            finally:
+                del runner._bands.record_placement  # type: ignore[attr-defined]
+        finally:
+            runner.stop(timeout_s=5.0)
+
+        assert writes == [], (
+            "a refused add wrote the band table and relied on rolling it back; the camera is "
+            f"already running, so its frames read those bands meanwhile: {writes}"
+        )
+
     def test_a_refused_add_with_no_band_does_not_erase_the_running_bands(self) -> None:
         """The mirror case, and the one that ends in a ``201``.
 

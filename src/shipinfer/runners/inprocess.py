@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from shipinfer.core.errors import (
     ConfigurationError,
+    DuplicateCameraError,
     QueueFullError,
     RequestCancelledError,
     ServerStateError,
@@ -426,11 +427,23 @@ class InprocessRunner(Runner):
                     "closed queue -- call start() first"
                 )
             manager = self._ingest()
-            # The band is recorded first because `_camera_config` reads it back (the record
-            # and the lane are one resolution), and undone if the placement is refused --
-            # a placed band is read per frame, so one left behind by an add that raised
-            # would move a *running* camera's lane on the strength of a request the server
-            # rejected. `None` is a sound "there was none": the table never holds `None`.
+            # REFUSE A DUPLICATE BEFORE WRITING ANYTHING, because restoring afterwards is not
+            # soon enough. The band has to be recorded before `_camera_config` reads it back,
+            # and the camera being refused is by definition ALREADY RUNNING -- its decode
+            # thread is publishing while this one writes, and every frame reads the band. So
+            # the rollback below leaves a window in which a *running* camera's frames are
+            # banded at the lane a rejected request asked for. CI caught exactly that on the
+            # coverage leg, whose instrumentation widens the window
+            # (`test_a_refused_add_does_not_re_band_the_camera_that_is_already_running`).
+            if camera.camera_id in manager:
+                raise DuplicateCameraError(
+                    f"camera {camera.camera_id!r} is already running; "
+                    "remove it before adding it again"
+                )
+            # STILL ROLLED BACK, because the check above is not the decision: `add_camera`
+            # re-checks under the manager's own lock and remains the authority. This closes
+            # the window for the case that has a running camera to damage; two threads adding
+            # the SAME NEW id can still race here, and neither has a lane to lose.
             previous = self._bands.placed(camera.camera_id)
             self._admit_at(camera)
             try:
