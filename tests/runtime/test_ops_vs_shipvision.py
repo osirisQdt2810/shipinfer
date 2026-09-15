@@ -28,16 +28,19 @@ torch = pytest.importorskip("torch")
 
 # doc: long why the submodule is not the whole dependency, measured on CI rather than guessed
 #: THE SUBMODULE IS NOT THE WHOLE DEPENDENCY, and gating on it alone is what reddened #278's
-#: kernels leg: `shipvision.imgproc.TorchImageOps` refuses to construct without `torchvision`
-#: ("Install shipvision[torch]"), which this project deliberately keeps OPTIONAL --
-#: `pyproject.toml`'s `vision` extra, with `torch_ops.py::_nms_fallback` written for installs
-#: that lack it. So the torch-to-torch comparison needs an install carrying that extra, and
-#: says so rather than reporting a pass it never ran. Same shape as this leg's own `[solvers]`
-#: note: source without dependencies is not the dependency.
+#: kernels leg. THE REASON HAS CHANGED, though, and the old one is worth stating because it
+#: was true until today: `shipvision.imgproc.TorchImageOps` used to REFUSE TO CONSTRUCT
+#: without `torchvision`, because that import shared a `try` with `torch`. shipvision #18
+#: split them, so as of the pin bumped alongside this comment the backend builds on torch
+#: alone and classic NMS falls back to its own `imgproc.nms.suppress`.
+#: THE GATE STAYS ANYWAY, deliberately: these cases compare OUR torch ops against THEIRS, and
+#: with torchvision absent the two sides take different NMS paths. Keeping the comparison on
+#: an install that has the extra keeps it a comparison of the ops rather than of the
+#: fallbacks. It is no longer "cannot construct" — it is "would not be like-for-like".
 needs_their_torch = pytest.mark.skipif(
     __import__("importlib.util", fromlist=["util"]).find_spec("torchvision") is None,
-    reason="torchvision is absent, so shipvision's torch backend cannot construct; "
-    "install the `vision` extra (or shipvision[torch]) to run the torch-to-torch premise",
+    reason="torchvision is absent; shipvision's torch backend now builds without it, but the "
+    "two sides would take different NMS paths, so the comparison would not be like-for-like",
 )
 
 FRAMES_HW = ((480, 640), (300, 300), (720, 1280))
