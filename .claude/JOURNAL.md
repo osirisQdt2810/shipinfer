@@ -163,6 +163,20 @@ like measurements.
 it in one step is dividing the group's CPU by the frames it handled and asking whether the
 answer is a plausible price for the work the name claims.
 
+**Then I applied that rule to my own worker sweep, and it took a fifth number down.** The
+paragraph above says 92 workers beat 140 on tracked img/s. That sweep was run at 1 000
+offered — below this chain's ceiling — so it ranked the offer, which is the same mistake the
+three retired ratios made. Nine runs at 2 000 offered, interleaved: 92 accepts [884.5, 976.6]
+and 140 accepts [1063.5, 1149.5], separated, 140 ahead. Untracked separates too, 2.5–4.1%
+against 9.5–11.0%, which **confirms** the reordering mechanism I had named. But tracked does
+not separate at all: 92's best 952.4 sits above 140's worst 946.2. So the mechanism stands and
+the ranking is withdrawn. The default stays at 23 per GPU on a different argument — 140 pulls
+15% more frames through the whole model chain for a tracked rate nobody can tell apart.
+
+**Which is the shape of the whole day.** Five numbers retired, and not one of them was wrong
+arithmetic. Each was a ratio taken where one side had headroom left. A measurement below
+saturation is not a small measurement; it is a measurement of something else.
+
 ---
 
 ## 14 Sep — ten merged, four blocked items that were not, and a race that was not a timeout

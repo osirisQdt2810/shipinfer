@@ -2924,10 +2924,15 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       AND THE RE-OPEN CONDITION IS TECHNICALLY MET BUT STILL NOT THE DEPLOYMENT'S SHAPE: today's
       fifty-on-four runs do have non-zero `queue_rejected` (13-19.6%), which is what this item
       names as the trigger to re-read. Re-read, and the table says what it said -- at 12.5
-      cameras a device, raising workers 92 -> 140 triples untracked (3.3% -> 10.5%) and LOWERS
-      tracked img/s (`WORKER-PLATEAU-ON-THE-NVDEC-ROUTE`). That is the reordering this item
-      describes, at 4x the deployment's density, so it remains evidence about an overloaded box
-      rather than about the shipping configuration. Fifty on sixteen is still the load this box
+      cameras a device, raising workers 92 -> 140 triples untracked (3.3% -> 10.5%). That is the
+      reordering this item describes, at 4x the deployment's density, so it remains evidence
+      about an overloaded box rather than about the shipping configuration.
+      THE UNTRACKED HALF IS THE HALF THAT REPRODUCED, and only that half: a nine-run re-sweep
+      at 2 000 offered separates untracked cleanly (92 in [2.5, 4.1]%, 140 in [9.5, 11.0]%,
+      n=5 and n=4) -- so the mechanism this item names holds at the ceiling too. The clause
+      that used to follow it here, "and LOWERS tracked img/s", was measured at 1 000 offered
+      and is withdrawn; see `WORKER-PLATEAU-ON-THE-NVDEC-ROUTE`. Nothing about this item's own
+      claim rests on it. Fifty on sixteen is still the load this box
       cannot generate.
       measured 12 Sep. It was OPENED 11 Sep as the chain's real ceiling, and that is the half
       this item closes against -- the new clause was spliced ahead of the old headline and the
@@ -4791,8 +4796,33 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       improvement -- what improved is host CPU an image, 19.9 -> 6.9 ms, which is #214's -40%
       confirmed at the design load. Fixed in row 7 and in `V167-GSTREAMER-ONLY-3000`.
 
-- [x] WORKER-PLATEAU-ON-THE-NVDEC-ROUTE · **RE-SWEPT 15 Sep, AND THE ANSWER IS DON'T: MORE
-      WORKERS BUY ACCEPTED FRAMES AND LOSE TRACKED ONES.** The 23-per-GPU plateau in
+- [x] WORKER-PLATEAU-ON-THE-NVDEC-ROUTE · **THE DEFAULT STAYS AT 23 PER GPU, BUT NOT FOR THE
+      REASON BELOW: "more workers LOSE tracked frames" WAS MEASURED BELOW CAPACITY AND IS
+      WITHDRAWN (15 Sep, re-swept at 2 000 offered).** Same error as `C1`'s and V167's on the
+      same day -- a ranking taken at 1 000 offered ranks the OFFER, and this chain's ceiling
+      is above it. Nine runs, interleaved A/B, 50 cameras x 40 fps, `--source nvdec`, GPUs
+      1,3,4,6, workers the only variable:
+        workers  92  (n=5)  accepted [ 884.5,  976.6]  untracked [ 2.5,  4.1]%  TRACKED [848.1,  952.4]
+        workers 140  (n=4)  accepted [1063.5, 1149.5]  untracked [ 9.5, 11.0]%  TRACKED [946.2, 1040.8]
+      READ AS RANGES, and they say three different things at once:
+        * ACCEPTED separates cleanly and 140 wins -- no overlap, ~15% more frames taken in.
+        * UNTRACKED separates cleanly too, and **the mechanism this item named is CONFIRMED**:
+          more workers really do scatter a camera's consecutive frames across more threads, and
+          the tracker really does refuse ~3x the fraction. That half was right.
+        * TRACKED -- the metric V164 fixed -- **does NOT separate**: 92's best (952.4) is above
+          140's worst (946.2). Four of 92's five runs cluster in [932.5, 952.4]; the 848.1 is a
+          lone low reading, and quoting it as the floor is the honest thing rather than dropping
+          it. So neither "140 loses tracked frames" nor "140 wins" is supported.
+      SO THE DEFAULT STAYS, ON AN EFFICIENCY ARGUMENT RATHER THAN A LOSS ONE: 140 workers pull
+      ~15% more frames through the whole model chain to deliver a tracked rate that cannot be
+      told apart from 92's. That is device time spent on frames the tracker then refuses.
+      SIXTEEN-GPU EXTRAPOLATION, x4 and therefore an extrapolation rather than a measurement:
+      92 -> [3392, 3809], 140 -> [3785, 4163]. Both clear V167's 3 000; both fall short of
+      V165's 4 500, and 140's best reading is the closest this box has come to it.
+      WHAT WOULD SETTLE IT is more replicates at the seam, or a metric that counts the work --
+      not another n=1 arm. Recorded rather than run: the ranking no longer blocks anything,
+      because both arms keep the same default.
+      ORIGINAL (drawn at 1 000 offered; its conclusion is the one withdrawn above): The 23-per-GPU plateau in
       `run_cpp_bench.sh` was measured on the HOST-DECODE route and its own comment says
       "re-sweep before trusting it", so with decode off the host it was worth redoing. Design
       load, `--source nvdec`, four GPUs, one variable:
@@ -4815,6 +4845,9 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       CONCLUSION: `WORKERS_PER_GPU=23` stays, now for a measured reason on THIS route rather
       than an inherited one. `run_cpp_bench.sh`'s comment that the per-GPU form is an
       assumption still stands -- this re-sweep was at four devices, like the last one.
+      (The 188 arm was not re-run at saturation: it lost on BOTH accepted and tracked at
+      1 000 offered, and its stated cause -- ingest threads and workers competing for cores --
+      gets worse, not better, when the offer doubles.)
 - [x] **V167-GSTREAMER-ONLY-3000 · ANSWERED 15 Sep: 3 000 IS MET ON THE ROUTE YOU MANDATED,
       and the lever was that route rather than a choice you had to make.** [3203, 3278] tracked
       img/s extrapolated to sixteen GPUs from three runs at the design load, host [4.9, 5.2] of
@@ -5119,9 +5152,15 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       3 000 is MET on this route, V165's 4 500 is not. 4 500 needs 1 125 tracked img/s a
       GPU-quad, i.e. **1.37x** what the chain now does.
       WHAT 1.37x CANNOT COME FROM, because this session measured each: not the host budget --
-      it is [4.9, 5.2] of 48 cores, so the host is no longer the wall; not more workers --
-      92 -> 140 -> 188 LOWERS tracked img/s (`WORKER-PLATEAU-ON-THE-NVDEC-ROUTE`); not the two
-      merged host-budget levers, which act on 4-19% of host CPU. The devices are the wall now,
+      it is [4.9, 5.2] of 48 cores, so the host is no longer the wall; not the two merged
+      host-budget levers, which act on 4-19% of host CPU.
+      **AND NOT MORE WORKERS EITHER, but the reason changed under re-measurement (15 Sep).**
+      This line used to cite "92 -> 140 -> 188 LOWERS tracked img/s"; that ranking was taken at
+      1 000 offered and is withdrawn (`WORKER-PLATEAU-ON-THE-NVDEC-ROUTE`). At 2 000 offered,
+      140 workers tracks [946.2, 1040.8] against 92's [848.1, 952.4] -- OVERLAPPING, so the
+      two cannot be told apart, and 140 pays ~15% more accepted frames for it. Extrapolated x4
+      that is [3785, 4163] against 4 500: closer than anything else this box has produced, and
+      still 8-16% short of a target one thread pool cannot close. The devices are the wall now,
       and this item's own table says where: **11.74 model invocations per image**, of which
       `person_embedder` is 7.80 and `ship_segmenter` 1.47 at a 640x640 crop.
       **AND THE CHEAPER-CHAIN LEVER WAS MEASURED RATHER THAN ASSUMED, 15 Sep -- IT IS NOT

@@ -142,6 +142,43 @@ these numbers. Note also that at fp16 with 1 000 img/s offered the baseline repo
 **SATURATED**, so in this regime it is a real ceiling rather than the offer-bound behaviour
 recorded at other loads.
 
+### The worker count, re-swept at the ceiling instead of at the design load
+
+An earlier sweep the same day ranked 92 workers above 140 on tracked img/s and concluded that
+more workers *lose* tracked frames. It was run at 1 000 img/s offered — below this chain's own
+ceiling — so it ranked the offer. Re-run at **2 000 offered**, nine runs interleaved A/B/A/B,
+50 cameras × 40 fps × 40 s, `--source nvdec`, GPUs 1,3,4,6, workers the only variable:
+
+| workers | n | accepted img/s | untracked | **tracked img/s** |
+|---|---|---|---|---|
+| 92 | 5 | [884.5, 976.6] | [2.5, 4.1] % | **[848.1, 952.4]** |
+| 140 | 4 | [1063.5, 1149.5] | [9.5, 11.0] % | **[946.2, 1040.8]** |
+
+Three readings, and they do not all point the same way:
+
+* **Accepted separates** and 140 wins — the ranges do not touch.
+* **Untracked separates** too, which *confirms* the mechanism the earlier sweep named: more
+  workers scatter a camera's consecutive frames across more threads, and the tracker refuses
+  roughly three times the fraction.
+* **Tracked does not separate.** 92's best (952.4) sits above 140's worst (946.2). Four of
+  92's five runs cluster in [932.5, 952.4]; the 848.1 is one low reading, quoted rather than
+  dropped.
+
+So the withdrawal is of the *ranking*, not the mechanism. `WORKERS_PER_GPU=23` stays — now
+because 140 pulls ~15% more frames through the whole model chain for a tracked rate that
+cannot be told apart from 92's, which is device time spent on frames the tracker then refuses.
+
+Extrapolated ×4 to sixteen GPUs, and therefore an extrapolation: 92 → [3392, 3809],
+140 → [3785, 4163]. Both clear 3 000; both fall short of 4 500.
+
+```bash
+# each cell, alternating 92 / 140 so one box cancels drift between its own arms
+SHIPINFER_BENCH_IMAGE=shipinfer-gst:jammy-nvdec SHIPINFER_BENCH_GPUS=1,3,4,6 \
+SHIPINFER_BENCH_CAMERAS=50 SHIPINFER_BENCH_FPS=40 SHIPINFER_BENCH_SECONDS=40 \
+SHIPINFER_BENCH_SOURCE=nvdec SHIPINFER_BENCH_WORKERS=92 \
+  scripts/run_cpp_bench.sh wrep_92_1
+```
+
 ---
 
 ## The two arms
