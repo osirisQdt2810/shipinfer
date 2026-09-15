@@ -1,6 +1,44 @@
 # Journal
 
 
+## 15 Sep — the largest host cost was not what its thread was called
+
+**The 2x2 was inconclusive, and reading it per-thread is what paid.** Both host-budget knobs
+crossed at twelve cameras, two replicates: every cell overlapped every other and one spanned
+21.5 ms/frame, wider than the effect. Splitting `command_cpu_s` by thread answered what the
+totals could not. Blocking sync separates cleanly on the MODEL threads (-19% worst pairing), so
+14 Sep's "throughput yes, host CPU no" was an artefact of dividing by a total that is half
+ingest. The device fold's 19% did NOT reproduce -- its fold=0 arms repeat across the two days,
+only fold=1 moved -- so it is recorded as not-reproduced rather than refuted.
+
+**Then the part I got wrong first.** The dominant group is 45-50% of host CPU at twelve cameras
+and 69% at fifty. It reports as `rtpjitterbuffer`, and I committed that reading plus a
+`SHIPINFER_INGEST_LATENCY_MS` hatch to attack it. Wrong: `gstreamer_pipeline.h:270` puts no
+`queue` between `rtspsrc` and `appsink`, so depay -> parse -> decode -> videoconvert -> appsink
+all run on the jitter buffer's srcpad task, and Linux truncates `comm` at 15 characters where
+`rtpjitterbuffer` is exactly 15. The arithmetic gives it away -- 12.78 s over 261 frames a
+camera is 49 ms/frame, which is 1080p software decode and not bookkeeping -- and `gst-inspect`
+settles it: `avdec_h264` and `videoconvert` present, `nvh264dec` absent. The hatch was
+discarded unmerged rather than shipped on a wrong reading.
+
+**Then the measurement that mattered.** `--source gstreamer` against `--source nvdec`, twelve
+cameras, three interleaved replicates each, same image so the source is the only variable:
+**[61.8, 75.7] ms of host CPU per frame READ against [9.7, 10.2]**, non-overlapping. The 46%
+thread group is simply absent under nvdec. Of 4 800 frames offered the gstreamer arm READ
+26-33% -- the host could not keep up with reading them -- while nvdec read 98% and dropped
+none, with no queue rejections and no incomplete events.
+
+So row 7's host budget is repriced: ~10 ms an image is ~30 cores at 3 000, not 63, and neither
+merged lever was what moved it. It does not settle the device ceiling -- twelve cameras offer
+240 fps to four A5000s -- so the design-load run is still owed and still needs a quiet box.
+
+**The lesson.** A thread group's name is not evidence of what it does, and `comm`'s
+15-character truncation hides a whole pipeline under its first element. The check that catches
+it in one step is dividing the group's CPU by the frames it handled and asking whether the
+answer is a plausible price for the work the name claims.
+
+---
+
 ## 14 Sep — ten merged, four blocked items that were not, and a race that was not a timeout
 
 **The day's shape was not building, it was checking.** Ten PRs merged (#214, #273-#281) and
