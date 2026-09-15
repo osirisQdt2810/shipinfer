@@ -154,11 +154,15 @@ class ShipInferResult:
     requests_rejected: dict[str, float] = field(default_factory=dict)
     #: model -> device -> requests executed. The per-device breakdown a PR needs.
     per_device: dict[str, dict[str, int]] = field(default_factory=dict)
-    #: model -> device -> ROWS executed, which is not the same number. A request is one stage
-    #: invocation; a row is one image into the model, so the detector's two are equal while an
-    #: embedder's differ by the crop fan-out. Reporting only requests understates this plane
+    #: model -> device -> ROWS executed, which is not the same number. A request is one
+    #: caller's ask; a row is one image into the model, so the detector's two are equal while
+    #: an embedder's differ by the crop fan-out. Reporting only requests understates this plane
     #: against a one-model-per-image baseline by exactly that fan-out.
     per_device_rows: dict[str, dict[str, int]] = field(default_factory=dict)
+    #: model -> device -> BATCHES executed, one per ``execute`` call. ``rows/requests`` is 1.00
+    #: for a detector however well the window works, because one frame is one row -- it looks
+    #: like a batching answer and is not one. ``rows/batches`` is the achieved batch size.
+    per_device_batches: dict[str, dict[str, int]] = field(default_factory=dict)
     #: model -> device -> OCCUPANCY, as a percentage of this run's STEADY window. Dividing
     #: the cumulative microseconds by `--seconds` charged the warm-up's idle time to the busy
     #: window -- ~7 points understated at 10 s of 70 s. Computed here because this is where
@@ -179,7 +183,7 @@ class ShipInferResult:
 #: `summary.json` -- deliberately the same string, so a table cannot reach the parent under a
 #: different name, and `_print_device_table` can be handed a whole aggregate. Adding a field
 #: and not listing it here is the omission #167 and #170 both made; a test now catches it.
-DEVICE_TABLES = ("per_device", "per_device_rows", "per_device_busy_pct")
+DEVICE_TABLES = ("per_device", "per_device_rows", "per_device_batches", "per_device_busy_pct")
 
 
 def _summed_by_device(handles: Mapping[str, Any], key: str) -> dict[str, dict[str, float]]:
@@ -569,16 +573,20 @@ def run_shipinfer(
         rejected = {n: metrics.requests_rejected.value(model=n) for n in handles}
         per_device: dict[str, dict[str, int]] = {}
         per_device_rows: dict[str, dict[str, int]] = {}
+        per_device_batches: dict[str, dict[str, int]] = {}
         for name, handle in handles.items():
             breakdown: dict[str, int] = {}
             rows: dict[str, int] = {}
+            batches: dict[str, int] = {}
             for instance in handle.instances:
                 stats = instance.stats()
                 device = str(stats["device"])
                 breakdown[device] = breakdown.get(device, 0) + int(stats["requests"])
                 rows[device] = rows.get(device, 0) + int(stats["rows"])
+                batches[device] = batches.get(device, 0) + int(stats["batches"])
             per_device[name] = breakdown
             per_device_rows[name] = rows
+            per_device_batches[name] = batches
 
         return ShipInferResult(
             log=log,
@@ -608,6 +616,7 @@ def run_shipinfer(
             requests_rejected=rejected,
             per_device=per_device,
             per_device_rows=per_device_rows,
+            per_device_batches=per_device_batches,
             per_device_busy_pct=busy_pct(
                 at_end["compute_us"], at_warmup["compute_us"], steady_s
             ),

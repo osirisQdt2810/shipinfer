@@ -326,12 +326,15 @@ class TestTheDeviceTableIsPrintedByOneFunction:
     impossible rather than merely unintended.
     """
 
-    def _printed(self, capsys, per_device, per_device_rows) -> list[str]:
+    def _printed(
+        self, capsys, per_device, per_device_rows, per_device_batches=None
+    ) -> list[str]:
         from benchmarks import run_bench
 
-        run_bench._print_device_table(
-            ["HEAD"], {"per_device": per_device, "per_device_rows": per_device_rows}
-        )
+        tables = {"per_device": per_device, "per_device_rows": per_device_rows}
+        if per_device_batches is not None:
+            tables["per_device_batches"] = per_device_batches
+        run_bench._print_device_table(["HEAD"], tables)
         return capsys.readouterr().out.splitlines()
 
     def test_rows_are_shown_when_they_differ_from_requests(self, capsys) -> None:
@@ -363,6 +366,47 @@ class TestTheDeviceTableIsPrintedByOneFunction:
     def test_nothing_at_all_prints_no_heading(self, capsys) -> None:
         """The heading was inside the old `if`, so an empty table must stay silent."""
         assert self._printed(capsys, {}, {}) == []
+
+    def test_the_batch_line_is_rows_over_batches_and_not_rows_over_requests(
+        self, capsys
+    ) -> None:
+        """The distinction the counter exists for, on the model that hides it.
+
+        A detector gets one row per request, so `rows/requests` is 1.00 however well the
+        window fills -- it looks like a batching answer and is not one. Here the same detector
+        has 40 requests, 40 rows and 10 batches: the achieved batch is 4.00, and a printer
+        that divided rows by requests would say 1.00.
+        """
+        out = self._printed(
+            capsys,
+            {"ship_detector": {"cuda:3": 40}},
+            {"ship_detector": {"cuda:3": 40}},
+            {"ship_detector": {"cuda:3": 10}},
+        )
+        batch = [line for line in out if "(batch)" in line]
+        assert batch, out
+        assert "cuda:3=4.00" in batch[0], batch[0]
+
+    def test_a_device_with_no_batch_is_a_dash_rather_than_a_divide_by_zero(
+        self, capsys
+    ) -> None:
+        """A model that ran on three of four devices is a placement question, not a crash."""
+        out = self._printed(
+            capsys,
+            {"ship_detector": {"cuda:2": 40, "cuda:3": 0}},
+            {"ship_detector": {"cuda:2": 40, "cuda:3": 0}},
+            {"ship_detector": {"cuda:2": 10, "cuda:3": 0}},
+        )
+        batch = [line for line in out if "(batch)" in line]
+        assert batch and "cuda:3=-" in batch[0], out
+
+    def test_an_absent_batches_table_prints_the_rest_unchanged(self, capsys) -> None:
+        """An older shard child sends no `per_device_batches`; the parent must still print."""
+        out = self._printed(
+            capsys, {"person_embedder": {"cuda:3": 40}}, {"person_embedder": {"cuda:3": 500}}
+        )
+        assert any("(rows)" in line for line in out), out
+        assert not any("(batch)" in line for line in out), out
 
 
 class TestEveryPerDeviceTableCrossesTheShardBoundary:

@@ -1196,20 +1196,28 @@ int main(int argc, char** argv) {
         // Requests executed per model per device — the per-device breakdown a PR needs
         // (ADR-006), now read from the instances themselves.
         //
-        // ROWS AS WELL AS REQUESTS, and the pair is the point: a request is one stage
-        // INVOCATION and a row is one image into the model, so the detector's two are equal
-        // while an embedder's differ by the crop fan-out. Reporting only requests understates
-        // this plane's work against a one-model-per-image baseline by whatever that fan-out is
-        // -- `C1-WHAT-IS-THE-5x-AGAINST?` could put no number on its own like-for-like
-        // candidate because of it. `ModelInstance` has summed `rows` all along
-        // (`engine/instance.cpp`); nothing printed it.
+        // THREE COUNTERS, and they answer three different questions. A REQUEST is one
+        // WorkItem -- one caller's ask. A ROW is one image into the model, so the detector's
+        // two are equal while an embedder's differ by the crop fan-out; reporting only
+        // requests understates this plane against a one-model-per-image baseline by exactly
+        // that fan-out (`C1-WHAT-IS-THE-5x-AGAINST?` could put no number on its like-for-like
+        // candidate because of it). A BATCH is one `execute` call -- the thing the GPU
+        // actually sees.
+        //
+        // The third is why `rows` alone misleads: `rows/requests` is 1.00 for a detector no
+        // matter how well the batch window works, because one frame is one row, so it looks
+        // like a batching answer and is not one. `rows/batches` IS the achieved batch size,
+        // and it is the only number that says whether `max_queue_delay_us` does anything.
+        // `ModelInstance` has summed all three all along (`engine/instance.cpp`).
         for (const auto& [name, model] : models) {
             std::map<int, uint64_t> by_device;
             std::map<int, uint64_t> rows_by_device;
+            std::map<int, uint64_t> batches_by_device;
             std::map<int, double> compute_by_device;
             for (const auto& instance : model->instances()) {
                 by_device[instance->device().index] += instance->stats().requests;
                 rows_by_device[instance->device().index] += instance->stats().rows;
+                batches_by_device[instance->device().index] += instance->stats().batches;
                 compute_by_device[instance->device().index] += instance->stats().compute_us;
             }
             std::cout << "per_device " << name;
@@ -1218,6 +1226,10 @@ int main(int argc, char** argv) {
             std::cout << "\n";
             std::cout << "per_device_rows " << name;
             for (const auto& [device, count] : rows_by_device)
+                std::cout << " " << device << ":" << count;
+            std::cout << "\n";
+            std::cout << "per_device_batches " << name;
+            for (const auto& [device, count] : batches_by_device)
                 std::cout << " " << device << ":" << count;
             std::cout << "\n";
             // doc: long why this is a percentage and not the microseconds it is made of
