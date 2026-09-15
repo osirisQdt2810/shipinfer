@@ -9939,9 +9939,31 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       NMS fallback fails both. shipvision's own suite `4 failed, 2297 passed, 6 errors`, and
       those ten are pre-existing TensorRT ones -- confirmed by stashing and re-running on
       `origin/main` for the identical set.
-      THE SUBMODULE POINTER IS DELIBERATELY NOT BUMPED. The parent shows `3rdparty/shipvision`
-      modified because the checkout sits on that branch; that pointer moves in its OWN commit
-      once #18 merges, never as a side effect of this work (ADR-010).
+      #18 MERGED (review APPROVE, auto-merged) and the pin is bumped to `af62e6d` in its own
+      commit per ADR-010.
+      AND THEN STEP (2) HIT A COST THE PLAN NEVER PRICED, found by reading the two device
+      paths side by side rather than by running into it. OUR `letterbox_to_device` fills the
+      caller's tensor IN PLACE -- "Fill `out` in place, with no host round trip". SHIPVISION's
+      `letterbox_into` does not: `_letterbox_tensor` ALLOCATES a canvas, then
+      `_write_through_owner` does `target.view(-1)[:n].copy_(values.reshape(-1))` -- a full
+      device-to-device copy of the batch, because "torch cannot wrap a foreign device pointer
+      from Python". For a detector batch of 8 at 640x640x3 float32 that is ~39 MB copied per
+      call, on the path whose docstring calls it "the path production should use".
+      SO THE MOVE AS PLANNED IS NOT AVAILABLE, and neither half-measure is acceptable:
+      delegating the device path regresses the hot path by an allocation and a 39 MB copy;
+      delegating only the host paths leaves `_letterbox` here for the device path, so BOTH
+      implementations stay and the repo gains a second opinion on the numbers instead of
+      losing one -- which is worse than not moving at all.
+      WHAT WOULD UNBLOCK IT is another shipvision change: `letterbox_into` writing straight
+      into the owner tensor rather than building a canvas and copying. That is a real upstream
+      improvement (it would help any caller with a preallocated output), it is bigger than #18,
+      and it is NOT something to start at the end of a long session. Named here with its
+      reason so the next attempt does not rediscover it mid-refactor.
+      WHAT LANDED INSTEAD, because it is true and small: the pin bump, plus the correction of
+      a comment in `tests/runtime/test_ops_vs_shipvision.py` that #18 made false -- it said
+      shipvision's torch backend "refuses to construct without torchvision". It no longer does.
+      The gate STAYS (the two sides would take different NMS paths without it, so the
+      comparison would stop being like-for-like), but for that reason rather than the old one.
       THE REMAINING PRICE AFTER THAT FIX is the one this item already quantified: the
       plain leg would exercise numpy only for ops, and `test_ops_parity.py`'s three-way
       comparison would degenerate to numpy-vs-numpy there. #279 made that survivable by
