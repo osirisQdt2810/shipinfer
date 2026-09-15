@@ -5,6 +5,20 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-15 — shipvision's device-output paths write in place (kernel boundary)
+
+Both `_into` entry points assembled a batch of their own and copied it into the buffer the
+caller had already allocated — the methods that exist so a caller with a preallocated output
+does not pay one. Peak allocation on a CUDA device, 50.33 MB batch: `letterbox_into`
+66.07 -> 15.74 MB (#19), `crop_batch_into` 285.26 -> 184.60 MB (#20). `_letterbox_tensor` and
+`_crop_tensor` take `into=`; the sampling temporaries stay, `grid_sample` having no `out=`.
+Also #18: `torch` and `torchvision` shared an import `try`, so a torch-only install lost
+`letterbox` and `crop_batch` too — split, with classic NMS falling back to the pure-numpy
+`suppress` already shipped. Pinned here by #285.
+Verified by mutation, because both paths write the same pixels into the same tensor and the
+result cannot distinguish them: the tests assert PEAK ALLOCATION. The first version of the
+letterbox test asserted on data and passed against both implementations.
+
 ## 2026-09-15 — the decode route, and the host budget that was never the levers'
 
 The design load is met on the mandated route: 50x20x40 s, `--source nvdec`, four A5000s, three
