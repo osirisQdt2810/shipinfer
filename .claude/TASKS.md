@@ -3568,7 +3568,26 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       That is why five sequential puts are safe and the sixth is not. All four wait now; 40/40
       at load 64 against 1-in-20 before.
 
-- [x] API-WEDGED-REPORT-FLAKE-IS-NOT-A-TIMEOUT · **DONE, and it was done on 11 Sep by #224 --
+- [!] API-WEDGED-REPORT-FLAKE-IS-NOT-A-TIMEOUT · **IT RECURRED 15 Sep, AFTER #224, SO THE
+      `[x]` BELOW WAS PREMATURE -- reopened with what today adds.** Same assertion as every
+      previous failure: `assert watcher.entered.wait(30.0), "the POST never asked for a
+      report"` at `test_streams.py:837`. So #224's rewrite (two tasks, not two threads)
+      narrowed it but did not remove the mechanism, and the closure rested on "passes 3/3
+      locally and main's last six runs are green" -- which is absence of evidence.
+      WHAT TODAY RULES OUT, each measured rather than reasoned:
+        * NOT load starvation. 6 runs with 60 CPU spinners, box load 46 -> 86: **0 failures**.
+          That was my hypothesis on seeing it fail while a 2 000 img/s benchmark ran; refuted.
+        * NOT reproducible in isolation. 10 consecutive runs of the class: **0 failures**.
+      WHAT IT LEAVES, and it contradicts this item's own "WHAT IS RULED OUT" line: it appears
+      only in the FULL SUITE. That line says "it is not order-dependence, since the full local
+      suite passes" -- one observation, and today the full local suite failed it. Frequency
+      today: **once in ~25 full-suite runs** (~6.5 min each), which is why neither loop above
+      could catch it and why a hunt is expensive rather than hard.
+      NOT CHASED FURTHER HERE, deliberately: at 1-in-25 over a 6.5-minute suite, bisecting for
+      the interacting test is hours of runs, and this session has no evidence about WHICH test.
+      What it has is the correction -- the item is not done, and the next approved diff it
+      blocks should not be a surprise.
+      ORIGINAL: **DONE, and it was done on 11 Sep by #224 --
       this line just never heard about it.** It parked a question ("say if you want it chased
       now") and named the remaining hypothesis: one starlette `TestClient` driven from two
       threads, with the fix being "an async test driving both requests as tasks". #224 is
@@ -5110,13 +5129,29 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       Detect-only reads 37 929-37 936 of 40 000 offered (95%) with its detector UNDER 100%
       occupied, so at that shape the devices are not the wall either -- and the whole
       perception chain, nine models' worth of work, costs 12% of throughput against it.
-      **SO THE WALL IS THE FRAMEWORK, NOT THE MODELS.** Ingest, the queue, reassembly and the
-      per-frame plumbing cap one process near ~950 img/s whatever is hung off them. "Fewer or
-      cheaper models" has a CEILING of 1.14x, reachable only by deleting the product.
-      THE CAVEAT THAT KEEPS THE EXTRAPOLATION HONEST: this is ONE process driving four GPUs.
-      The deployment shape is `--runner fleet`, a process per shard, so a ~950/process ceiling
-      scales with processes and the [3203, 3278] figure above does not depend on beating it.
-      What it does mean is that adding GPUs *to one process* stops paying well before 4 500.
+      **CORRECTION, SAME HOUR: "THE FRAMEWORK CAPS AT ~950" IS NOT SUPPORTED AND I WITHDRAW
+      IT.** The counters say detect-only `frames_dropped 0`, `queue_rejected 0` -- it refused
+      NOTHING and its detector sat 83-89% busy. The 949.6 was `accepted / 40 s`, i.e. 95% of
+      the 1 000 offered, and the missing 5% is frames never READ during start-up, not frames
+      the chain could not keep up with. Detect-only was OFFER-BOUND WITH HEADROOM, so no
+      ceiling of any kind can be read off it.
+      SO I OFFERED 2 000 INSTEAD OF 1 000, AND THAT CHANGES THE ANSWER AGAIN -- the third time
+      in this thread, and the reason is always the same: a comparison below saturation measures
+      the offer, not the system. 50 cameras x 40 fps, same four GPUs:
+        detect only   accepted **1 845 img/s**   dropped 0.4%   detector 107-115% busy
+        full chain    accepted **977 img/s**     dropped **48%**  detector 123-126% busy
+      **The full chain's ceiling on four GPUs is ~977 img/s. Detect-only is still barely
+      dropping at 1 845.** So the 10.74 extra invocations cost **1.89x**, not the 1.14x the
+      1 000-offered run showed and not the 12% I wrote from it -- BOTH WITHDRAWN. At 1 000
+      offered neither shape was at its ceiling, so that comparison measured the offer.
+      WHICH ALSO RETIRES THE SEGMENTER NUMBER ABOVE: 1.01-1.05x was taken at 1 000 offered,
+      below both ceilings, so it does not price the segmenter either. What survives from it is
+      the methodological point -- occupancy percentages did not predict it -- and that point is
+      now stronger, because occupancy did not predict THIS either (detect-only at 107-115% busy
+      still had 1 845 img/s in it).
+      SO THE MODELS DO COST, AND THE OPERATOR'S LEVER IS REAL AFTER ALL: a chain doing one
+      invocation an image runs 1.89x one doing 11.74. What that buys against 4 500 is a
+      product question I cannot answer -- detect-only is not the product.
       SO THE ANSWER TO THIS ITEM IS NOT A PRODUCT DECISION AFTER ALL: 4 500 NEEDS DEVICES, and
       specifically more SHARDS rather than more cards per shard.**
       Trimming the chain's largest non-detector model gets 1-5%; the remaining 1.31x is not
@@ -6294,14 +6329,18 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       byte-identical to `models/yolo26n_fp16.engine` while the baseline defaults to the fp32
       one. `--precision fp16` matches them from files that already exist, touches no
       repository and strands no earlier number.
-      **AND A THIRD READING, measured 15 Sep, which may be the one that settles it: at
-      COMPARABLE MODEL WORK we are not behind at all.** The baseline saturates at 938.6 running
-      TWO models; our `detect_only.yaml` runs **[949.5, 949.6]** running ONE. So the 0.85-0.89x
-      frame ratio is not the chain being slower per unit of work -- it is what the other ten
-      invocations cost, and they cost **12%** (stripping 91% of the model work buys 1.14x, see
-      `V165-WHOLE-PIPELINE-4500`). A frame ratio against a two-model simulation was always
-      going to read as a deficit; what it actually measures is that we do nine more models for
-      12% more time.
+      **CORRECTED 15 Sep, AND IT INVERTS THE HEADLINE: 0.85-0.89x WAS MEASURED BELOW OUR OWN
+      CEILING.** The baseline's 938.6 is a SATURATED figure -- the harness says so -- while our
+      821-836 came from a run offered 1 000 img/s, which our chain does not saturate at. Offered
+      2 000 it accepts **977** (48% dropped, so that IS the ceiling). Both arms at saturation:
+        baseline     938.6 img/s x  2.00 invocations =  1 877 model-invocations/s
+        full chain   977.0 img/s x 11.74 invocations = **11 470** model-invocations/s
+        detect only  1 845 img/s x  1.00             =  1 845
+      **BY FRAMES WE ARE 1.04x THE BASELINE, NOT 0.85-0.89x. BY MODEL WORK, 6.11x.** And the
+      third reading is now exact rather than suggestive: our one-model chain does 1 845
+      invocations/s against the baseline's 1 877 -- **0.98x, parity per unit of work.**
+      SO THE DEFICIT NEVER EXISTED; it was a comparison of their ceiling against our
+      mid-range. I recorded 0.85-0.89x earlier today and it stood for hours.
       WHAT IS STILL YOURS, and it is narrower than before: which of those ratios the 5x is
       against. If it is FRAMES through the full chain, 5x means 4 693 img/s on four GPUs and
       the chain is 5.6x short. If it is MODEL WORK, it is already met. The honest note is that
