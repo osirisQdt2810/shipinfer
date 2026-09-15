@@ -4979,6 +4979,26 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       52 700 invocations/s, which four A5000s do not do.
 
 - [!] **FPS-ON-FOUR-GPUS · WAITING ON A BOX, NOT ON YOU, 14 Sep. Its blocker was the same
+      **OUR ARM IS MEASURED, 15 Sep, AND IT MOVED A LOT: [821.4, 836.5] accepted img/s on
+      four A5000s** ([800.8, 819.6] TRACKED), three runs at the design load over the mandated
+      gstreamer-RTSP route with `--source nvdec`, at [4.9, 5.2] of 48 host cores. The 544.4
+      in the table below is the `--source replay` arm of 10 Sep; what changed is the decode
+      route (`HOST-DECODE-IS-THE-HOST-BUDGET`), not the models.
+      THE SAME-SESSION RATIO IS BLOCKED BY A GATE THAT IS RIGHT TO BLOCK IT. `bench.sh
+      --systems baseline` refuses: "the baseline loads `yolo26n_fp32.engine` and the server
+      loads `model_repository/ship_detector/1/model.plan`, and they are different files. A
+      comparison across two engines measures the engines." So the 934.8 below and the 821-836
+      above are NOT a ratio -- different engines, different days, different GPU sets.
+      WHY I DID NOT JUST RUN THE FIX. `scripts/build_engines.py --force` rebuilds BOTH sides
+      from one ONNX, which is the correct repair, but it replaces the engines every number in
+      this file was taken against -- including the design-load runs above, an hour old. That is
+      a decision about the benchmark's whole history rather than a step in one measurement, so
+      it is named here and not taken silently mid-session. THE RATIO QUESTION IS ALSO THE ONE
+      THIS ITEM ALREADY DISPUTES: the baseline is offer-bound and does no inference (0-8% GPU),
+      so what a 5x against it MEANS is `C1-WHAT-IS-THE-5x-AGAINST?`'s question, not arithmetic.
+      WHAT IS NO LONGER WAITING: the throughput question. `V167-GSTREAMER-ONLY-3000` is
+      answered on this route -- [3203, 3278] tracked img/s extrapolated to 16 GPUs against the
+      3 000 target -- so this item's blocker is now the COMPARAND, not the box.
       lever question as `V167-GSTREAMER-ONLY-3000`, and both host-budget levers have merged
       (#214 today, #232/#239 on 11-12 Sep). What it needs is the re-run: four free GPUs and
       enough idle cores, which this box has not had today -- 10-14 of 48 free against the
