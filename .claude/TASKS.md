@@ -9621,14 +9621,22 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       * `torch_ops.py` MOSTLY MOVES -- 30 KB of the 38, and torch is a hard dependency
         (ADR-003) so nothing is added to the floor. Letterbox is bit-exact at every scale,
         including upscaling a 120x160 frame to 640x640.
-        BUT CROP IS NOT FREE, and I had this wrong until the test caught it: the first probe
-        only tried downscale and no-scale. The two torch crops agree to float32 noise while
-        DOWNSCALING or copying and separate as soon as they sample denser than the source --
-        0.052 at 1.07x, 0.302 at 2x, 0.426 at 4x. A production path, not a corner: a person
-        far from the camera is a box SMALLER than the embedder's input and is upscaled into
-        it, so the swap would change embedder inputs for exactly the small detections
-        cross-camera identity is already hardest on. Price that before moving `crop_batch`;
-        `letterbox` and the staging can go first and alone.
+        AND CROP IS PROBABLY FREE TOO -- corrected 14 Sep, against my own earlier entry here.
+        The divergence is real but I measured it on `rng.integers` NOISE, where adjacent
+        pixels are uncorrelated and two samplers disagree maximally: 0.052 at 1.07x, 0.302 at
+        2x, 0.426 at 4x. Re-run on the PAN FIXTURE -- real frames, boxes on the content
+        centroid because those frames have a black corner -- the same comparison is:
+          downscale / no scale   cosine 1.000000   max |d| 0.0000
+          upscale 2x             cosine 0.999999   max |d| 0.0027
+          upscale 4x             cosine 0.999984   max |d| 0.0057
+        Two orders of magnitude smaller, because real imagery is smooth. So "would change
+        embedder inputs for exactly the small detections identity is hardest on" was an
+        artefact of the input I chose, and this line said it for a day.
+        WHAT WOULD STILL SETTLE IT is a real embedder A/B -- crops both ways through
+        `reid_r50_fp16`, comparing the embeddings rather than the pixels. Worth doing before
+        the move lands, but the pixel evidence now puts the expected effect at ~1e-5 of
+        cosine, so it is a confirmation rather than a gate. `letterbox` and the staging are
+        unaffected and remain bit-exact.
       * `numpy_ops.py` STAYS, and this is the part the original plan had backwards. It imports
         numpy and nothing else, and `ops/__init__.py:68` makes it the last-resort backend
         ("native if built, else torch, else numpy"). Moving it puts the submodule UNDER

@@ -102,14 +102,14 @@ class TestTheTorchOpsAlreadyAgree:
         ],
     )
     def test_crop_DIVERGES_once_it_upscales(self, scale: float, box: tuple[float, ...]) -> None:
-        """AND THIS IS A FINDING, not a tolerance to widen. Measured 14 Sep: the two torch
-        crops agree to float32 noise while downscaling or copying, and separate as soon as
-        they sample denser than the source -- 0.05 at 1.07x, 0.30 at 2x, 0.43 at 4x.
-
-        It is a production path: a person box far from the camera is smaller than the
-        embedder's input and is upscaled into it, so `V124a-PHASE3` swapping our crop for
-        shipvision's would change embedder inputs for exactly the small detections identity
-        is hardest on. Pinned as a difference so the move prices it instead of assuming it.
+        """A real difference, pinned as one -- but read its MAGNITUDE off real footage, not
+        off this test's input. These frames are `rng.integers` noise, where adjacent pixels
+        are uncorrelated and two samplers disagree maximally: 0.05 at 1.07x, 0.30 at 2x,
+        0.43 at 4x. On the pan fixture the same comparison is max |d| 0.0027 at 2x and
+        0.0057 at 4x, cosine >= 0.999984 -- two orders of magnitude smaller, because real
+        imagery is smooth. So this asserts that the samplers differ, which is true and worth
+        knowing; it does NOT say the difference matters to an embedder, and the first version
+        of this docstring claimed it did on the strength of the noise number alone.
         """
         delta = self.crop_delta(box, (128, 128))
 
