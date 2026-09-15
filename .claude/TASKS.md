@@ -5102,7 +5102,23 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       another model can inherit. Freeing 23.5% of device time moved throughput 1-5%, so
       something else takes up the slack immediately. Occupancy percentages are not a
       throughput model, and I had been reading them as one.
-      **SO THE ANSWER TO THIS ITEM IS NOT A PRODUCT DECISION AFTER ALL: 4 500 NEEDS DEVICES.**
+      **AND THE STRONGEST FORM OF IT: STRIPPING 91% OF THE MODEL WORK BUYS 1.14x.** Same load,
+      same shape, `topology/detect_only.yaml` -- one model invocation an image against 11.74:
+        full chain    11.74 inv/img   accepted [821.4, 836.5]   detector 164-174% busy
+        no segmenter  10.27           accepted [840.1, 856.3]
+        DETECT ONLY    1.00           accepted **[949.5, 949.6]**  detector **83-89%** busy
+      Detect-only reads 37 929-37 936 of 40 000 offered (95%) with its detector UNDER 100%
+      occupied, so at that shape the devices are not the wall either -- and the whole
+      perception chain, nine models' worth of work, costs 12% of throughput against it.
+      **SO THE WALL IS THE FRAMEWORK, NOT THE MODELS.** Ingest, the queue, reassembly and the
+      per-frame plumbing cap one process near ~950 img/s whatever is hung off them. "Fewer or
+      cheaper models" has a CEILING of 1.14x, reachable only by deleting the product.
+      THE CAVEAT THAT KEEPS THE EXTRAPOLATION HONEST: this is ONE process driving four GPUs.
+      The deployment shape is `--runner fleet`, a process per shard, so a ~950/process ceiling
+      scales with processes and the [3203, 3278] figure above does not depend on beating it.
+      What it does mean is that adding GPUs *to one process* stops paying well before 4 500.
+      SO THE ANSWER TO THIS ITEM IS NOT A PRODUCT DECISION AFTER ALL: 4 500 NEEDS DEVICES, and
+      specifically more SHARDS rather than more cards per shard.**
       Trimming the chain's largest non-detector model gets 1-5%; the remaining 1.31x is not
       hiding in the model mix. ~22 GPUs at this chain's cost is the honest shape, and the
       sixteen-GPU figure stays an extrapolation from four either way.
