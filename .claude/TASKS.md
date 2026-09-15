@@ -9911,7 +9911,24 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       submodule -- it is pinned in this repo -- and may simply not have compiled `_C`; there,
       shipvision's PYTHON half imports fine and delegating torch to it costs nothing. The
       no-submodule case is CI's plain leg, which is deliberate and is the ADR-001 check.
-      SO THE TORCH MOVE IS VIABLE AND HAS ONE PRICE, now quantified rather than assumed: the
+      AND THE PRICE IS BIGGER THAN "COVERAGE MOVES LEGS" -- READ THE IMPORT (15 Sep). In
+      `shipvision/imgproc/backends/torch_ops.py` lines 55-65, `import torch` and
+      `import torchvision` are in the SAME `try`, so a missing torchvision sets `torch = None`
+      and `TorchImageOps.__init__` raises `BackendUnavailableError` for EVERYTHING, not just
+      NMS. Delegating would therefore make this project's torch rung require torchvision --
+      which `pyproject.toml` keeps optional on purpose and which `_nms_fallback` exists for.
+      The consequence is a PRODUCT regression, not just a CI one: every install without the
+      `vision` extra silently drops from torch ops to numpy ops, where today it keeps torch
+      with a pure-torch NMS fallback. That is a real slowdown for a documented configuration.
+      THE FIX IS SMALL AND BELONGS IN SHIPVISION, and the pieces are already there:
+      `shipvision/imgproc/nms/greedy.py` is PURE NUMPY (zero `torch` references), so the
+      library can already suppress without torchvision. Split the two imports, let
+      `TorchImageOps` construct on torch alone, and let its `nms` fall back the way ours does.
+      SO THE ORDER IS: (1) a shipvision PR decoupling torchvision from torch in that backend,
+      landed ALONE -- this is the shared-helper-lands-first shape; (2) here, the submodule bump
+      in its own commit (ADR-010) and `torch_ops.py` reduced to an adapter. Attempting (2)
+      first would ship the regression above and a reviewer would be right to block it.
+      THE REMAINING PRICE AFTER THAT FIX is the one this item already quantified: the
       plain leg would exercise numpy only for ops, and `test_ops_parity.py`'s three-way
       comparison would degenerate to numpy-vs-numpy there. #279 made that survivable by
       giving the kernels leg torchvision, so torch-over-shipvision IS covered on a
