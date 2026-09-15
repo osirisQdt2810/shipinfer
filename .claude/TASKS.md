@@ -7,7 +7,7 @@ line names the ledger item that holds the detail, and the exact action.
 
 | # | Action | Item |
 |---|---|---|
-| 1 | **ANSWERED 10 Sep (V164): the metric is FPS — images processed per second — the target is 5x the baseline, and it runs on FOUR GPUs, not five.** Events/rows/CPU-second are ruled out ("tuyệt đối không"). Both arms need re-taking on four GPUs as img/s; every figure so far is five-GPU and event-based. **AND `C1` KEPT WAITING ON IT ANYWAY** until 14 Sep -- it read "waiting on the operator's one question" for four days after you answered. Corrected: `C1`, `FPS-ON-FOUR-GPUS`, `V165` and `V167` all now wait on the same RE-RUN (four GPUs, img/s, both arms), not on you. | `C1-WHAT-IS-THE-5x-AGAINST?`, `FPS-ON-FOUR-GPUS`, `C1` |
+| 1 | **ANSWERED 10 Sep (V164): the metric is FPS — images processed per second — the target is 5x the baseline, and it runs on FOUR GPUs, not five.** Events/rows/CPU-second are ruled out ("tuyệt đối không"). Both arms need re-taking on four GPUs as img/s; every figure so far is five-GPU and event-based. **AND `C1` KEPT WAITING ON IT ANYWAY** until 14 Sep -- it read "waiting on the operator's one question" for four days after you answered. Corrected: `C1`, `FPS-ON-FOUR-GPUS`, `V165` and `V167` all now wait on the same RE-RUN (four GPUs, img/s, both arms), not on you. **THE RE-RUN IS DONE, 15 Sep: both arms, four GPUs, img/s, matched fp16.** baseline 938.6 SATURATED against ours accepted [821.4, 836.5] / tracked [800.8, 819.6] -- **0.85-0.89x by frames, 5.14-5.23x by model work**, because the baseline runs 2 model invocations an image and this chain runs 11.74. `FPS-ON-FOUR-GPUS` and `V167-GSTREAMER-ONLY-3000` are closed by it. WHAT IS LEFT FOR YOU is one sentence: which of those two the 5x means. Frames would need 4 693 img/s on four GPUs; model work is already met. | `C1-WHAT-IS-THE-5x-AGAINST?`, `FPS-ON-FOUR-GPUS`, `C1` |
 | 0 | **Nothing — resolved itself.** A vendor apt repo served a bad index for ~30 min on 9 Sep and `main` went red on a repository this project never installs from; it cleared, and #194 and #196 merged on a re-run. #195 hardens against the next one and carries `automerge`. | `CI-A-VENDOR-REPO-BLOCKS-EVERY-MERGE` |
 | 2 | **DONE 10 Sep — you merged it** (`a9867e3`). The C++ tracking chain is mine again. | `CSRC-GRAPH-HAS-NO-TRACKING`, `V146b` |
 | 3 | **DONE 10 Sep — you merged it** (`b645dbd`). `V124a-PHASE3` is unblocked. | `V124b`, `V124a-PHASE3` |
@@ -5133,7 +5133,20 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       done per row (`SEGMENT-NO-CLASSES-ASYMMETRY`), and 4 500 img/s at 11.74 invocations is
       52 700 invocations/s, which four A5000s do not do.
 
-- [!] **FPS-ON-FOUR-GPUS · WAITING ON A BOX, NOT ON YOU, 14 Sep. Its blocker was the same
+- [x] **FPS-ON-FOUR-GPUS · DONE 15 Sep: both arms re-taken on four GPUs as img/s, which is
+      exactly what V164 asked for.** baseline 938.6, ours accepted [821.4, 836.5] / tracked
+      [800.8, 819.6], matched fp16, same cards, same afternoon. The interpretation -- which
+      ratio the 5x means -- is `C1`'s question and stays there; this line's own job was the
+      measurement and it is taken.
+      AND ONE CLAIM IN THIS ITEM IS CONTRADICTED BY ITS OWN NEW NUMBERS, so it is corrected
+      rather than left: the text below says the baseline is "OFFER-BOUND and does no inference
+      (0-8% GPU, 9 815 img/s on ONE gpu against 9 953 on four)". At fp16 with 1 000 img/s
+      offered it reports **SATURATED**, sustaining 470.8 of 500 on detect and 467.9 of 500 on
+      segment. That is a real ceiling in this regime, not an offer artefact -- which matters to
+      `C1`, because a frame ratio against a SATURATED baseline means something a ratio against
+      an offer-bound one does not. The earlier reading was taken at a different load and
+      precision and is not wrong there; it is simply not this run.
+      ORIGINAL: WAITING ON A BOX, NOT ON YOU, 14 Sep. Its blocker was the same
       **OUR ARM IS MEASURED, 15 Sep, AND IT MOVED A LOT: [821.4, 836.5] accepted img/s on
       four A5000s** ([800.8, 819.6] TRACKED), three runs at the design load over the mandated
       gstreamer-RTSP route with `--source nvdec`, at [4.9, 5.2] of 48 host cores. The 544.4
