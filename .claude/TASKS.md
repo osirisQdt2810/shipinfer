@@ -12,7 +12,7 @@ line names the ledger item that holds the detail, and the exact action.
 | 2 | **DONE 10 Sep — you merged it** (`a9867e3`). The C++ tracking chain is mine again. | `CSRC-GRAPH-HAS-NO-TRACKING`, `V146b` |
 | 3 | **DONE 10 Sep — you merged it** (`b645dbd`). `V124a-PHASE3` is unblocked. | `V124b`, `V124a-PHASE3` |
 | 6 | **Merge #214, or say no** — it flips the blocking-sync knob to ON by default. Opened WITHOUT `automerge` on purpose: a default change moves every future measurement's baseline, so the evidence is mine and the merge is yours. Measured at the design load (host CPU -40%, rows +25%, 3.41x -> 7.17x on the like-for-like ratio) and at a fifth of it (host CPU -44%/-55%, p99 **-72%/-70%**, zero drops). `SHIPINFER_CUDA_BLOCKING_SYNC=0` is the way back. **Round 1 came back BLOCKING (2) and is FIXED at `9a2759a`** -- a default-on knob had turned the A/B's integrity check into a run-aborting guard, and six offline tests reached the real driver through a fixture that fabricates a device count. | `DOES-THE-KNOB-HURT-AT-A-FIFTH-OF-THE-LOAD?`, `WHOSE-LIBCUDART-DOES-THE-PYTHON-FLAG-SET` |
-| 7 | **THE TARGET LOOKS REACHABLE ON THE FULL BOX, and the 260 figure was measured on footage that could not be tracked.** Re-measured 11 Sep at the DESIGN LOAD on the route you mandated (gstreamer RTSP from offline video, `--source nvdec`), 4 GPUs, the full `decode -> ... -> mtmc track` chain, on footage a tracker can follow: **711.5 img/s of TRACKED frames** (50 cameras x 20 fps, 954.5 offered, 739.1 accepted, only 3.7% untracked), at 15.5 of 48 host cores. Linearly on 16 GPUs that is ~2 850, i.e. the 3 000 target, and the host budget is what decides it: 21 ms of CPU per image is 63 cores at 3 000, which the blocking-sync default (#214, -39%, YOURS TO MERGE) and the mask fold's kernel (#232, 1.44 ms/crop of host CPU) bring back under 48. WHAT DOES NOT SURVIVE that load is IDENTITY: 0.30% of observations admitted and zero global ids, which is the ordering work, not the throughput. THREE LEVERS, re-priced against that measurement: (a) **the host budget** — the blocking-sync default (#214, yours) and the mask fold on the device, which together are the difference between 63 cores at 3 000 and something under 48; (b) more devices, and sixteen is ~2 850 by this row, i.e. the target; (c) fewer or cheaper models per image — the segmenter alone costs 5.5x for 1.47 invocations because it crops 640x640 per ship. Camera affinity has MOVED DOWN: it buys ~4% at the design rate (3.7% untracked), not the 42% the saturation runs suggested, and what it is still needed for is identity rather than throughput. (a) is mostly built; (b) is yours; (c) is a product decision. **UPDATE 14 Sep: lever (a) is BUILT, so this is a measurement now rather than a decision.** #214 merged today and #232/#239 merged 11-12 Sep, which is both halves of the host budget this row said were pending. The next step is to re-run the 11 Sep design-load measurement and see where 711.5 tracked img/s and 15.5 cores have moved; (b) more devices and (c) fewer models only become your choice if that still falls short. THE RE-RUN NEEDS A QUIET BOX, not an answer -- today it got 7.02 of 48 cores against 16.19, because other users hold ~40 cores and five of eight GPUs, and this chain is host-bound. | `V167-GSTREAMER-ONLY-3000`, `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` |
+| 7 | **THE TARGET LOOKS REACHABLE ON THE FULL BOX, and the 260 figure was measured on footage that could not be tracked.** Re-measured 11 Sep at the DESIGN LOAD on the route you mandated (gstreamer RTSP from offline video, `--source nvdec`), 4 GPUs, the full `decode -> ... -> mtmc track` chain, on footage a tracker can follow: **711.5 img/s of TRACKED frames** (50 cameras x 20 fps, 954.5 offered, 739.1 accepted, only 3.7% untracked), at 15.5 of 48 host cores. Linearly on 16 GPUs that is ~2 850, i.e. the 3 000 target, and the host budget is what decides it: 21 ms of CPU per image is 63 cores at 3 000, which the blocking-sync default (#214, -39%, YOURS TO MERGE) and the mask fold's kernel (#232, 1.44 ms/crop of host CPU) bring back under 48. WHAT DOES NOT SURVIVE that load is IDENTITY: 0.30% of observations admitted and zero global ids, which is the ordering work, not the throughput. THREE LEVERS, re-priced against that measurement: (a) **the host budget** — the blocking-sync default (#214, yours) and the mask fold on the device, which together are the difference between 63 cores at 3 000 and something under 48; (b) more devices, and sixteen is ~2 850 by this row, i.e. the target; (c) fewer or cheaper models per image — the segmenter alone costs 5.5x for 1.47 invocations because it crops 640x640 per ship. Camera affinity has MOVED DOWN: it buys ~4% at the design rate (3.7% untracked), not the 42% the saturation runs suggested, and what it is still needed for is identity rather than throughput. (a) is mostly built; (b) is yours; (c) is a product decision. **UPDATE 14 Sep: lever (a) is BUILT, so this is a measurement now rather than a decision.** #214 merged today and #232/#239 merged 11-12 Sep, which is both halves of the host budget this row said were pending. The next step is to re-run the 11 Sep design-load measurement and see where 711.5 tracked img/s and 15.5 cores have moved; (b) more devices and (c) fewer models only become your choice if that still falls short. THE RE-RUN NEEDS A QUIET BOX, not an answer -- today it got 7.02 of 48 cores against 16.19, because other users hold ~40 cores and five of eight GPUs, and this chain is host-bound. **REPRICED 15 Sep, AND LEVER (a) IS SMALLER THAN THIS ROW SAYS.** A per-thread reading of the profile says the two host-budget levers act on the MODEL threads, which are 12-19% of host CPU at twelve cameras and 4% in the one real 50-camera run. What dominates on the route you mandated is OUR OWN RTSP INGEST (`rtpjitterbuffer`, 45-50% at twelve cameras, 69% at fifty), and it scales with frames READ rather than accepted, so it grows as acceptance falls. Zeroing all model-thread CPU does not close the 63->48 gap this row claims the levers close, so (a) is no longer the answer to the host budget -- the ingest path is, and that is mine to profile next, not yours to decide. | `V167-GSTREAMER-ONLY-3000`, `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` |
 | 4b | **DONE 12 Sep — merged under V169**, which made workflow PRs mine to merge. Worth knowing for the next one: the Claude review job **passed** on this PR and returned APPROVE, so CLAUDE.md's "a PR touching `.github/workflows/**` cannot pass the review job" did not hold here. The only thing keeping it open was the missing `automerge` label. Not yet rewritten in CLAUDE.md — one observation is not a rule; `CI-WORKFLOW-PRS-MAY-BE-REVIEWABLE` holds the check. | `CPP-LANE-JOB-GLOBS-ONE-PREFIX` |
 | 4 | **Pull `nvcr.io/nvidia/deepstream` (~6 GB)** onto this box, or say no — the fourth topology's running half needs it; the design half is done. | `T4` |
 | 10 | **No longer a question -- answered by measuring, noted so you can overrule.** I had asked whether the numpy oracle keeps NEAREST when `V124a-PHASE3` thins `runtime/ops` onto shipvision. It keeps it: `numpy_ops.py` is the dependency-free FLOOR (`ops/__init__.py:68`, "native if built, else torch, else numpy") and CI runs that tier with no submodule, so moving it would put shipvision under ADR-001. What moves instead is `torch_ops.py`, 30 KB of the 38, where the two agree already -- letterbox bit-exact, crop within 1.5e-05. My earlier two-slice plan was wrong and is corrected on the item. | `V124a-PHASE3` |
@@ -4618,6 +4618,29 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       `ship_detector` and `ship_segmenter` only, so on `ship_person_cpu` the two embedders'
       plans are outside the byte-identity guard entirely.
 
+- [~] INGEST-JITTER-BUFFER-IS-THE-HOST-BUDGET · **THE PROFILE SAYS THE NEXT LEVER IS INGEST,
+      NOT INFERENCE (15 Sep).** Per-thread, on the gstreamer-RTSP route V167 mandates,
+      `rtpjitterbuffer` is 45-50% of `command_cpu_s` at twelve cameras and 69% in the one real
+      50-camera run (`design60`); the MODEL threads that both merged host-budget levers act on
+      are 12-19% and 4% respectively. Ingest costs 26.3-30.3 ms per frame READ in all four
+      knob combinations of the 15 Sep 2x2 -- an invariance across both levers that is itself
+      the evidence neither touches it -- and it scales with frames READ rather than accepted,
+      so it GROWS as acceptance falls. That is why `V167`'s row-7 arithmetic is repriced above.
+      WHAT IS TESTABLE WITHOUT INVENTING ANYTHING: the pipeline is `rtspsrc latency=200
+      protocols=tcp` (`ingest/config.h:49`, `sources/gstreamer_pipeline.h:217`), and over TCP a
+      jitter buffer has no loss or reordering to absorb -- it is absorbing a hazard the
+      transport already removed. `latency_ms` was reachable from config but NOT from the bench,
+      so `SHIPINFER_INGEST_LATENCY_MS` now plumbs it, in the same bench-only shape as
+      `SHIPINFER_DEVICE_FOLD` and for the same reason.
+      WHY THIS A/B CAN SUCCEED WHERE THE LEVER 2x2 FAILED: ingest ms/frame-READ has a 13%
+      spread across the 2x2's eight arms (26.3-30.3) against model ms/frame-ACCEPTED's 40%+,
+      so the metric can resolve an effect this contended box cannot resolve on totals.
+      Interleaved arms at twelve cameras, `latency=200` against a small value, read as ranges.
+      CAVEATS THAT BOUND ANY RESULT: the RTSP servers share the container (their CPU is
+      accounted separately and is small -- 5.3 s against 83.5 s of jitter buffer), `design60`
+      was overloaded at 21% acceptance, and whether real cameras cost the same CLIENT-side CPU
+      as loopback H.264 is unmeasured. A win here is a bench-harness finding until a deployment
+      shape confirms it; what it would change immediately is where the next optimisation goes.
 - [!] **V167-GSTREAMER-ONLY-3000 · **OPERATOR: WHICH LEVER?** RE-MEASURED 11 Sep AT THE DESIGN
       LOAD ON FOOTAGE A TRACKER CAN FOLLOW, and the answer moved: **711.5 tracked img/s on four
       A5000s**, not ~260. 50 cameras x 20 fps x 40 s, `--source nvdec`, GPUs 0/2/5/6, 92
@@ -4667,6 +4690,41 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       above) though its throughput gain is. Both raise accepted frames. Worth having before the
       design-load run: the -40% host CPU #214 measured at 50x20 is not what the knob alone
       gives a smaller fleet, while the fold's saving looks like it travels.
+      THE 2x2 THAT WAS TO COMBINE THEM IS INCONCLUSIVE, AND THE FOLD'S 19% DID NOT REPRODUCE
+      (15 Sep). Same shape, same plan, same binary -- no C++ source has moved since -- both
+      knobs verified engaged in all eight arms by their own log lines, two replicates, cells
+      interleaved. TOTAL host CPU per accepted frame:
+        s0f0 [80.8, 82.0]   s1f0 [71.4, 74.1]   s0f1 [63.8, 85.3]   s1f1 [69.1, 78.7] ms
+      Every cell overlaps every other and s0f1 alone spans 21.5 ms, which is wider than the
+      whole effect claimed above. So the COMBINED effect V167's 16-GPU arithmetic assumes is
+      NOT resolved at this shape and this many replicates.
+      WHY THE AGGREGATE CANNOT SEE EITHER LEVER: half the host CPU is not theirs to save.
+      Per-thread, `rtpjitterbuffer` -- the bench's own GStreamer RTSP CLIENT -- is 45-50% of
+      `command_cpu_s` in all eight arms and the model threads are 12-19%; ingest costs
+      26.3-30.3 ms per frame READ in every one of the four knob combinations, and that
+      INVARIANCE is the evidence that neither lever touches it.
+      ON THE THREADS THEY DO TOUCH, both questions answer cleanly. Model-thread CPU per
+      ACCEPTED frame:
+        blocking_sync  off [12.1, 15.9] ms   on [8.3, 9.8] ms   NON-OVERLAPPING, -19% worst pair
+        fold at sync=1 off [8.4, 9.8] ms     on [8.3, 9.2] ms   OVERLAPPING
+      So (1) "throughput yes, host CPU no" for the knob at twelve cameras was an ARTEFACT of
+      dividing by a total that is half ingest -- on its own threads the knob saves what #214
+      says; and (2) the fold's [53.6, 56.0] does not come back. The fold=0 arms reproduce
+      across the two days (model-thread [8.5, 10.1] then, [8.4, 9.8] now); only fold=1 moved,
+      [6.0, 6.1] -> [8.3, 9.2]. One of the two days is unrepresentative and this box cannot say
+      which, so READ THE 19% AS NOT REPRODUCED rather than as refuted.
+      WHICH REPRICES ROW 7's ARITHMETIC, and that matters more than either knob. Row 7 says the
+      two levers "together are the difference between 63 cores at 3 000 and something under 48".
+      They act on the model threads: 12-19% of host CPU at twelve cameras, and 4% in the one
+      real 50-camera run (`design60`, 2 725 accepted of 13 055 read, ingest 69%). Removing ALL
+      model-thread CPU does not close a 63->48 gap. The dominant term on the route V167 mandates
+      is our own RTSP ingest; it scales with frames READ rather than accepted, so it GROWS as
+      acceptance falls, and both merged levers leave it untouched.
+      SO THE NEXT TARGET UNDER V168's LOOP IS THE INGEST PATH, not a third knob on the inference
+      side. Bounds on that claim, stated: `design60` was overloaded (21% acceptance), so its 69%
+      is the overloaded regime; the RTSP servers share the container but are accounted separately
+      and are small (5.3 s against 83.5 s of jitter buffer); and whether real cameras cost the
+      same CLIENT-side CPU as loopback H.264 is unmeasured.
       WHICH CHANGES THE QUESTION FROM A DECISION TO A MEASUREMENT. "Which lever?" was asked when
       (a) was unfinished. It is finished, so the next step is to re-run the 11 Sep measurement
       and see where 711.5 tracked img/s and 15.5 cores have moved -- and only if that still
