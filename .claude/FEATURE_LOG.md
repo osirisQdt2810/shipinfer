@@ -5,6 +5,20 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-15 — the decode route, and the host budget that was never the levers'
+
+The design load is met on the mandated route: 50x20x40 s, `--source nvdec`, four A5000s, three
+runs — **TRACKED [800.8, 819.6] img/s** at **[4.9, 5.2] of 48 cores**, i.e. [3203, 3278] on
+sixteen GPUs against the 3 000 target. The lever is the DECODE ROUTE, not either merged
+host-budget knob: `--source gstreamer` costs [61.8, 75.7] ms of host CPU a frame against
+nvdec's [9.7, 10.2], three interleaved replicates each. It hid because the hot thread reports
+as `rtpjitterbuffer` — no `queue` between `rtspsrc` and `appsink`, so decode and the BGR
+convert run on that srcpad task, and `comm` truncates at 15 where the name is exactly 15.
+Two things fell out: #214's -40% host CPU confirmed at the design load for the first time
+(19.9 -> 6.9 ms an image), and the worker plateau re-swept — 92 stays, because 140 and 188 buy
+accepted frames and lose tracked ones. Seam change upstream: shipvision #18 decoupled
+torchvision from the torch backend, pinned here by #282.
+
 ## 2026-09-14 — the tracking parity case, and the price it put on the last register entry
 
 `tracker_options` was the divergence register's one surviving entry and the only one nothing
