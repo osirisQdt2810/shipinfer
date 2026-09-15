@@ -9632,11 +9632,24 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
         Two orders of magnitude smaller, because real imagery is smooth. So "would change
         embedder inputs for exactly the small detections identity is hardest on" was an
         artefact of the input I chose, and this line said it for a day.
-        WHAT WOULD STILL SETTLE IT is a real embedder A/B -- crops both ways through
-        `reid_r50_fp16`, comparing the embeddings rather than the pixels. Worth doing before
-        the move lands, but the pixel evidence now puts the expected effect at ~1e-5 of
-        cosine, so it is a confirmation rather than a gate. `letterbox` and the staging are
-        unaffected and remain bit-exact.
+        AND THE EMBEDDER A/B IS DONE, 15 Sep, in the container on two free GPUs: the same
+        crops both ways through `person_embedder` (`reid_r50_fp16`), comparing the 2048-d
+        vectors rather than the pixels.
+          no scale     pixel cos 1.000000   EMBED cos 1.000000   L2 0.00000-0.00075
+          upscale 2x   pixel cos 0.999999   EMBED cos 0.999997   L2 0.00245-0.00258
+          upscale 4x   pixel cos 0.999984   EMBED cos 0.999973   L2 0.00523-0.00740
+        WORST EMBEDDING COSINE 0.999973, which is nowhere near any matching threshold. And the
+        noise floor is visible in the table rather than assumed: two no-scale rows differ by
+        L2 0.0005-0.0008 on pixel-identical input, which is engine nondeterminism, so the 4x
+        difference is ~15x the floor and still 1e-5 in cosine.
+        HONEST LIMIT: `model_repository/person_embedder/config.yaml` says in its own words that
+        this is ResNet-50 with IMAGENET weights and "embedding accuracy is not claimed here".
+        So this measures how sensitive a network of that shape is to the input difference --
+        the right question -- but a reid-TRAINED checkpoint could differ, and nothing here
+        rules that out.
+        SO THE CROP HALF IS UNBLOCKED BY EVIDENCE. `letterbox` bit-exact, `nms` identical,
+        crop within 1e-5 of cosine at the embedding, `numpy_ops.py` staying put as ADR-001's
+        floor. What is left is the effort, which this item already sequences last.
       * `numpy_ops.py` STAYS, and this is the part the original plan had backwards. It imports
         numpy and nothing else, and `ops/__init__.py:68` makes it the last-resort backend
         ("native if built, else torch, else numpy"). Moving it puts the submodule UNDER
