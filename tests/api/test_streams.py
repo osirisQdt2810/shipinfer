@@ -23,8 +23,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import sys
 import threading
 import time
+import traceback
 from collections.abc import Container
 from typing import Any, get_args
 
@@ -265,6 +267,28 @@ class ThreadWatchingCameras:
         with self._lock:
             placed = {camera.camera_id: {} for camera in self.added}
         return {"state": "running", "cameras": placed}
+
+
+def _where_every_thread_is() -> str:
+    """Every live thread and the line it sits on, for a rendezvous that never happened.
+
+    `API-WEDGED-REPORT-FLAKE-IS-NOT-A-TIMEOUT` is one in ~25 FULL-SUITE runs and zero in 10
+    runs of its own class, so the next occurrence is the only cheap evidence there is: this
+    makes it carry the answer instead of an assertion. Thread COUNT is the untested
+    hypothesis -- the load experiment used separate processes, not threads in this one.
+    """
+    frames = sys._current_frames()
+    lines = [f"{threading.active_count()} live threads:"]
+    for thread in threading.enumerate():
+        top = frames.get(thread.ident or -1)
+        lines.append(f"  {thread.name}:")
+        # THE LAST FOUR, not the top one: a parked thread's top frame is always
+        # `threading.py` waiting on a lock, which names no caller and diagnoses nothing.
+        for entry in traceback.extract_stack(top)[-4:] if top else []:
+            lines.append(f"    {entry.filename}:{entry.lineno} in {entry.name}")
+        if top is None:
+            lines.append("    <no frame>")
+    return "\n".join(lines)
 
 
 def client_over(cameras: CameraController) -> TestClient:
@@ -834,13 +858,26 @@ class TestNothingBlockingRunsOnTheEventLoop:
                 # `await`, a parked loop delays the STAMP instead of showing up in it, and the
                 # rewrite passed under the regression (#224's review reproduced that).
                 def reach_the_wedge() -> float:
-                    assert watcher.entered.wait(30.0), "the POST never asked for a report"
+                    # NOT an `assert ..., f"..."`: that renders the dump on every passing run
+                    # too. The message is built only where it is needed.
+                    if not watcher.entered.wait(30.0):
+                        raise AssertionError(
+                            "the POST never asked for a report\n" + _where_every_thread_is()
+                        )
                     return time.monotonic()
 
                 loop = asyncio.get_running_loop()
-                started = await asyncio.wait_for(
-                    loop.run_in_executor(None, reach_the_wedge), timeout=35.0
-                )
+                try:
+                    started = await asyncio.wait_for(
+                        loop.run_in_executor(None, reach_the_wedge), timeout=35.0
+                    )
+                except AssertionError as never_arrived:
+                    # THE OTHER HALF, and the fork in the road: a SUSPENDED coroutine has no
+                    # frame in the dump above, so only the task's own repr says whether the
+                    # POST ever ran.
+                    raise AssertionError(
+                        f"{never_arrived}\npost task: {post!r}"
+                    ) from never_arrived
                 # THE CLAIM: answered while the first report is still held.
                 health = await asyncio.wait_for(client.get("/health"), timeout=5.0)
                 assert health.status_code == 200
@@ -1254,3 +1291,35 @@ class TestWhatTheAppMounts:
 
         with pytest.raises(ConfigError, match="neither an engine nor a camera controller"):
             create_app()
+
+
+class TestTheStuckThreadDump:
+    """A diagnostic nobody has seen render is not evidence, so this renders it."""
+
+    def test_it_names_a_live_thread_and_the_line_that_thread_stands_on(self) -> None:
+        import re
+
+        parked, running = threading.Event(), threading.Event()
+
+        def park() -> None:
+            running.set()
+            parked.wait(10.0)
+
+        holder = threading.Thread(target=park, name="a-thread-with-a-known-name")
+        holder.start()
+        try:
+            assert running.wait(5.0)
+            dump = _where_every_thread_is()
+        finally:
+            parked.set()
+            holder.join(5.0)
+
+        lines = dump.splitlines()
+        assert "live threads:" in lines[0]
+        at = [i for i, line in enumerate(lines) if "a-thread-with-a-known-name" in line]
+        assert at, dump
+        # THE CALLER, which is the whole point: `park` is what the top frame hides, so a
+        # helper that printed only `threading.py` would pass a bare name check and say
+        # nothing about who parked the thread.
+        stack = "\n".join(lines[at[0] + 1 : at[0] + 5])
+        assert re.search(r"test_streams\.py:\d+ in park$", stack, re.M), stack
