@@ -16,7 +16,7 @@ line names the ledger item that holds the detail, and the exact action.
 | 4b | **DONE 12 Sep — merged under V169**, which made workflow PRs mine to merge. Worth knowing for the next one: the Claude review job **passed** on this PR and returned APPROVE, so CLAUDE.md's "a PR touching `.github/workflows/**` cannot pass the review job" did not hold here. The only thing keeping it open was the missing `automerge` label. Not yet rewritten in CLAUDE.md — one observation is not a rule; `CI-WORKFLOW-PRS-MAY-BE-REVIEWABLE` holds the check. | `CPP-LANE-JOB-GLOBS-ONE-PREFIX` |
 | 4 | **Pull `nvcr.io/nvidia/deepstream` (~6 GB)** onto this box, or say no — the fourth topology's running half needs it; the design half is done. | `T4` |
 | 10 | **No longer a question -- answered by measuring, noted so you can overrule.** I had asked whether the numpy oracle keeps NEAREST when `V124a-PHASE3` thins `runtime/ops` onto shipvision. It keeps it: `numpy_ops.py` is the dependency-free FLOOR (`ops/__init__.py:68`, "native if built, else torch, else numpy") and CI runs that tier with no submodule, so moving it would put shipvision under ADR-001. What moves instead is `torch_ops.py`, 30 KB of the 38, where the two agree already -- letterbox bit-exact, crop within 1.5e-05. My earlier two-slice plan was wrong and is corrected on the item. | `V124a-PHASE3` |
-| 8 | **Answered 14 Sep by me, not needed from you.** The 12 Sep design-load config is in `.artifacts/cpp/gate_design_load.plan`: `workers 92` where a freshly generated plan says 4. But that is not why I could not reproduce it -- 48 vs 92 moved acceptance 312 -> 402 of ~6 000 read, still ~6% against 90%. `host_cpu.py` has the real reason: that run got **16.19 cores**, mine got **7.02**, because this box is carrying ~40 of 48 in other users' training and this chain is host-bound. `EXECUTE-BLOCKS-THE-INSTANCE-THREAD`'s re-profile needs a QUIET BOX and four free GPUs, not a decision. | `EXECUTE-BLOCKS-THE-INSTANCE-THREAD` |
+| 8 | **Answered 14 Sep by me, not needed from you.** The 12 Sep design-load config is in `.artifacts/cpp/gate_design_load.plan`: `workers 92` where a freshly generated plan says 4. But that is not why I could not reproduce it -- 48 vs 92 moved acceptance 312 -> 402 of ~6 000 read, still ~6% against 90%. `host_cpu.py` has the real reason: that run got **16.19 cores**, mine got **7.02**, because this box is carrying ~40 of 48 in other users' training and this chain is host-bound. `EXECUTE-BLOCKS-THE-INSTANCE-THREAD`'s re-profile needs a QUIET BOX and four free GPUs, not a decision. **ANSWERED 15 Sep BY THE PROFILE, not by a decision: the ring is not worth building.** `cudaStreamSynchronize` is 6.7% of instance-thread wall at the design load on four GPUs -- but the devices are OVERSUBSCRIBED in the same run (detector 164-174% busy, segmenter 126-136%), so that 6.7% is a thread waiting on a saturated device, and the ring only pays when there is an idle one to fill. Moving decode off the host this session is what inverted it: the 11 Sep profile that opened the item had the devices 25% busy and the host as the wall. Nothing here needs you. | `EXECUTE-BLOCKS-THE-INSTANCE-THREAD` |
 | 9 | **Which reading of `missing_stages` is the contract?** It means "this FRAME missed it" on a chain and "this TOPOLOGY does not run it" in the DeepStream builder (`PR1_MISSING_STAGES`), and they share one serialiser -- so two deployments into one broker read each other's `partial` wrongly. Moving DeepStream's absent stages to `extra` keeps schema v5 and needs no `motservice` rebuild, but flips that deployment's `partial` to false and empties its list. Either is an afternoon; picking which live consumers change is yours. | `EVENTS-MISSING-STAGES-MEANS-TWO-THINGS` |
 | 5 | **Both halves moved on 14 Sep; one narrow ask is left.** NV12 (`C9`) is ANSWERED and closed -- shipped in shipvision's main since `238a392`, Python and CUDA with tests, so nothing is lost and no clone needs pointing at. The licence half shrank too: `LICENSES/Apache-2.0.txt` and `THIRD_PARTY_NOTICES.md` both landed with the mcbyte tracker, so the Apache-2.0 §4(a) obligation is covered. **What is still yours is one file**: shipvision declares MIT in `pyproject.toml:11` and `README.md:95` and carries no MIT text. | `SV-LICENSE` |
 
@@ -3214,7 +3214,35 @@ AWAITING-OPERATOR: row 9 above -- which reading of `missing_stages` is the contr
       events on it yet; with them, a lease may cost a query rather than a sync. (2) A fused
       detector decode, the first real consumer that would want one.
 
-- [!] EXECUTE-BLOCKS-THE-INSTANCE-THREAD · PRICED 12 Sep at the design load: ~14% of instance-thread wall. PROFILED 11 Sep: `cudaStreamSynchronize` is **32.2%
+- [-] EXECUTE-BLOCKS-THE-INSTANCE-THREAD · **NOT WORTH BUILDING, and the profile this item
+      demanded is what says so (15 Sep).** One nsys run at the DESIGN load on four GPUs, the
+      mandated route, `workers 92` -- exactly the measurement this item said to take "before
+      building the ring":
+        `cudaStreamSynchronize`   134.7 s over 62 400 calls, 16.4% of CUDA API time
+        instance-thread wall      2 010 s (28 threads x 71.78 s)
+        **SHARE OF INSTANCE-THREAD WALL: 6.7%**
+      Higher than the ~1.7% the 12 Sep estimate derived, so the re-pricing was right to ask for
+      a real profile rather than trust it.
+      BUT THE SHARE IS NOT THE DECIDER, AND THE SAME RUN SHOWS WHY. Device occupancy in it:
+      `ship_detector` **164-174%**, `ship_segmenter` **126-136%**, `person_embedder` 90-115%.
+      Over 100% means the instances are QUEUEING ON THE DEVICE. So the 6.7% is a thread waiting
+      for a device that has no spare capacity, and the ring's whole premise -- "the thread stops
+      dead instead of taking the next one" -- only pays when there is an idle device to fill.
+      There is not. Completing the sync sooner would hand the next batch to a queue.
+      AND THIS SESSION IS WHAT INVERTED IT. The 11 Sep profile that opened this item measured
+      the devices **25% busy** and the host at 4.55 cores for 240 img/s -- host-bound, which is
+      exactly when blocked sync costs throughput. Moving decode off the host
+      (`HOST-DECODE-IS-THE-HOST-BUDGET`) took the host to [4.9, 5.2] of 48 cores and made the
+      DEVICES the wall. The item was correctly reasoned for the plane as it was in September and
+      is answered by the plane as it is now.
+      RE-OPEN WHEN the devices stop being the wall -- a cheaper chain (`V165-WHOLE-PIPELINE-4500`
+      is where that decision lives) or more GPUs would put occupancy back under 100%, and then
+      this 6.7% becomes recoverable throughput rather than queue wait.
+      CAVEAT ON THE NUMBERS, since nsys is not free: the profiled run retired 10 842 frames in
+      30 s against 33 459 in 40 s un-profiled, so instrumentation costs ~57% and the occupancy
+      percentages are inflated with everything else. The margin is what carries the conclusion
+      -- three of four models over 100% -- not the exact figure.
+      ORIGINAL: PRICED 12 Sep at the design load: ~14% of instance-thread wall. PROFILED 11 Sep: `cudaStreamSynchronize` is **32.2%
       of all CUDA API time** -- 9.64 s over 5 564 calls, 1.73 ms average -- because
       `TrtEngine::execute` synchronises before returning, so the instance thread stops dead for
       the length of a batch instead of taking the next one. The launches are the floor (1.03 M
