@@ -59,14 +59,32 @@ same shape, varying only how many models hang off the frame:
 | no segmenter | 10.27 | [840.1, 856.3] | — |
 | `detect_only.yaml` | 1.00 | **[949.5, 949.6]** | **83–89%** |
 
-**Stripping 91% of the model work buys 1.14×.** Detect-only reads 95% of the offered frames
-with its detector *under* 100% occupied, so the devices are not the wall there either. One
-process caps near ~950 img/s and the whole perception chain costs 12% against that.
+At 1 000 offered that table measures the **offer**, not the system: detect-only has
+`frames_dropped 0` and 83–89% detector busy, so it was keeping up with headroom to spare.
+Offering **2 000** instead finds the ceilings:
 
-Which reframes the like-for-like pair above. At comparable model work our arm is not behind:
-the baseline saturates at **938.6** running two models; our detect-only runs **949.5** running
-one. The 0.85–0.89× frame ratio is what the other ten invocations cost, and they cost 12% —
-not the 5.87× the invocation count suggests.
+| chain | accepted | dropped | detector busy |
+|---|---|---|---|
+| `detect_only.yaml` | **1 845 img/s** | 0.4% | 107–115% |
+| full | **977 img/s** | **48%** | 123–126% |
+
+**The full chain tops out near 977 img/s on four GPUs; detect-only is still barely dropping at
+1 845.** So the ten extra invocations cost **1.89×**. The 1.14× above is an artefact of
+comparing two unsaturated shapes — quoted here only because it is the mistake this table
+exists to correct.
+
+Which corrects the like-for-like pair above. That pair compared the baseline's **saturated**
+938.6 against our 821–836 from a run offered only 1 000 img/s — below our own ceiling. Both at
+saturation:
+
+| | frames | × invocations | model-invocations/s |
+|---|---|---|---|
+| baseline | 938.6 | 2.00 | 1 877 |
+| full chain | **977.0** | 11.74 | **11 470** |
+| detect only | 1 845 | 1.00 | 1 845 |
+
+**1.04× by frames, 6.11× by model work, and 0.98× per invocation** — parity per unit of work.
+The 0.85–0.89× deficit was their ceiling against our mid-range.
 
 Caveat: one process, four GPUs. The deployment is a process per shard, so this ceiling scales
 with processes; what it says is that adding cards to *one* process stops paying early.
