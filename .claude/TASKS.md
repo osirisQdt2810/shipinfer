@@ -5090,10 +5090,24 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       merged host-budget levers, which act on 4-19% of host CPU. The devices are the wall now,
       and this item's own table says where: **11.74 model invocations per image**, of which
       `person_embedder` is 7.80 and `ship_segmenter` 1.47 at a 640x640 crop.
-      **SO THE QUESTION FOR YOU IS THE ONE THIS ITEM ALWAYS POSED, now with the arithmetic
-      behind it: 4 500 needs either ~22 GPUs at this chain's cost, or a cheaper chain.** The
-      segmenter alone is 385.8% of a device for 1.47 invocations; dropping or shrinking it is
-      the single largest lever left, and it is a product decision rather than a measurement.
+      **AND THE CHEAPER-CHAIN LEVER WAS MEASURED RATHER THAN ASSUMED, 15 Sep -- IT IS NOT
+      THERE.** The occupancy table above says `ship_segmenter` is 385.8% of a device, 23.5% of
+      all device time, so removing it should buy ~1.31x. It buys **1.01-1.05x**. Same design
+      load, same shape, `embed_ship` re-pointed `after: detect`, two runs:
+        with segmenter      tracked [800.8, 819.6] img/s     16 GPUs [3203, 3278]
+        WITHOUT segmenter   tracked [828.5, 844.5] img/s     16 GPUs [3314, 3378]
+      Non-overlapping, so the gain is real -- and small. 4 500 is still 25-26% away.
+      WHY THE ARITHMETIC MISLED, and this is the part worth keeping: `per_device_busy_pct`
+      over 100% measures QUEUEING at a model's instances, not a share of a fixed budget that
+      another model can inherit. Freeing 23.5% of device time moved throughput 1-5%, so
+      something else takes up the slack immediately. Occupancy percentages are not a
+      throughput model, and I had been reading them as one.
+      **SO THE ANSWER TO THIS ITEM IS NOT A PRODUCT DECISION AFTER ALL: 4 500 NEEDS DEVICES.**
+      Trimming the chain's largest non-detector model gets 1-5%; the remaining 1.31x is not
+      hiding in the model mix. ~22 GPUs at this chain's cost is the honest shape, and the
+      sixteen-GPU figure stays an extrapolation from four either way.
+      WHAT IS STILL YOURS, and it is smaller than before: whether 4 500 on sixteen GPUs is a
+      target to keep. Nothing I can measure moves the chain there.
       ORIGINAL: THE QUESTION IT SHARES HAS CHANGED, 14 Sep: both
       host-budget levers are MERGED (#214 today, #232/#239 on 11-12 Sep), so
       `V167-GSTREAMER-ONLY-3000` is now a measurement waiting on a quiet box rather than a
