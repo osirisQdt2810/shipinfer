@@ -43,9 +43,13 @@ and `videoconvert` present, `nvh264dec` and `nvvideoconvert` absent.
 | mtmc | admitted [80.9%, 81.9%], 145–230 global identities |
 | frames | 38 110–38 289 READ of 40 000 offered; incomplete events 0/2/0 |
 
-Extrapolated linearly to sixteen GPUs that is **[3203, 3278] tracked img/s**. The
-extrapolation is an assumption, not a measurement, and the box was contended — both make these
-lower bounds rather than upper ones.
+Extrapolated linearly to sixteen GPUs that is [3203, 3278] tracked img/s — **and that is the
+design-load reading, not the chain's capacity.** This run was offered 1 000 img/s, which it
+refuses 13% of; offered 2 000 it tracks **952 img/s** on the same four cards and stays correct
+there (`events_incomplete` 0, `collector_timeouts` 0, mtmc admitting 76%). So the capacity
+reading is **3 809 on sixteen GPUs, 1.27× the 3 000 target**, against 1.07–1.09× from the
+design-load figure. The extrapolation is an assumption either way, and the box was contended,
+so both are lower bounds.
 
 ### What the chain actually costs: 12%, not 5.87x
 

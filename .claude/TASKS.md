@@ -4824,6 +4824,21 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       own number; not (c) fewer models, which was never needed for 3 000. What moved it was
       `--source nvdec` against `--source gstreamer`, [9.7, 10.2] ms of host CPU an image
       against [61.8, 75.7] -- and V156 had already mandated that route.
+      **AND THE FIGURE ABOVE IS UNDERSTATED, because it too was taken at 1 000 offered -- below
+      this chain's own ceiling (15 Sep, same mistake as `C1`'s).** Offered 2 000 the chain
+      tracks **952 img/s** on four GPUs, and stays correct at that ceiling: `events_complete`
+      39 064, `events_incomplete` **0**, `collector_timeouts` **0**, mtmc still admitting 76%
+      with 157 identities. So:
+        at the design load (1 000 offered)   tracked [800.8, 819.6]   16 GPUs [3203, 3278]
+        at its CEILING     (2 000 offered)   tracked **952**          16 GPUs **3809**
+      Against the 3 000 target that is **1.27x rather than 1.07-1.09x**. Both readings are
+      real and they answer different questions: the first is what 50 cameras x 20 fps costs on
+      FOUR cards (12.5 cameras a card, where it refuses 13%); the second is what the chain can
+      do. The target question -- can sixteen GPUs carry 3 000 -- is a capacity question, so the
+      ceiling is the right number and the answer has headroom rather than none.
+      WORTH SAYING ABOUT THE 13%: the deployment is 50 cameras over SIXTEEN cards, 3.1 a card
+      against this run's 12.5, so the refusals here are a four-times-density artefact --
+      `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` makes the same point about its own table.
       CAVEAT ON THE CLOSURE, stated rather than buried: sixteen GPUs is a LINEAR extrapolation
       from four, which this file has always flagged as an assumption, and the box was contended
       (load 44-47), which makes these lower bounds rather than upper ones. A run on more than
