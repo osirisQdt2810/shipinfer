@@ -7,7 +7,7 @@ line names the ledger item that holds the detail, and the exact action.
 
 | # | Action | Item |
 |---|---|---|
-| 1 | **ANSWERED 10 Sep (V164): the metric is FPS — images processed per second — the target is 5x the baseline, and it runs on FOUR GPUs, not five.** Events/rows/CPU-second are ruled out ("tuyệt đối không"). Both arms need re-taking on four GPUs as img/s; every figure so far is five-GPU and event-based. **AND `C1` KEPT WAITING ON IT ANYWAY** until 14 Sep -- it read "waiting on the operator's one question" for four days after you answered. Corrected: `C1`, `FPS-ON-FOUR-GPUS`, `V165` and `V167` all now wait on the same RE-RUN (four GPUs, img/s, both arms), not on you. **THE RE-RUN IS DONE, 15 Sep: both arms, four GPUs, img/s, matched fp16.** baseline 938.6 SATURATED against ours accepted [821.4, 836.5] / tracked [800.8, 819.6] -- **0.85-0.89x by frames, 5.14-5.23x by model work**, because the baseline runs 2 model invocations an image and this chain runs 11.74. `FPS-ON-FOUR-GPUS` and `V167-GSTREAMER-ONLY-3000` are closed by it. WHAT IS LEFT FOR YOU is one sentence: which of those two the 5x means. Frames would need 4 693 img/s on four GPUs; model work is already met. | `C1-WHAT-IS-THE-5x-AGAINST?`, `FPS-ON-FOUR-GPUS`, `C1` |
+| 1 | **ANSWERED 10 Sep (V164): the metric is FPS — images processed per second — the target is 5x the baseline, and it runs on FOUR GPUs, not five.** Events/rows/CPU-second are ruled out ("tuyệt đối không"). Both arms need re-taking on four GPUs as img/s; every figure so far is five-GPU and event-based. **AND `C1` KEPT WAITING ON IT ANYWAY** until 14 Sep -- it read "waiting on the operator's one question" for four days after you answered. Corrected: `C1`, `FPS-ON-FOUR-GPUS`, `V165` and `V167` all now wait on the same RE-RUN (four GPUs, img/s, both arms), not on you. **THE RE-RUN IS DONE, 15 Sep: both arms, four GPUs, img/s, matched fp16.** baseline 938.6 SATURATED against ours accepted [821.4, 836.5] / tracked [800.8, 819.6] -- **0.85-0.89x by frames, 5.14-5.23x by model work**, because the baseline runs 2 model invocations an image and this chain runs 11.74. **SUPERSEDED LATER THE SAME DAY: that pair compared the baseline's SATURATED figure with ours from a run offered 1 000 img/s, below our own ceiling. At our ceiling, eight interleaved runs: [0.94, 1.03]x by frames -- parity -- and [5.53, 6.07]x by model work.** `FPS-ON-FOUR-GPUS` and `V167-GSTREAMER-ONLY-3000` are closed by it. WHAT IS LEFT FOR YOU is one sentence: which of those two the 5x means. Frames would need 4 693 img/s on four GPUs; model work is already met. | `C1-WHAT-IS-THE-5x-AGAINST?`, `FPS-ON-FOUR-GPUS`, `C1` |
 | 0 | **Nothing — resolved itself.** A vendor apt repo served a bad index for ~30 min on 9 Sep and `main` went red on a repository this project never installs from; it cleared, and #194 and #196 merged on a re-run. #195 hardens against the next one and carries `automerge`. | `CI-A-VENDOR-REPO-BLOCKS-EVERY-MERGE` |
 | 2 | **DONE 10 Sep — you merged it** (`a9867e3`). The C++ tracking chain is mine again. | `CSRC-GRAPH-HAS-NO-TRACKING`, `V146b` |
 | 3 | **DONE 10 Sep — you merged it** (`b645dbd`). `V124a-PHASE3` is unblocked. | `V124b`, `V124a-PHASE3` |
@@ -336,7 +336,7 @@ prose, and inline `[!] OPERATOR:` sub-markers parse as items. An advisory list t
 false positives gets ignored, which is no better than the reminder it replaces. Done by hand it
 is twenty minutes and it found four.
 
-AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is this repo's `pipeline/deepstream/run.py` deployed anywhere outside this box? It has never run HERE (no deepstream image; T4 still asks you to pull it), so if the answer is no I will make `missing_stages` per-frame everywhere and keep schema v5. Row 1's remaining half is the other one: which of the two measured ratios the 5x means (frames 0.85-0.89x, model work 5.14-5.23x). Everything else is `[x]`/`[!]`/`[-]`; the one `[ ]` is `SHIPVISION-TRACK-LAST-MATCH`, which the parity register PINS open by test.
+AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is this repo's `pipeline/deepstream/run.py` deployed anywhere outside this box? It has never run HERE (no deepstream image; T4 still asks you to pull it), so if the answer is no I will make `missing_stages` per-frame everywhere and keep schema v5. Row 1's remaining half is the other one: which of the two measured ratios the 5x means -- **frames [0.94, 1.03]x (parity) and model work [5.53, 6.07]x**, both re-measured at saturation on 15 Sep; this line carried the superseded 0.85-0.89x / 5.14-5.23x pair, which were taken below our own ceiling. Everything else is `[x]`/`[!]`/`[-]`; the one `[ ]` is `SHIPVISION-TRACK-LAST-MATCH`, which the parity register PINS open by test.
 
 > ## Z · The final gate — never remove this line (V61)
 >
@@ -5388,6 +5388,11 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       SATURATED** against ours accepted [821.4, 836.5] / tracked [800.8, 819.6], matched fp16,
       same four cards, same afternoon: **0.85-0.89x by frames, 5.14-5.23x by model work** (the
       baseline runs 2 invocations an image, this chain 11.74). `C1` carries the reading.
+      **BOTH OF THOSE ARE SUPERSEDED THE SAME DAY and the pair above is kept only to show what
+      it was:** ours was a run offered 1 000 img/s, which this chain does not saturate at, while
+      the baseline's 938.6 is a saturated figure. At OUR ceiling it is **[0.94, 1.03]x by frames
+      -- parity -- and [5.53, 6.07]x by model work** over eight interleaved runs. The deficit
+      never existed; `C1` carries the corrected reading too.
       WHAT THE GATE ACTUALLY WANTED, since the message says "rebuild both from one ONNX" and
       that would have restated every number in this file: the mismatch was PRECISION, not a
       missing build. The repository's plan is byte-identical to `models/yolo26n_fp16.engine`

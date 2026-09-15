@@ -174,6 +174,13 @@ these numbers. Note also that at fp16 with 1 000 img/s offered the baseline repo
 **SATURATED**, so in this regime it is a real ceiling rather than the offer-bound behaviour
 recorded at other loads.
 
+> **SUPERSEDED the same day, and that last sentence is why.** The baseline's 938.6 is saturated;
+> our 821–836 is not — it is a run offered 1 000 img/s, which this chain does not saturate at,
+> so this pair compares their ceiling with our mid-range. At our own ceiling, over eight
+> interleaved runs, it is **[0.94, 1.03]× by frames — parity — and [5.53, 6.07]× by model
+> work**. See *What the chain actually costs* earlier on this page. The row is kept because the
+> mistake is the useful part: below saturation every arm returns roughly what it was offered.
+
 ### The worker count, re-swept at the ceiling instead of at the design load
 
 An earlier sweep the same day ranked 92 workers above 140 on tracked img/s and concluded that

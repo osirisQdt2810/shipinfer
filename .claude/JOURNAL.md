@@ -131,6 +131,9 @@ and the profile behind it closed four and sharpened the fifth:
   the item had the devices 25% busy.
 * `FPS-ON-FOUR-GPUS` DONE, and `C1` finally has its ratio: **0.85-0.89x by frames, 5.14-5.23x
   by model work**, matched fp16, same cards, same afternoon.
+  *(Both superseded within hours: ours was taken at 1 000 offered, below our own ceiling, while
+  the baseline's figure was saturated. At our ceiling it is [0.94, 1.03]x by frames -- parity --
+  and [5.53, 6.07]x by work.)*
 
 **Two of my own recorded claims fell in the process.** I had filed the engine-parity gate as a
 decision about the benchmark's whole history, because its message says "rebuild both from one
