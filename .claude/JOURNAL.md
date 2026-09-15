@@ -146,13 +146,18 @@ Offered 2 000 instead of 1 000, the picture inverts:
 
 | | tracked / accepted | vs baseline |
 |---|---|---|
-| full chain at its ceiling | 977 accepted, 952 tracked | **1.04x by frames, 6.11x by model work** |
+| full chain at its ceiling | accepted [884.5, 971.1], tracked [848.1, 939.2], n=8 | **[0.94, 1.03]x by frames — parity — and [5.53, 6.07]x by model work** |
 | detect only | 1 845 | 0.98x per invocation — parity |
+
+(Written that evening from ONE run as "977 accepted, 952 tracked, 1.04x, 6.11x"; the ranges are
+eight interleaved runs, taken later the same night. The correction's direction holds; its point
+figures were the best of the nine.)
 
 So the 0.85–0.89x deficit I reported for hours never existed; it compared their saturated
 figure against our mid-range. The segmenter's 1.01–1.05x and the chain's "12% cost" went with
-it. And the session's own headline was understated: 952 tracked at the ceiling is **3 809 on
-sixteen GPUs, 1.27x the 3 000 target**, not the 1.07–1.09x I had been quoting.
+it. And the session's own headline was understated: at the ceiling it is **[3392, 3757] on
+sixteen GPUs, [1.13, 1.25]x the 3 000 target**, not the 1.07–1.09x I had been quoting. (Written
+that evening as a point figure, 952 / 3 809 / 1.27x, from one run; the range is eight.)
 
 **The rule, now in memory:** `frames_dropped 0` means you found the offer, not the ceiling.
 Stable, reproducible numbers below saturation measure the generator, and they look exactly
@@ -166,16 +171,31 @@ answer is a plausible price for the work the name claims.
 **Then I applied that rule to my own worker sweep, and it took a fifth number down.** The
 paragraph above says 92 workers beat 140 on tracked img/s. That sweep was run at 1 000
 offered — below this chain's ceiling — so it ranked the offer, which is the same mistake the
-three retired ratios made. Nine runs at 2 000 offered, interleaved: 92 accepts [884.5, 976.6]
-and 140 accepts [1063.5, 1149.5], separated, 140 ahead. Untracked separates too, 2.5–4.1%
-against 9.5–11.0%, which **confirms** the reordering mechanism I had named. But tracked does
-not separate at all: 92's best 952.4 sits above 140's worst 946.2. So the mechanism stands and
-the ranking is withdrawn. The default stays at 23 per GPU on a different argument — 140 pulls
-15% more frames through the whole model chain for a tracked rate nobody can tell apart.
+three retired ratios made. Sixteen runs at 2 000 offered, eight per arm, strictly alternated:
+accepted separates and 140 wins (1.144×); untracked separates too, 3.0–4.1% against 9.5–12.4%,
+which **confirms** the reordering mechanism I had named; tracked does not separate — 140's mean
+is 5.7% higher and its floor is below 92's mean. So the mechanism stands and the ranking is
+withdrawn. The default stays at 23 per GPU on a different argument: 140 pulls 14.4% more frames
+through the whole model chain for a gain no single run can confirm.
 
-**Which is the shape of the whole day.** Five numbers retired, and not one of them was wrong
-arithmetic. Each was a ratio taken where one side had headroom left. A measurement below
-saturation is not a small measurement; it is a measurement of something else.
+**It took two goes to get even that right, which is the more useful half.** The first version of
+this correction quoted nine runs — but one of them was an earlier run by a different script, and
+it was 92's best. #287's review caught it, and dropping it flipped the reading: the remaining
+4-vs-4 *separated*, 140 ahead by 6.9 img/s. Four more replicates per arm turned that 6.9 gap
+into an 81.5 overlap. So the review was right to block, right that the guest run was
+illegitimate, and its 4-vs-4 conclusion was itself an artefact of n=4. A separation smaller than
+either arm's own spread is not visible at four runs.
+
+**And the same widening was owed one level up.** The day's headline — "952 tracked at the
+ceiling, 3 809 on sixteen GPUs, 1.27×" — was one run. Eight interleaved runs at exactly those
+settings give [848.1, 939.2], i.e. [3392, 3757] and [1.13, 1.25]×. The conclusion survives
+because the floor still clears 3 000, but the figure was a best-of-n.
+
+**Which is the shape of the whole day.** Five numbers retired and two more widened from points
+to ranges, and not one of them was wrong arithmetic. Each was a number taken where something
+still had headroom — the offer, or the sample. A measurement below saturation is not a small
+measurement; it is a measurement of something else, and a range read off too few runs is the
+same mistake with a different axis.
 
 ---
 

@@ -45,11 +45,14 @@ and `videoconvert` present, `nvh264dec` and `nvvideoconvert` absent.
 
 Extrapolated linearly to sixteen GPUs that is [3203, 3278] tracked img/s — **and that is the
 design-load reading, not the chain's capacity.** This run was offered 1 000 img/s, which it
-refuses 13% of; offered 2 000 it tracks **952 img/s** on the same four cards and stays correct
-there (`events_incomplete` 0, `collector_timeouts` 0, mtmc admitting 76%). So the capacity
-reading is **3 809 on sixteen GPUs, 1.27× the 3 000 target**, against 1.07–1.09× from the
-design-load figure. The extrapolation is an assumption either way, and the box was contended,
-so both are lower bounds.
+refuses 13% of; offered 2 000 it tracks **[848.1, 939.2] img/s** on the same four cards over
+eight interleaved runs and stays correct there (on the first of them `events_incomplete` 0,
+`collector_timeouts` 0, mtmc admitting 76%). So the capacity reading is **[3392, 3757] on
+sixteen GPUs, [1.13, 1.25]× the 3 000 target**, against 1.07–1.09× from the design-load
+figure. That row said "952, 3 809, 1.27×" until the eight replicates existed; 952.4 was their
+best, and a best-of-n quoted as the figure is the error this page spent the day correcting.
+The conclusion is unchanged because the floor clears the target. The extrapolation is an
+assumption either way, and the box was contended, so these are lower bounds.
 
 ### What the chain actually costs: 12%, not 5.87x
 
@@ -83,12 +86,18 @@ saturation:
 
 | | frames | × invocations | model-invocations/s |
 |---|---|---|---|
-| baseline | 938.6 | 2.00 | 1 877 |
-| full chain | **977.0** | 11.74 | **11 470** |
-| detect only | 1 845 | 1.00 | 1 845 |
+| baseline | 938.6 (saturated) | 2.00 | 1 877 |
+| full chain | **[884.5, 971.1]**, n=8 | 11.74 | **[10 384, 11 401]** |
+| detect only | 1 845 (n=1) | 1.00 | 1 845 |
 
-**1.04× by frames, 6.11× by model work, and 0.98× per invocation** — parity per unit of work.
-The 0.85–0.89× deficit was their ceiling against our mid-range.
+**[0.94, 1.03]× by frames — parity, straddling 1.0 — and [5.53, 6.07]× by model work**, with
+0.98× per invocation on the one-model arm. The 0.85–0.89× deficit was their ceiling against our
+mid-range, and that correction stands.
+
+This row read "977.0 · 1.04× · 6.11×" until the replicates existed. 977 was the best of nine
+runs at those settings, so the first correction quoted one end of a distribution after
+criticising a comparison for quoting the other. The eight strictly-interleaved runs are the
+range above; the ninth, from a different script an hour earlier, gave 976.6.
 
 Caveat: one process, four GPUs. The deployment is a process per shard, so this ceiling scales
 with processes; what it says is that adding cards to *one* process stops paying early.
@@ -146,33 +155,43 @@ recorded at other loads.
 
 An earlier sweep the same day ranked 92 workers above 140 on tracked img/s and concluded that
 more workers *lose* tracked frames. It was run at 1 000 img/s offered — below this chain's own
-ceiling — so it ranked the offer. Re-run at **2 000 offered**, nine runs interleaved A/B/A/B,
-50 cameras × 40 fps × 40 s, `--source nvdec`, GPUs 1,3,4,6, workers the only variable:
+ceiling — so it ranked the offer. Re-run at **2 000 offered**: sixteen runs, eight per arm,
+strictly alternated A/B by one script in one sitting, 50 cameras × 40 fps × 40 s,
+`--source nvdec`, GPUs 1,3,4,6, workers the only variable.
 
-| workers | n | accepted img/s | untracked | **tracked img/s** |
-|---|---|---|---|---|
-| 92 | 5 | [884.5, 976.6] | [2.5, 4.1] % | **[848.1, 952.4]** |
-| 140 | 4 | [1063.5, 1149.5] | [9.5, 11.0] % | **[946.2, 1040.8]** |
+| workers | n | accepted img/s | untracked | **tracked img/s** | tracked mean (sd) |
+|---|---|---|---|---|---|
+| 92 | 8 | [884.5, 971.1] | [3.0, 4.1] % | **[848.1, 939.2]** | 893.2 (37.1) |
+| 140 | 8 | [979.0, 1149.5] | [9.5, 12.4] % | **[857.7, 1040.8]** | 943.8 (56.2) |
 
 Three readings, and they do not all point the same way:
 
-* **Accepted separates** and 140 wins — the ranges do not touch.
+* **Accepted separates** and 140 wins — the ranges do not touch over sixteen runs, 1.144×.
 * **Untracked separates** too, which *confirms* the mechanism the earlier sweep named: more
   workers scatter a camera's consecutive frames across more threads, and the tracker refuses
-  roughly three times the fraction.
-* **Tracked does not separate.** 92's best (952.4) sits above 140's worst (946.2). Four of
-  92's five runs cluster in [932.5, 952.4]; the 848.1 is one low reading, quoted rather than
-  dropped.
+  roughly three times the fraction. It is the one reading that separates at both loads.
+* **Tracked does not separate.** 140's mean is 5.7% higher, but its floor (857.7) is below
+  92's mean (893.2).
+
+**At four replicates an arm it looked otherwise, and that is worth keeping.** The first eight
+runs gave 92 a ceiling of 939.2 and 140 a floor of 946.2 — separated by 6.9 img/s. Four more
+runs per arm turned that gap into an 81.5 img/s overlap. A separation smaller than either
+arm's own spread cannot be seen at n=4.
+
+One earlier run at the same settings (tracked 952.4) is **excluded**: it was taken by a
+different script an hour before and was never part of an alternation, so it is a replicate of
+a different box state rather than of this arm.
 
 So the withdrawal is of the *ranking*, not the mechanism. `WORKERS_PER_GPU=23` stays — now
-because 140 pulls ~15% more frames through the whole model chain for a tracked rate that
-cannot be told apart from 92's, which is device time spent on frames the tracker then refuses.
+because 140 pulls 14.4% more frames through the whole model chain for a tracked mean 5.7%
+higher that no single run can tell from 92's, which is device time spent on frames the tracker
+then refuses.
 
-Extrapolated ×4 to sixteen GPUs, and therefore an extrapolation: 92 → [3392, 3809],
-140 → [3785, 4163]. Both clear 3 000; both fall short of 4 500.
+Extrapolated ×4 to sixteen GPUs, and therefore an extrapolation: 92 → [3392, 3757],
+140 → [3431, 4163]. Both clear 3 000 at the floor; neither reaches 4 500 at the ceiling.
 
 ```bash
-# each cell, alternating 92 / 140 so one box cancels drift between its own arms
+# each cell, strictly alternating 92 / 140 so one box cancels drift between its own arms
 SHIPINFER_BENCH_IMAGE=shipinfer-gst:jammy-nvdec SHIPINFER_BENCH_GPUS=1,3,4,6 \
 SHIPINFER_BENCH_CAMERAS=50 SHIPINFER_BENCH_FPS=40 SHIPINFER_BENCH_SECONDS=40 \
 SHIPINFER_BENCH_SOURCE=nvdec SHIPINFER_BENCH_WORKERS=92 \
