@@ -5,6 +5,22 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-15 — the per-device table reports the achieved batch size (both planes)
+
+`rows/requests` is 1.00 for a detector however well the batch window fills — one frame is one
+WorkItem and one row — so it reads as a batching answer and is not one. `rows/batches` is the
+achieved batch size, and neither plane printed `batches`, though both had counted it since
+#167 put `rows` beside `requests`.
+
+`per_device_batches` on the C++ bench and on `ShipInferResult` (with its `DEVICE_TABLES` entry,
+so it crosses the shard boundary); the shared printer shows it already divided, as `(batch)`.
+
+First reading, 50x40x40 s on four A5000s, `--source nvdec`: detector **2.74 of max_batch 8**
+while 121-125% busy, so the busiest model has the lowest fill. Segmenter 4.25/8, ship embedder
+6.68/16, person embedder 11.19/16 — all invisible before.
+
+---
+
 ## 2026-09-15 — shipvision's device-output paths write in place (kernel boundary)
 
 Both `_into` entry points assembled a batch of their own and copied it into the buffer the

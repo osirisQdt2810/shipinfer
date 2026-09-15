@@ -518,9 +518,12 @@ def _print_device_table(
 
     Rows go on their own line and only when they DIFFER from requests: a detector gets one
     frame per request so the two are equal and a second identical line is noise, while an
-    embedder's gap IS the crop fan-out. Occupancy goes on a third, already a percentage: it
-    arrives divided by the window it was measured over, because a sharded run has one such
-    window per shard and this printer has no way to tell which device belongs to which.
+    embedder's gap IS the crop fan-out. The achieved BATCH size is printed already divided --
+    `rows/batches`, never the raw counter -- because a reader handed two counters divides by
+    the wrong one, and `rows/requests` is the wrong one: it is 1.00 for a detector however well
+    the window works. Occupancy goes last, already a percentage: it arrives divided by the
+    window it was measured over, because a sharded run has one such window per shard and this
+    printer has no way to tell which device belongs to which.
     """
     per_device = tables.get("per_device", {})
     if not per_device:
@@ -536,6 +539,16 @@ def _print_device_table(
         if rows and rows != devices:
             spread = "  ".join(f"{d}={n}" for d, n in sorted(rows.items()))
             print(f"  {'  (rows)':<18} {spread}")
+        batches = tables.get("per_device_batches", {}).get(model, {})
+        if batches and rows:
+            spread = "  ".join(
+                # A device with no batch is printed as `-` rather than skipped: a model that
+                # ran on three of four devices is a placement question, and a gap in the row
+                # is what asks it.
+                f"{d}={rows.get(d, 0) / n:.2f}" if n else f"{d}=-"
+                for d, n in sorted(batches.items())
+            )
+            print(f"  {'  (batch)':<18} {spread}")
         busy = tables.get("per_device_busy_pct", {}).get(model, {})
         if busy:
             spread = "  ".join(
