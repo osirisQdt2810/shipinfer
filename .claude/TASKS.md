@@ -4721,7 +4721,7 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       windows are invisible at this load. The coverage leg is slower than anything I run, and
       that is exactly what made it the one to catch a real inversion.
 
-- [x] HOST-DECODE-IS-THE-HOST-BUDGET · **MEASURED 15 Sep: THE DECODE ROUTE IS WORTH 6-7x THE
+- [x] HOST-DECODE-IS-THE-HOST-BUDGET · **RECORDED AS `ADR-023` (15 Sep), because `DECISIONS.md` is what a later change reads and this only lived here.** MEASURED 15 Sep: THE DECODE ROUTE IS WORTH 6-7x THE
       HOST BUDGET, AND IT IS THE ROUTE V156 ALREADY MANDATES.** Interleaved A/B at twelve
       cameras x 20 fps x 20 s on GPUs 1,2,4,6, three replicates each, arms alternating, ONE
       variable (`--source`) and the SAME image for both so the lanes cannot differ:
