@@ -429,9 +429,12 @@ page was counting refusals.
 > section at the top of this file. The sweep above ran with decode on the HOST, which is what
 > held it to ~260: at [61.8, 75.7] ms of host CPU a frame the box could not read the offered
 > load, let alone track it. On `--source nvdec` the same chain tracks 3.1× that. What the
-> paragraph above gets right and keeps is the *shape* — tracked rate is what counts and
-> workers past the plateau buy refusals, re-confirmed on the new route (92 → 140 workers
-> moves accepted up and TRACKED down).
+> paragraph above gets right and keeps is the *shape* — tracked rate is what counts, and
+> workers past the plateau buy refusals: 92 → 140 moves accepted UP (1.144×) and triples the
+> refused fraction (3.0–4.1 % → 9.5–12.4 %), both separated over sixteen runs.
+> **What does NOT hold is "and TRACKED down", which this line claimed until 15 Sep:** at n=8
+> tracked does not separate at all. See *The worker count, re-swept at the ceiling instead of
+> at the design load* above.
 
 **Why, and it is not a defect.** One shared worker pool reorders a camera's frames, and a
 per-camera tracker refuses a frame that does not advance its own stream

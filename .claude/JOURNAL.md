@@ -120,6 +120,10 @@ and the profile behind it closed four and sharpened the fifth:
 * `V165` (4 500) NOT met, short 27-29%, needing 1.37x. The host is no longer the wall, more
   workers lose tracked frames, and both host-budget levers are spent -- so the remaining lever
   is fewer or cheaper models, which is a product decision.
+  *(Corrected later the same night: "more workers lose tracked frames" is WITHDRAWN. Sixteen
+  runs at saturation separate accepted and untracked but not tracked, so the worker pool is
+  neither a lever nor a loss. The conclusion stands on the new argument -- 140 pulls 14.4% more
+  frames through the chain for a gain no single run can confirm.)*
 * `EXECUTE-BLOCKS` NOT worth building. `cudaStreamSynchronize` is 6.7% of instance-thread wall
   -- higher than the 1.7% estimate, so the profile was worth taking -- but the devices are
   oversubscribed in the same run (detector 164-174%), so that 6.7% is a thread waiting on a
