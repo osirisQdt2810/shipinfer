@@ -44,10 +44,14 @@ instance_groups:
 
 dynamic_batching:
   enabled: true
-  # 5 ms is well inside a 50 ms frame budget at 20 fps. It does NOT fill a batch of 8, which
-  # this comment claimed until it was measurable: the achieved batch here is ~2.7-2.9
-  # (`per_device_batches`). Raising it to 20 ms does fill more -- 4.20 -- and buys at most
-  # ~3% throughput, inside the run-to-run spread, so the window stays where the latency is.
+  # 5 ms is well inside a 50 ms frame budget at 20 fps. Whether it fills a batch of 8 depends
+  # on the ARRIVAL rate, not on the window: `per_device_batches` reads ~2.8 in the full chain
+  # at 2 000 img/s offered and ~7.0 on `detect_only` at 4 000, at this same 5 ms.
+  #
+  # AND A FULLER BATCH BUYS NOTHING. Raising the window to 20 ms reaches 7.62 of 8 on the
+  # detect-only arm and moves accepted throughput 0.989x -- overlapping, slightly down. The
+  # batch separates by 7x its own spread and the throughput does not move at all, so this
+  # detector is not batch-limited and the window stays where the latency is.
   max_queue_delay_us: 5000
   preferred_batch_sizes: [4, 8]
 

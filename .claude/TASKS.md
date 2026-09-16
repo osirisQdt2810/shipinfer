@@ -5293,6 +5293,23 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       LATENCY WAS NOT THE WINDOW'S COST HERE AND COULD NOT HAVE BEEN: at this offer
       `frame_us_p50` is ~210 ms of queueing in both arms, so 15 ms of extra window is
       invisible. That price has to be read at the DESIGN load, not at the ceiling.
+      **AND THE LAST WAY OUT IS CLOSED: WITH THE BATCH NEARLY FULL, THROUGHPUT STILL DOES NOT
+      MOVE.** Both arms above kept the batch well under `max_batch` 8, so "a FULLER batch would
+      pay" was still live. Re-run on `detect_only` -- where the detector is the only consumer of
+      the devices -- offered 4 000 img/s so that arm saturates too, three alternated pairs:
+        window  5 000 us   batch [6.95, 7.00] mean 6.97   accepted mean 1 341.4
+        window 20 000 us   batch [7.57, 7.65] mean 7.62   accepted mean 1 326.2
+      The batch SEPARATES (gap 0.57 against a 0.08 spread, 7x) and accepted OVERLAPS at 0.989x
+      of the mean -- slightly DOWN. At 7.6 of 8 there is no room left to argue the batch was
+      the constraint: **this chain's detector is not batch-limited**, and the 2.74 fill that
+      started this line is a symptom rather than a cost.
+      A HYPOTHESIS IT SUGGESTS AND DOES NOT ESTABLISH, because the comparison crosses both
+      sittings and chains: the fill is set by the ARRIVAL RATE at each instance, not by the
+      window -- the same 5 000 us default gives 2.74 in the full chain at 2 000 offered and
+      6.97 here at 4 000. One sitting varying the offer alone would settle it.
+      TWO RUNS OF A PLANNED FOURTH PAIR RETURNED ZERO FRAMES, all 50 cameras abandoned past the
+      stop deadline, and the cause is the box rather than the code: another tenant took GPU 3
+      partway through. Recorded rather than dropped.
       THE TALLY, all three knobs measured at saturation: workers 92->140 +5.7% mean, the batch
       window +3.4%, a third instance -7.0% -- **all three OVERLAP on throughput**. What
       separates is never the throughput, it is the mechanism underneath: untracked fraction for
