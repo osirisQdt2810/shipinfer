@@ -3597,6 +3597,21 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       GPU 3 (#290's body), then a 99%-full `/home` (#290, merged). The engine files read at
       **1.1-1.3 GB/s**, so the filesystem was never it. The check before trusting any run here is
       `grep 'engines ready in' .artifacts/cpp/<label>.log`.
+- [ ] ENGINE-LOAD-FAILURE-SEGFAULTS-INSTEAD-OF-SAYING-WHICH-DEVICE · **a device with no room
+      turns into SIGSEGV with no diagnosis** (16 Sep). Another tenant took a card in the run's
+      set to 23 495 of 24 564 MiB; the bench got four seconds in and `exit=139`, with TensorRT
+      saying what happened on the way down:
+        `ICudaEngine::~ICudaEngine: Error Code 3: API Usage Error (Parameter check failed,
+         condition: mExecutionContextCounter.use_count() == 1. Destroying an engine object ...)`
+      So the engine is destroyed while an execution context still holds it -- the cleanup path
+      of a PARTIAL load unwinds in the wrong order -- and a recoverable "device N is full"
+      becomes a crash. 15 runs of a sweep were lost to it before the cause was read.
+      WHAT IT SHOULD DO: name the device and the shortfall and refuse, the way
+      `BackendUnavailableError`/`BackendLoadError` already do on the Python side. On a shared
+      box this is not an edge case; it is what happens whenever a neighbour's job grows.
+      WHERE: `csrc/shipinfer/cli/bench.cpp`'s engine construction loop and whatever owns the
+      `TrtInstance`/adapter pair -- the contexts must go before the engine on every exit path,
+      including the throwing one.
 - [ ] BENCH-SHOULD-NOT-SEE-GPUS-IT-DOES-NOT-USE · the workaround above should be the default:
       `scripts/run_cpp_bench.sh` knows which devices the run uses and should hand them to
       `_gpus.sh` rather than letting `cpp.sh` pass `--device nvidia.com/gpu=all`. Worth ~9.5 s
@@ -5361,9 +5376,36 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       how many devices the container can SEE: 9.96/10.07 s at eight against 0.658/0.665 s at
       three, four of the eight holding other tenants' allocations. See
       `THE-BOX-STOPPED-BEING-MEASURABLE`, which carries the numbers and the recipe.
-      THE THREE COMPLETED PAIRS ALL PREDATE THE STEP CHANGE, and the box is measurable again
-      with the visible set narrowed -- so the overload question above is runnable now rather
-      than blocked.
+      THE THREE COMPLETED PAIRS ALL PREDATE THE STEP CHANGE, and the box became measurable again
+      once the visible set was narrowed.
+      **AND THE OVERLOAD QUESTION IS ANSWERED, IN BOTH DIRECTIONS (16 Sep).** On `detect_only`,
+      offering 2 000 -> 4 000 over eight alternated pairs costs **-32.5% of accepted on the
+      mean** and the MECHANISM separates cleanly -- dropped [0.3, 5.2]% against [40.3, 56.7]%,
+      no overlap, with read RISING 1.22x while accepted falls. The accepted ranges themselves
+      just touch at n=8 (one 4 000 run hit 1 687.1 against a 2 000 run's 1 662.5) and the
+      overloaded arm is 4x more variable, sd 251.5 against 64.1 -- which is the finding rather
+      than noise around it.
+      **THE FULL CHAIN DOES NOT DO THIS, AND THAT IS WHAT PROTECTS EVERY CEILING FIGURE HERE.**
+      Offers 1 200 / 1 600 / 2 000, round-robined, in TWO independent sittings on different
+      quads -- eight runs per offer:
+        1 200   A mean 895.1   B mean 854.5   POOLED 869.7 (sd 35.2)
+        1 600   A mean 910.7   B mean 848.0   POOLED 871.5 (sd 52.2)
+        2 000   A mean 883.3   B mean 870.9   POOLED 875.6 (sd 74.7)
+      **The two sittings do not agree on which offer is best** -- A says 1 600, B says 2 000 --
+      which is what a variable that does nothing looks like. Pooled, the three means span
+      **5.9 img/s, 0.7%**, against a 238.6 within-arm spread. So **2 000 offered, where every
+      saturation figure in this file was taken, is not past the chain's best point.** Had it
+      been, the whole day's ceiling was measured downhill of the peak.
+      DRAWN AT n=8 PER POINT DELIBERATELY: an n=3 overlap read as a zero is the mirror of the
+      n=3 separation this session already withdrew, and #292's review was right to say so while
+      the sweep still stood at three. The one thing the pooled table does show is that the
+      2 000 arm's sd is twice the 1 200 arm's -- offering further past saturation buys variance
+      even where it costs no throughput.
+      WHY THEY DIFFER, AND IT IS ADR-005 WORKING: the chain refuses its excess at the QUEUE --
+      `queue_rejected` **7 700 -> 34 800 pooled over all eight runs**, 4.5x -- before it costs
+      device time, while `detect_only` at
+      4 000 pushes INGEST past its own limit, so the extra decode is spent on frames nothing
+      will accept. Backpressure protects the chain; it cannot protect a stage upstream of it.
       THE TALLY, all three knobs measured at saturation: workers 92->140 +5.7% mean, the batch
       window +3.4%, a third instance -7.0% -- **all three OVERLAP on throughput**. What
       separates is never the throughput, it is the mechanism underneath: untracked fraction for
