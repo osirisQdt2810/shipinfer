@@ -281,6 +281,35 @@ the worker count, achieved batch for both detector knobs. Nothing closes the 1.3
 which is what `[19.2, 21.2] GPUs at this chain's cost` already said; the difference is that the
 knob space has now been searched rather than assumed.
 
+### And with the batch nearly full, throughput still does not move
+
+The two A/Bs above leave one reading open: the batch went 46% fuller and bought ~3%, but it
+never got *near* `max_batch` 8, so "a fuller batch would pay" was still live. This settles it.
+
+`detect_only.yaml` — where the detector is the only consumer of the devices — offered **4 000
+img/s** so that arm saturates too (at 2 000 it drops only 0.2–2.4%). Same window A/B, alternated,
+three pairs:
+
+| window | achieved batch | accepted img/s | dropped (of read) |
+|---|---|---|---|
+| 5 000 µs | **[6.95, 7.00]** mean 6.97 | [1 312.7, 1 357.2] mean 1 341.4 | [40.5, 47.5] % |
+| 20 000 µs | **[7.57, 7.65]** mean 7.62 | [1 215.4, 1 447.2] mean 1 326.2 | [40.0, 47.6] % |
+
+**The batch separates — gap 0.57 against a widest-arm spread of 0.08, 7× — and throughput does
+not move at all.** The means are 0.989×, i.e. very slightly *down*, and the ranges overlap
+heavily. At 7.6 of a `max_batch` of 8 there is no room left to argue the batch was the
+constraint: **this chain's detector is not batch-limited.**
+
+A hypothesis this suggests but does not establish, because the comparison crosses both sittings
+and chains: the fill is set by the **arrival rate at each instance**, not by the window. The
+same 5 000 µs default achieves 2.74 in the full chain at 2 000 offered and 6.97 here at 4 000.
+Testing that properly needs one sitting that varies the offer alone.
+
+**Two runs of a planned fourth pair returned zero frames** — all 50 cameras abandoned past the
+stop deadline — and the cause is on the box rather than in the code: another tenant took GPU 3,
+one of the four this sweep used, partway through. Recorded rather than dropped, and the pairs
+above are the three that completed.
+
 ### One unchanged configuration, three sittings, 170 img/s apart
 
 Worth its own heading because it bounds what any of these A/Bs can claim. `workers 92`,

@@ -244,6 +244,15 @@ sittings**, 23% of its own low end, sitting means 75.7 apart. An absolute figure
 meaningless without its sitting, and a within-sitting effect smaller than the within-arm
 spread is invisible however the runs are ordered.
 
+**The last way out, closed.** Every arm so far kept the batch well under `max_batch` 8, so "a
+*fuller* batch would pay" was still a live reading. On `detect_only` at 4 000 offered — the
+detector alone on the devices, and saturated — the 5 ms default already achieves **6.97 of 8**
+and 20 ms gets **7.62**. The batch separates by 7× its own spread; accepted throughput overlaps
+at 0.989× of the mean, slightly *down*. At 7.6 of 8 there is nothing left to argue: the
+detector is not batch-limited, and the 2.74 fill that started the thread is a symptom, not a
+cost. (Two runs of a fourth pair returned zero frames, all cameras abandoned — another tenant
+took one of my four GPUs mid-sweep. Recorded, not dropped.)
+
 **And the review loop earned its keep.** #287 took seven rounds and every block was real: the
 correction kept quoting the run it was excluding — in the arm, then in the prose, then in the
 *numerator* of the chain-cost ratio (1 845 was the excluded run's partner, so I re-ran the
