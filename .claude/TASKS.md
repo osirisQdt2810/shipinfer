@@ -5361,9 +5361,25 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       how many devices the container can SEE: 9.96/10.07 s at eight against 0.658/0.665 s at
       three, four of the eight holding other tenants' allocations. See
       `THE-BOX-STOPPED-BEING-MEASURABLE`, which carries the numbers and the recipe.
-      THE THREE COMPLETED PAIRS ALL PREDATE THE STEP CHANGE, and the box is measurable again
-      with the visible set narrowed -- so the overload question above is runnable now rather
-      than blocked.
+      THE THREE COMPLETED PAIRS ALL PREDATE THE STEP CHANGE, and the box became measurable again
+      once the visible set was narrowed.
+      **AND THE OVERLOAD QUESTION IS ANSWERED, IN BOTH DIRECTIONS (16 Sep).** On `detect_only`,
+      offering 2 000 -> 4 000 over eight alternated pairs costs **-32.5% of accepted on the
+      mean** and the MECHANISM separates cleanly -- dropped [0.3, 5.2]% against [40.3, 56.7]%,
+      no overlap, with read RISING 1.22x while accepted falls. The accepted ranges themselves
+      just touch at n=8 (one 4 000 run hit 1 687.1 against a 2 000 run's 1 662.5) and the
+      overloaded arm is 4x more variable, sd 251.5 against 64.1 -- which is the finding rather
+      than noise around it.
+      **THE FULL CHAIN DOES NOT DO THIS, AND THAT IS WHAT PROTECTS EVERY CEILING FIGURE HERE.**
+      Offers 1 200 / 1 600 / 2 000 round-robined three times give tracked means 895.1 / 910.7 /
+      883.3 -- a 27.4 img/s spread BETWEEN the means against a 93.2 within-arm spread, so all
+      three overlap and the offer does not move goodput over that range. **2 000 offered, where
+      every saturation figure in this file was taken, is not past the chain's best point.** Had
+      it been, the whole day's ceiling would have been measured downhill of the peak.
+      WHY THEY DIFFER, AND IT IS ADR-005 WORKING: the chain refuses its excess at the QUEUE --
+      `queue_rejected` 8 600 -> 38 700 -- before it costs device time, while `detect_only` at
+      4 000 pushes INGEST past its own limit, so the extra decode is spent on frames nothing
+      will accept. Backpressure protects the chain; it cannot protect a stage upstream of it.
       THE TALLY, all three knobs measured at saturation: workers 92->140 +5.7% mean, the batch
       window +3.4%, a third instance -7.0% -- **all three OVERLAP on throughput**. What
       separates is never the throughput, it is the mechanism underneath: untracked fraction for

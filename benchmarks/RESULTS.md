@@ -375,16 +375,47 @@ so the filesystem was never the problem. **The three completed pairs all predate
 change**, and the check before trusting any run on this box is one line:
 `grep 'engines ready in' .artifacts/cpp/<label>.log`.
 
-**And one question this sweep raises stays open, because the box failed before it could be
-answered.** Against the chain-cost sitting's `detect_only` row — same chain, same `workers 92` —
-accepted falls from [1 805.2, 1 873.6] at 2 000 offered to [1 312.7, 1 447.2] here at 4 000: about
-**27 % of goodput for doubling the offer**, a 358 img/s gap against a 170 img/s cross-sitting
-floor. If it is real it is an overload-collapse signature and an ADR-005 backpressure result
-rather than a batching one — read climbs while accepted falls, so the box spends more decode on
-frames it then drops. The experiment that settles it is one sitting alternating 2 000 and 4 000
-on `detect_only`; it was started and returned zero frames on both arms, for the reason above.
+**And one question this sweep raised is now answered, in both directions.** Against the
+chain-cost sitting's `detect_only` row, accepted looked like it fell ~27 % for doubling the
+offer — above this page's 170 img/s cross-sitting floor, so worth a sitting of its own. Two
+sweeps, both with the container's visible device set narrowed (which is what made the box
+measurable again), host GPUs 1,2,4,6:
 
-### One unchanged configuration, three sittings, 170 img/s apart
+**`detect_only`, offer 2 000 → 4 000, eight alternated pairs:**
+
+| offered | read | accepted | dropped (of read) |
+|---|---|---|---|
+| 2 000 | 1 818.9 | **[1 662.5, 1 840.2]** mean 1 792.6 (sd 64.1) | [0.3, 5.2] % |
+| 4 000 | 2 226.7 | **[816.1, 1 687.1]** mean 1 209.6 (sd 251.5) | [40.3, 56.7] % |
+
+**The mechanism separates and the outcome does not.** Dropped fraction does not overlap at all
+and read rises 1.22× while accepted falls — the overload-collapse signature. Accepted itself
+means **−32.5 %**, but at n=8 the ranges just touch: one 4 000 run reached 1 687.1, above one
+2 000 run's 1 662.5. Seven of eight pairs drop hard; the overloaded arm is **4× more variable**
+(sd 251.5 against 64.1), which is itself the finding rather than noise around it.
+
+**The full chain does not do this, and that is what protects every ceiling figure on this page.**
+Same rig, offers 1 200 / 1 600 / 2 000 round-robined three times:
+
+| offered | read | tracked img/s | queue_rejected |
+|---|---|---|---|
+| 1 200 | 1 132.0 | [864.9, 929.5] mean 895.1 | ~8 600 |
+| 1 600 | 1 505.2 | [868.0, 949.6] mean 910.7 | ~22 700 |
+| 2 000 | 1 883.4 | [833.2, 926.4] mean 883.3 | ~38 700 |
+
+All three overlap heavily: the spread *between* the means is **27.4 img/s** against a widest
+within-arm spread of **93.2**. So over this range the offer does not move the chain's goodput,
+and **2 000 offered — where every saturation figure on this page was taken — is not past its
+best point.** That was worth checking rather than assuming, because if it had been, the whole
+day's ceiling would have been measured downhill of the peak.
+
+**Why the two differ, and it is ADR-005 working.** The chain's excess is refused at the queue
+— `queue_rejected` climbs 8 600 → 38 700 — before it costs device time. `detect_only` at 4 000
+pushes *ingest itself* past its limit: read climbs to 2 227 img/s and that decode work is spent
+on frames nothing will accept. Backpressure protects the chain; it cannot protect a stage
+upstream of it.
+
+### One unchanged configuration, three sittings, 170 img/s apart### One unchanged configuration, three sittings, 170 img/s apart
 
 Worth its own heading because it bounds what any of these A/Bs can claim. `workers 92`,
 `count: 2`, `max_queue_delay_us` 5 000, `--source nvdec`, GPUs 1,3,4,6, 50 × 40 fps × 40 s —
