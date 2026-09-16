@@ -278,7 +278,8 @@ where every saturation figure today was taken, is not past the chain's best poin
 drew this at n=3, and #292's review pointed out that I was applying the strict standard to
 everyone else's claims and not to my own null. It was right.) If it had been, the whole day's ceiling would have
 been measured downhill of the peak, and I would not have known. The difference is ADR-005 doing
-its job: the chain refuses excess at the queue (`queue_rejected` 8 600 → 38 700) before it costs
+its job: the chain refuses excess at the queue (`queue_rejected` 7 700 → 34 800 pooled, 4.5×)
+before it costs
 device time, while detect-only pushes ingest itself past its limit and pays for decode nobody
 accepts. Backpressure protects the chain; it cannot protect a stage upstream of it.
 

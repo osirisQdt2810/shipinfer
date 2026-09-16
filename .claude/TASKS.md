@@ -5402,7 +5402,8 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       2 000 arm's sd is twice the 1 200 arm's -- offering further past saturation buys variance
       even where it costs no throughput.
       WHY THEY DIFFER, AND IT IS ADR-005 WORKING: the chain refuses its excess at the QUEUE --
-      `queue_rejected` 8 600 -> 38 700 -- before it costs device time, while `detect_only` at
+      `queue_rejected` **7 700 -> 34 800 pooled over all eight runs**, 4.5x -- before it costs
+      device time, while `detect_only` at
       4 000 pushes INGEST past its own limit, so the extra decode is spent on frames nothing
       will accept. Backpressure protects the chain; it cannot protect a stage upstream of it.
       THE TALLY, all three knobs measured at saturation: workers 92->140 +5.7% mean, the batch
