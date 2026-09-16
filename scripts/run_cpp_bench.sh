@@ -73,16 +73,24 @@ CAMERAS="${SHIPINFER_BENCH_CAMERAS:-50}"
 # passes in `"$@"` wins, because the binary takes the last spelling of a flag.
 STOP_MS="${SHIPINFER_BENCH_STOP_DEADLINE_MS:-$((CAMERAS > 12 ? CAMERAS * 400 : 5000))}"
 
-# ON A SHARED BOX, NARROW WHAT THE CONTAINER CAN SEE. `cpp.sh` passes
-# `--device nvidia.com/gpu=all`, and CUDA's per-process init enumerates every visible device:
-# measured 16 Sep, first context 9.96/10.07 s with all eight against 0.658/0.665 s with three.
-# At fifty cameras that blows the camera-start budget and the run reads ZERO frames.
+# THE CONTAINER SEES ONLY THE CARDS THIS RUN USES, and that is worth ~9.5 s: `cpp.sh` passes
+# `--device nvidia.com/gpu=all` by default, and CUDA's per-process init enumerates every
+# visible device -- measured 16 Sep, first context 9.96/10.07 s with all eight against
+# 0.658/0.665 s with three. At fifty cameras that blows the camera-start budget and the run
+# reads ZERO frames, which is how four sweeps were lost before the cause was read.
 #
-#   SHIPINFER_GPUS=1,2,6 SHIPINFER_BENCH_GPUS=0,1,2 scripts/run_cpp_bench.sh <label>
-#
-# Host ids in the first, container-local 0..N-1 in the second -- restricting visibility
-# renumbers them, which is why this is a recipe and not the default (`BENCH-SHOULD-NOT-SEE-
-# GPUS-IT-DOES-NOT-USE`: the per-device tables would change labels).
+# `SHIPINFER_BENCH_GPUS` stays what it always was: HOST ids. Narrowing renumbers them, so the
+# ids handed to the binary are 0..N-1 and `--gpu-labels` carries the host ids through to every
+# `per_device*` line -- otherwise this run's tables would say `0: 1: 2:` where the whole
+# archive says `1: 3: 4:`. `SHIPINFER_BENCH_NARROW=0` opts out.
+NARROW="${SHIPINFER_BENCH_NARROW:-1}"
+if [ "$NARROW" = "1" ] && [ "${SHIPINFER_GPUS:-}" = "" ]; then
+  export SHIPINFER_GPUS="$GPU_IDS"
+  GPU_LABELS="$GPU_IDS"
+  GPU_IDS="$(seq -s, 0 $(( $(echo "$GPU_IDS" | tr ',' '\n' | wc -l) - 1 )))"
+else
+  GPU_LABELS="$GPU_IDS"
+fi
 SOURCE="${SHIPINFER_BENCH_SOURCE:-replay}"
 if [ "$SOURCE" = "replay" ]; then
   SOURCE_ARGS=(--source replay)
@@ -163,6 +171,7 @@ timeout "${SHIPINFER_BENCH_TIMEOUT:-900}" "$REPO/deploy/rootless/cpp.sh" \
   --plan          "/work/.artifacts/cpp/${LABEL}.plan" \
   --repository    /work/model_repository \
   --gpu-ids "$GPU_IDS" \
+  --gpu-labels "$GPU_LABELS" \
   --cameras "$CAMERAS" \
   --stop-deadline-ms "$STOP_MS" \
   --fps "${SHIPINFER_BENCH_FPS:-20}" \

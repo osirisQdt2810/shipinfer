@@ -71,6 +71,12 @@ namespace {
         std::string repository;
         std::string log_path = "buffers.jsonl";
         std::vector<int> devices{0};
+        // WHAT TO CALL EACH DEVICE IN THE OUTPUT, when the two differ. CUDA numbers what the
+        // container can SEE from 0, so narrowing the visible set to the cards a run uses --
+        // which is worth ~9.5 s of enumeration on a shared box -- renumbers them, and every
+        // archived `per_device*` line on this project's results page reports HOST ids. Empty
+        // means "the same as `devices`", so nothing changes for a run that narrows nothing.
+        std::vector<int> device_labels;
         int cameras = 12;
         double fps = 10.0;
         double seconds = 40.0;
@@ -101,6 +107,15 @@ namespace {
         //: without a summary -- so the run that most needs reading produces no numbers.
         int stop_deadline_ms = 5000;
     };
+
+    // The name a device goes by in the output: its label when `--gpu-labels` gave one, and
+    // its own ordinal otherwise. Validated at parse time, so this is a lookup and cannot fail.
+    int label_of(const Options& options, int device) {
+        for (size_t i = 0; i < options.devices.size(); ++i)
+            if (options.devices[i] == device)
+                return i < options.device_labels.size() ? options.device_labels[i] : device;
+        return device;
+    }
 
     // How this binary's flags fill `BenchEngines`, which is the only place they are read.
     BenchEngines engines_of(const Options& options) {
@@ -156,6 +171,8 @@ namespace {
                 options.log_path = next();
             else if (flag == "--gpu-ids")
                 options.devices = parse_ints(next());
+            else if (flag == "--gpu-labels")
+                options.device_labels = parse_ints(next());
             else if (flag == "--cameras")
                 options.cameras = std::stoi(next());
             else if (flag == "--fps")
@@ -208,6 +225,16 @@ namespace {
                 "--repository names the root a plan's `artefact` paths hang "
                 "off, so it needs --plan <file>");
         }
+        // REFUSED AT PARSE TIME rather than silently half-applied: a short label list would
+        // relabel the first devices and leave the rest reporting ordinals, which is the one
+        // output a reader cannot tell from a correct one.
+        if (!options.device_labels.empty() &&
+            options.device_labels.size() != options.devices.size()) {
+            throw ConfigError(
+                "--gpu-labels has " + std::to_string(options.device_labels.size()) +
+                " entries and --gpu-ids has " + std::to_string(options.devices.size()) +
+                "; a label per device, in the same order, or none at all");
+        }
         return options;
     }
 
@@ -250,7 +277,7 @@ namespace {
         }
         out << ", \"gpus\": [";
         for (size_t i = 0; i < options.devices.size(); ++i) {
-            out << (i ? ", " : "") << options.devices[i];
+            out << (i ? ", " : "") << label_of(options, options.devices[i]);
         }
         out << "]}, \"models\": [";
         for (size_t i = 0; i < models.size(); ++i) {
@@ -1222,15 +1249,15 @@ int main(int argc, char** argv) {
             }
             std::cout << "per_device " << name;
             for (const auto& [device, count] : by_device)
-                std::cout << " " << device << ":" << count;
+                std::cout << " " << label_of(options, device) << ":" << count;
             std::cout << "\n";
             std::cout << "per_device_rows " << name;
             for (const auto& [device, count] : rows_by_device)
-                std::cout << " " << device << ":" << count;
+                std::cout << " " << label_of(options, device) << ":" << count;
             std::cout << "\n";
             std::cout << "per_device_batches " << name;
             for (const auto& [device, count] : batches_by_device)
-                std::cout << " " << device << ":" << count;
+                std::cout << " " << label_of(options, device) << ":" << count;
             std::cout << "\n";
             // doc: long why this is a percentage and not the microseconds it is made of
             // OCCUPANCY, not raw time. A microsecond total is unreadable without the wall
@@ -1250,7 +1277,7 @@ int main(int argc, char** argv) {
                 // onto the stream and cut the next double printed anywhere to one digit.
                 std::ostringstream cell;
                 cell << std::fixed << std::setprecision(1) << pct;
-                std::cout << " " << device << ":" << cell.str();
+                std::cout << " " << label_of(options, device) << ":" << cell.str();
             }
             std::cout << "\n";
         }
