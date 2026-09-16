@@ -73,6 +73,16 @@ CAMERAS="${SHIPINFER_BENCH_CAMERAS:-50}"
 # passes in `"$@"` wins, because the binary takes the last spelling of a flag.
 STOP_MS="${SHIPINFER_BENCH_STOP_DEADLINE_MS:-$((CAMERAS > 12 ? CAMERAS * 400 : 5000))}"
 
+# ON A SHARED BOX, NARROW WHAT THE CONTAINER CAN SEE. `cpp.sh` passes
+# `--device nvidia.com/gpu=all`, and CUDA's per-process init enumerates every visible device:
+# measured 16 Sep, first context 9.96/10.07 s with all eight against 0.658/0.665 s with three.
+# At fifty cameras that blows the camera-start budget and the run reads ZERO frames.
+#
+#   SHIPINFER_GPUS=1,2,6 SHIPINFER_BENCH_GPUS=0,1,2 scripts/run_cpp_bench.sh <label>
+#
+# Host ids in the first, container-local 0..N-1 in the second -- restricting visibility
+# renumbers them, which is why this is a recipe and not the default (`BENCH-SHOULD-NOT-SEE-
+# GPUS-IT-DOES-NOT-USE`: the per-device tables would change labels).
 SOURCE="${SHIPINFER_BENCH_SOURCE:-replay}"
 if [ "$SOURCE" = "replay" ]; then
   SOURCE_ARGS=(--source replay)

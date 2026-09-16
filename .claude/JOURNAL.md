@@ -244,6 +244,30 @@ sittings**, 23% of its own low end, sitting means 75.7 apart. An absolute figure
 meaningless without its sitting, and a within-sitting effect smaller than the within-arm
 spread is invisible however the runs are ordered.
 
+**And then the box appeared to break, and it was us.** Every bench run started reading zero
+frames, with `engines ready in` stepping from 0.35–0.54 s to 41–54 s. I guessed twice and wrote
+both guesses down: a tenant holding one of my GPUs, then a 99%-full `/home`. Both wrong — the
+engine files read at 1.1–1.3 GB/s, and a 12-camera run on *unshared* cards failed the same way.
+
+Timing the parts apart is what settled it. All four `.plan` files read and deserialise in about
+**0.2 s together**; the first CUDA context costs **9.4–10.1 s** and every context after it 0.2 s.
+Not a sick card either — permute the order and the cost follows whichever device is touched
+first. The variable is **how many devices the container can see**: 9.957/10.066 s with all eight
+against 0.658/0.665 s with three, interleaved both ways. Four of the eight were holding other
+tenants' allocations, and enumerating them is the ten seconds.
+
+**So the box was never broken and the bench was asking for it**: `cpp.sh` passes
+`--device nvidia.com/gpu=all` whatever the run's GPU list says. Narrowing the visible set took
+the same 12-camera run from `startup_s 41.17, frames_read 0` to `0.485, 4699`. Making it the
+default is a real change rather than a one-liner, because restricting visibility renumbers the
+devices and every `per_device` table on the results page reports host ids — that is now a ledger
+line with the design question on it.
+
+**The lesson, and it is the day's lesson again in a new costume.** I wrote down two causes I had
+not measured, in a file whose whole purpose is to be the number you can trust, while the tool to
+check sat one command away. "Time the parts separately" would have found this in five minutes at
+any point in the hour I spent not doing it.
+
 **The last way out, closed.** Every arm so far kept the batch well under `max_batch` 8, so "a
 *fuller* batch would pay" was still a live reading. On `detect_only` at 4 000 offered — the
 detector alone on the devices, and saturated — the 5 ms default already achieves **6.97 of 8**
@@ -255,11 +279,7 @@ arm's own spread is 17% of its mean, so an n=3 overlap excludes nothing. Treatin
 as a zero is the exact mirror of the n=3 "separation" I had to withdraw an hour earlier, and the
 review caught that too. And the regime is not the deployment's: at 50 × 20 the fill is 2.74 of 8,
 where the headroom argument does not apply at all. (Two runs of a fourth pair returned zero
-frames, all cameras abandoned. I blamed a tenant on one of my GPUs and that was wrong: `engines
-ready in` steps from 0.35–0.54 s across the six good runs to 49.9 / 50.4 s on the failures, and a
-12-camera run on three *unshared* cards then took 41.2 s and read nothing either. `/home` is 99%
-full at load ~55 — a plan deserialising against a thrashing filesystem. The box stopped being
-measurable, and the honest move was to stop measuring rather than to keep collecting zeros.)
+frames, all cameras abandoned — see below, where the cause turned out to be ours.)
 
 **And the review loop earned its keep.** #287 took seven rounds and every block was real: the
 correction kept quoting the run it was excluding — in the arm, then in the prose, then in the
