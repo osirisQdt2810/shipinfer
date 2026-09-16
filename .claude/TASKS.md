@@ -336,7 +336,7 @@ prose, and inline `[!] OPERATOR:` sub-markers parse as items. An advisory list t
 false positives gets ignored, which is no better than the reminder it replaces. Done by hand it
 is twenty minutes and it found four.
 
-AWAITING-OPERATOR: `/home` is 99% full and engine load has stepped from ~0.5 s to 41-54 s, so every bench run now reads zero frames (`THE-BOX-STOPPED-BEING-MEASURABLE`) -- that one needs room on the disk, which only you can arrange, and until it is back under a second no number from this box is worth taking. Then: row 9 above, now a YES/NO rather than a schema debate -- is this repo's `pipeline/deepstream/run.py` deployed anywhere outside this box? It has never run HERE (no deepstream image; T4 still asks you to pull it), so if the answer is no I will make `missing_stages` per-frame everywhere and keep schema v5. Row 1's remaining half is the other one: which of the two measured ratios the 5x means -- **frames [0.94, 1.03]x (parity) and model work [5.53, 6.07]x**, both re-measured at saturation on 15 Sep; this line carried the superseded 0.85-0.89x / 5.14-5.23x pair, which were taken below our own ceiling. Everything else is `[x]`/`[!]`/`[-]`; the one `[ ]` is `SHIPVISION-TRACK-LAST-MATCH`, which the parity register PINS open by test.
+AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is this repo's `pipeline/deepstream/run.py` deployed anywhere outside this box? It has never run HERE (no deepstream image; T4 still asks you to pull it), so if the answer is no I will make `missing_stages` per-frame everywhere and keep schema v5. Row 1's remaining half is the other one: which of the two measured ratios the 5x means -- **frames [0.94, 1.03]x (parity) and model work [5.53, 6.07]x**, both re-measured at saturation on 15 Sep; this line carried the superseded 0.85-0.89x / 5.14-5.23x pair, which were taken below our own ceiling. Everything else is `[x]`/`[!]`/`[-]`; the one `[ ]` is `SHIPVISION-TRACK-LAST-MATCH`, which the parity register PINS open by test.
 
 > ## Z · The final gate — never remove this line (V61)
 >
@@ -3574,27 +3574,40 @@ AWAITING-OPERATOR: `/home` is 99% full and engine load has stepped from ~0.5 s t
       That is why five sequential puts are safe and the sixth is not. All four wait now; 40/40
       at load 64 against 1-in-20 before.
 
-- [!] THE-BOX-STOPPED-BEING-MEASURABLE · **ENGINE LOAD STEPPED FROM ~0.5 s TO 41-54 s AND HAS
-      NOT RECOVERED, so every bench run since reads zero frames** (16 Sep). Not a code change --
-      six runs at 0.35-0.54 s, then `db_5000_4`/`db_20000_4` at 49.9/50.4 s, then a 12-camera
-      run on three UNSHARED GPUs at 41.2 s, all with `frames_read 0` and every camera abandoned
-      past the stop deadline. So it is neither the camera count nor a contended device, and the
-      tenant I first blamed is ruled out.
-      WHAT THE BOX SHOWS: `/home` **99% full** (106 GB of 6.8 TB), four other tenants' jobs, load
-      ~55. My own tree is 13 GB and `.artifacts/` 641 MB, so the disk is not mine to free. That
-      is the shape of TensorRT deserialising a plan against a thrashing page cache rather than a
-      warm one.
-      [!] OPERATOR: **this needs room on `/home`, which only you can arrange.** Until engine load
-      is back under a second, no number from this box is worth taking -- and I would rather say
-      so than keep collecting zeros. Everything measured before the step change stands; the
-      check is one line: `grep 'engines ready in' .artifacts/cpp/<label>.log`.
-      WHAT IT BLOCKS, specifically one open question rather than the roadmap: whether doubling
-      the offer costs ~27% of goodput (`detect_only` accepted [1 805.2, 1 873.6] at 2 000 against
-      [1 312.7, 1 447.2] at 4 000, a 358 img/s gap against this box's 170 img/s cross-sitting
-      floor). If real that is an ADR-005 backpressure result -- read climbs while accepted falls
-      -- and it is a bigger finding than the batching question that surfaced it. The experiment
-      is one sitting alternating 2 000 and 4 000 on `detect_only`; it was started and both arms
-      returned zero frames.
+- [x] THE-BOX-STOPPED-BEING-MEASURABLE · **SOLVED, AND IT WAS OURS: THE BENCH ENUMERATES EVERY
+      GPU ON THE BOX, WHICH COSTS ~9.5 s OF CUDA INIT WHEN OTHER TENANTS HOLD FOUR OF THEM.**
+      `engines ready in` stepped from 0.35-0.54 s to 41-54 s and every run since read zero
+      frames, including a 12-camera one on unshared GPUs -- so neither camera count nor a
+      contended device.
+      TIMED APART, inside the container: `import tensorrt` 0.18-0.80 s; **first CUDA context
+      9.4-10.1 s**; each context after 0.16-0.41 s; reading a `.plan` 0.007-0.081 s;
+      deserialising one 0.020-0.145 s. All four plans together are ~0.2 s, so they were never
+      the cost. Not a sick card either: whichever device is touched FIRST pays it, permuting
+      the order moves the cost with it.
+      THE VARIABLE IS HOW MANY DEVICES THE CONTAINER SEES, interleaved both directions:
+        all 8 GPUs        first context 9.957 s, 10.066 s
+        host GPUs 1,2,6   first context  0.658 s,  0.665 s
+      A 9.3 s gap against a 0.11 s within-arm spread -- **85x**, which is the kind of separation
+      this session has otherwise not seen. Four of the eight held other tenants' allocations.
+      AND THE BOX IS MEASURABLE AGAIN: the same 12-camera run that read zero frames gives
+      **`startup_s` 41.1741 -> 0.484967 and `frames_read` 0 -> 4699** with the visible set
+      narrowed. Recipe: `SHIPINFER_GPUS=1,2,6 SHIPINFER_BENCH_GPUS=0,1,2 scripts/run_cpp_bench.sh`
+      -- host ids in the first, container-local 0..N-1 in the second.
+      TWO WRONG CAUSES RECORDED BEFORE THIS ONE, because both reached the tree: a tenant holding
+      GPU 3 (#290's body), then a 99%-full `/home` (#290, merged). The engine files read at
+      **1.1-1.3 GB/s**, so the filesystem was never it. The check before trusting any run here is
+      `grep 'engines ready in' .artifacts/cpp/<label>.log`.
+- [ ] BENCH-SHOULD-NOT-SEE-GPUS-IT-DOES-NOT-USE · the workaround above should be the default:
+      `scripts/run_cpp_bench.sh` knows which devices the run uses and should hand them to
+      `_gpus.sh` rather than letting `cpp.sh` pass `--device nvidia.com/gpu=all`. Worth ~9.5 s
+      of startup on a shared box, and the 50-camera shape does not survive paying it.
+      THE DESIGN QUESTION THAT STOPS IT BEING A ONE-LINER, and why this is a line rather than a
+      commit: restricting visibility RENUMBERS the devices to 0..N-1, so every `per_device*`
+      table would report container-local ordinals where the whole archive reports host ids --
+      `1:9071 3:8841 4:9217 6:8942` becomes `0: 1: 2: 3:`. That is a comparability break across
+      every run on this page. Either the bench maps them back when printing (it knows the list
+      it was given), or the output states both. Deciding that is the work; the measurement above
+      is already done.
 - [!] API-WEDGED-REPORT-FLAKE-IS-NOT-A-TIMEOUT · **THE CHEAP HALF IS DONE (#286, merged
       15 Sep): THE NEXT OCCURRENCE WILL CARRY ITS OWN DIAGNOSIS.** The failure used to render
       one line -- `assert watcher.entered.wait(30.0)`. It now renders every live thread with
@@ -5341,12 +5354,16 @@ AWAITING-OPERATOR: `/home` is 99% full and engine load has stepped from ~0.5 s t
       first blamed: `startup_s` -- which the log calls `engines ready in` -- steps from
       **0.35-0.54 s across the six good runs to 49.9 / 50.4 s** on the pair that failed, and a
       later 12-camera run on three UNSHARED GPUs took 41.2 s and read nothing either. So it is
-      neither the camera count nor a contended device. `/home` is **99% full** with four
-      tenants at load ~55, which is what TensorRT deserialising a plan against a thrashing
-      filesystem looks like.
-      **NO FURTHER MEASUREMENT ON THIS BOX IS TRUSTWORTHY** until engine load returns to
-      sub-second. The three completed pairs all predate the step change; everything earlier in
-      this item does too.
+      neither the camera count nor a contended device.
+      **AND IT IS NOT THE FILESYSTEM EITHER, which this line said until it was measured**: the
+      engine files read at 1.1-1.3 GB/s and all four `.plan`s deserialise in ~0.2 s together.
+      The cost is ONE per-process CUDA init -- first context 9.4-10.1 s -- and the variable is
+      how many devices the container can SEE: 9.96/10.07 s at eight against 0.658/0.665 s at
+      three, four of the eight holding other tenants' allocations. See
+      `THE-BOX-STOPPED-BEING-MEASURABLE`, which carries the numbers and the recipe.
+      THE THREE COMPLETED PAIRS ALL PREDATE THE STEP CHANGE, and the box is measurable again
+      with the visible set narrowed -- so the overload question above is runnable now rather
+      than blocked.
       THE TALLY, all three knobs measured at saturation: workers 92->140 +5.7% mean, the batch
       window +3.4%, a third instance -7.0% -- **all three OVERLAP on throughput**. What
       separates is never the throughput, it is the mechanism underneath: untracked fraction for
