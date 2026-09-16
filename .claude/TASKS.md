@@ -336,7 +336,7 @@ prose, and inline `[!] OPERATOR:` sub-markers parse as items. An advisory list t
 false positives gets ignored, which is no better than the reminder it replaces. Done by hand it
 is twenty minutes and it found four.
 
-AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is this repo's `pipeline/deepstream/run.py` deployed anywhere outside this box? It has never run HERE (no deepstream image; T4 still asks you to pull it), so if the answer is no I will make `missing_stages` per-frame everywhere and keep schema v5. Row 1's remaining half is the other one: which of the two measured ratios the 5x means -- **frames [0.94, 1.03]x (parity) and model work [5.53, 6.07]x**, both re-measured at saturation on 15 Sep; this line carried the superseded 0.85-0.89x / 5.14-5.23x pair, which were taken below our own ceiling. Everything else is `[x]`/`[!]`/`[-]`; the one `[ ]` is `SHIPVISION-TRACK-LAST-MATCH`, which the parity register PINS open by test.
+AWAITING-OPERATOR: `/home` is 99% full and engine load has stepped from ~0.5 s to 41-54 s, so every bench run now reads zero frames (`THE-BOX-STOPPED-BEING-MEASURABLE`) -- that one needs room on the disk, which only you can arrange, and until it is back under a second no number from this box is worth taking. Then: row 9 above, now a YES/NO rather than a schema debate -- is this repo's `pipeline/deepstream/run.py` deployed anywhere outside this box? It has never run HERE (no deepstream image; T4 still asks you to pull it), so if the answer is no I will make `missing_stages` per-frame everywhere and keep schema v5. Row 1's remaining half is the other one: which of the two measured ratios the 5x means -- **frames [0.94, 1.03]x (parity) and model work [5.53, 6.07]x**, both re-measured at saturation on 15 Sep; this line carried the superseded 0.85-0.89x / 5.14-5.23x pair, which were taken below our own ceiling. Everything else is `[x]`/`[!]`/`[-]`; the one `[ ]` is `SHIPVISION-TRACK-LAST-MATCH`, which the parity register PINS open by test.
 
 > ## Z · The final gate — never remove this line (V61)
 >
@@ -3574,6 +3574,27 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       That is why five sequential puts are safe and the sixth is not. All four wait now; 40/40
       at load 64 against 1-in-20 before.
 
+- [!] THE-BOX-STOPPED-BEING-MEASURABLE · **ENGINE LOAD STEPPED FROM ~0.5 s TO 41-54 s AND HAS
+      NOT RECOVERED, so every bench run since reads zero frames** (16 Sep). Not a code change --
+      six runs at 0.35-0.54 s, then `db_5000_4`/`db_20000_4` at 49.9/50.4 s, then a 12-camera
+      run on three UNSHARED GPUs at 41.2 s, all with `frames_read 0` and every camera abandoned
+      past the stop deadline. So it is neither the camera count nor a contended device, and the
+      tenant I first blamed is ruled out.
+      WHAT THE BOX SHOWS: `/home` **99% full** (106 GB of 6.8 TB), four other tenants' jobs, load
+      ~55. My own tree is 13 GB and `.artifacts/` 641 MB, so the disk is not mine to free. That
+      is the shape of TensorRT deserialising a plan against a thrashing page cache rather than a
+      warm one.
+      [!] OPERATOR: **this needs room on `/home`, which only you can arrange.** Until engine load
+      is back under a second, no number from this box is worth taking -- and I would rather say
+      so than keep collecting zeros. Everything measured before the step change stands; the
+      check is one line: `grep 'engines ready in' .artifacts/cpp/<label>.log`.
+      WHAT IT BLOCKS, specifically one open question rather than the roadmap: whether doubling
+      the offer costs ~27% of goodput (`detect_only` accepted [1 805.2, 1 873.6] at 2 000 against
+      [1 312.7, 1 447.2] at 4 000, a 358 img/s gap against this box's 170 img/s cross-sitting
+      floor). If real that is an ADR-005 backpressure result -- read climbs while accepted falls
+      -- and it is a bigger finding than the batching question that surfaced it. The experiment
+      is one sitting alternating 2 000 and 4 000 on `detect_only`; it was started and both arms
+      returned zero frames.
 - [!] API-WEDGED-REPORT-FLAKE-IS-NOT-A-TIMEOUT · **THE CHEAP HALF IS DONE (#286, merged
       15 Sep): THE NEXT OCCURRENCE WILL CARRY ITS OWN DIAGNOSIS.** The failure used to render
       one line -- `assert watcher.entered.wait(30.0)`. It now renders every live thread with
@@ -5300,16 +5321,32 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
         window  5 000 us   batch [6.95, 7.00] mean 6.97   accepted mean 1 341.4
         window 20 000 us   batch [7.57, 7.65] mean 7.62   accepted mean 1 326.2
       The batch SEPARATES (gap 0.57 against a 0.08 spread, 7x) and accepted OVERLAPS at 0.989x
-      of the mean -- slightly DOWN. At 7.6 of 8 there is no room left to argue the batch was
-      the constraint: **this chain's detector is not batch-limited**, and the 2.74 fill that
-      started this line is a symptom rather than a cost.
+      of the mean -- slightly DOWN.
+      THE CLAIM RESTS ON THE HEADROOM, NOT ON THAT OVERLAP (#290 r1 was right to separate them):
+      at 7.62 of 8 under 5% of fill is left, so batching cannot be a large lever THERE whatever
+      the throughput arm says -- and the 20 ms arm's own accepted spread is 231.8 img/s, 17% of
+      its mean, so an n=3 overlap that wide excludes nothing. Treating an n=3 overlap as a zero
+      is the mirror of the n=3 "separation" this session already had to withdraw.
+      AND THE REGIME IS NOT THE DEPLOYMENT'S: this is `detect_only` at 4 000 offered with 40-48%
+      dropped. At 50x20 the fill is 2.74 of 8 -- five sixths unused, the one regime where the
+      headroom argument does NOT apply -- and what is established there is +3.4%, overlapping,
+      n=3: undetermined rather than zero. So the 2.74 fill that started this line is a symptom
+      of arrival rate rather than a proven non-cost.
       A HYPOTHESIS IT SUGGESTS AND DOES NOT ESTABLISH, because the comparison crosses both
       sittings and chains: the fill is set by the ARRIVAL RATE at each instance, not by the
       window -- the same 5 000 us default gives 2.74 in the full chain at 2 000 offered and
       6.97 here at 4 000. One sitting varying the offer alone would settle it.
       TWO RUNS OF A PLANNED FOURTH PAIR RETURNED ZERO FRAMES, all 50 cameras abandoned past the
-      stop deadline, and the cause is the box rather than the code: another tenant took GPU 3
-      partway through. Recorded rather than dropped.
+      stop deadline. The cause is the box rather than the code, and it is **not** the tenant I
+      first blamed: `startup_s` -- which the log calls `engines ready in` -- steps from
+      **0.35-0.54 s across the six good runs to 49.9 / 50.4 s** on the pair that failed, and a
+      later 12-camera run on three UNSHARED GPUs took 41.2 s and read nothing either. So it is
+      neither the camera count nor a contended device. `/home` is **99% full** with four
+      tenants at load ~55, which is what TensorRT deserialising a plan against a thrashing
+      filesystem looks like.
+      **NO FURTHER MEASUREMENT ON THIS BOX IS TRUSTWORTHY** until engine load returns to
+      sub-second. The three completed pairs all predate the step change; everything earlier in
+      this item does too.
       THE TALLY, all three knobs measured at saturation: workers 92->140 +5.7% mean, the batch
       window +3.4%, a third instance -7.0% -- **all three OVERLAP on throughput**. What
       separates is never the throughput, it is the mechanism underneath: untracked fraction for

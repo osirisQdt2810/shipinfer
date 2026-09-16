@@ -48,10 +48,10 @@ dynamic_batching:
   # on the ARRIVAL rate, not on the window: `per_device_batches` reads ~2.8 in the full chain
   # at 2 000 img/s offered and ~7.0 on `detect_only` at 4 000, at this same 5 ms.
   #
-  # AND A FULLER BATCH BUYS NOTHING. Raising the window to 20 ms reaches 7.62 of 8 on the
-  # detect-only arm and moves accepted throughput 0.989x -- overlapping, slightly down. The
-  # batch separates by 7x its own spread and the throughput does not move at all, so this
-  # detector is not batch-limited and the window stays where the latency is.
+  # A FULLER BATCH BUYS NOTHING WHERE THE BATCH IS ALREADY FULL: 20 ms reaches 7.62 of 8 on
+  # detect-only at 4 000 offered, leaving under 5% of fill, so batching cannot be a large lever
+  # THERE. At this file's own deployment load -- 50x20, the header's 1000 req/s -- the fill is
+  # 2.74 and the only throughput reading is +3.4% overlapping at n=3, which is undetermined.
   max_queue_delay_us: 5000
   preferred_batch_sizes: [4, 8]
 
