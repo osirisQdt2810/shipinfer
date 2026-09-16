@@ -33,6 +33,7 @@ using gpuEvent_t = hipEvent_t;
     #define gpuSuccess hipSuccess
     #define gpuGetErrorString hipGetErrorString
     #define gpuMalloc hipMalloc
+    #define gpuMemGetInfo hipMemGetInfo
     #define gpuFree hipFree
     #define gpuMemcpy hipMemcpy
     #define gpuMemcpyAsync hipMemcpyAsync
@@ -74,6 +75,7 @@ using gpuEvent_t = cudaEvent_t;
     #define gpuSuccess cudaSuccess
     #define gpuGetErrorString cudaGetErrorString
     #define gpuMalloc cudaMalloc
+    #define gpuMemGetInfo cudaMemGetInfo
     #define gpuFree cudaFree
     #define gpuMemcpy cudaMemcpy
     #define gpuMemcpyAsync cudaMemcpyAsync
