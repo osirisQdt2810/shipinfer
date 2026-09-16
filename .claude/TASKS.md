@@ -7,7 +7,7 @@ line names the ledger item that holds the detail, and the exact action.
 
 | # | Action | Item |
 |---|---|---|
-| 1 | **ANSWERED 10 Sep (V164): the metric is FPS — images processed per second — the target is 5x the baseline, and it runs on FOUR GPUs, not five.** Events/rows/CPU-second are ruled out ("tuyệt đối không"). Both arms need re-taking on four GPUs as img/s; every figure so far is five-GPU and event-based. **AND `C1` KEPT WAITING ON IT ANYWAY** until 14 Sep -- it read "waiting on the operator's one question" for four days after you answered. Corrected: `C1`, `FPS-ON-FOUR-GPUS`, `V165` and `V167` all now wait on the same RE-RUN (four GPUs, img/s, both arms), not on you. **THE RE-RUN IS DONE, 15 Sep: both arms, four GPUs, img/s, matched fp16.** baseline 938.6 SATURATED against ours accepted [821.4, 836.5] / tracked [800.8, 819.6] -- **0.85-0.89x by frames, 5.14-5.23x by model work**, because the baseline runs 2 model invocations an image and this chain runs 11.74. `FPS-ON-FOUR-GPUS` and `V167-GSTREAMER-ONLY-3000` are closed by it. WHAT IS LEFT FOR YOU is one sentence: which of those two the 5x means. Frames would need 4 693 img/s on four GPUs; model work is already met. | `C1-WHAT-IS-THE-5x-AGAINST?`, `FPS-ON-FOUR-GPUS`, `C1` |
+| 1 | **ANSWERED 10 Sep (V164): the metric is FPS — images processed per second — the target is 5x the baseline, and it runs on FOUR GPUs, not five.** Events/rows/CPU-second are ruled out ("tuyệt đối không"). Both arms need re-taking on four GPUs as img/s; every figure so far is five-GPU and event-based. **AND `C1` KEPT WAITING ON IT ANYWAY** until 14 Sep -- it read "waiting on the operator's one question" for four days after you answered. Corrected: `C1`, `FPS-ON-FOUR-GPUS`, `V165` and `V167` all now wait on the same RE-RUN (four GPUs, img/s, both arms), not on you. **THE RE-RUN IS DONE, 15 Sep: both arms, four GPUs, img/s, matched fp16.** baseline 938.6 SATURATED against ours accepted [821.4, 836.5] / tracked [800.8, 819.6] -- **0.85-0.89x by frames, 5.14-5.23x by model work**, because the baseline runs 2 model invocations an image and this chain runs 11.74. **SUPERSEDED LATER THE SAME DAY: that pair compared the baseline's SATURATED figure with ours from a run offered 1 000 img/s, below our own ceiling. At our ceiling, eight interleaved runs: [0.94, 1.03]x by frames -- parity -- and [5.53, 6.07]x by model work.** `FPS-ON-FOUR-GPUS` and `V167-GSTREAMER-ONLY-3000` are closed by it. WHAT IS LEFT FOR YOU is one sentence: which of those two the 5x means. Frames would need 4 693 img/s on four GPUs; model work is already met. | `C1-WHAT-IS-THE-5x-AGAINST?`, `FPS-ON-FOUR-GPUS`, `C1` |
 | 0 | **Nothing — resolved itself.** A vendor apt repo served a bad index for ~30 min on 9 Sep and `main` went red on a repository this project never installs from; it cleared, and #194 and #196 merged on a re-run. #195 hardens against the next one and carries `automerge`. | `CI-A-VENDOR-REPO-BLOCKS-EVERY-MERGE` |
 | 2 | **DONE 10 Sep — you merged it** (`a9867e3`). The C++ tracking chain is mine again. | `CSRC-GRAPH-HAS-NO-TRACKING`, `V146b` |
 | 3 | **DONE 10 Sep — you merged it** (`b645dbd`). `V124a-PHASE3` is unblocked. | `V124b`, `V124a-PHASE3` |
@@ -336,7 +336,7 @@ prose, and inline `[!] OPERATOR:` sub-markers parse as items. An advisory list t
 false positives gets ignored, which is no better than the reminder it replaces. Done by hand it
 is twenty minutes and it found four.
 
-AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is this repo's `pipeline/deepstream/run.py` deployed anywhere outside this box? It has never run HERE (no deepstream image; T4 still asks you to pull it), so if the answer is no I will make `missing_stages` per-frame everywhere and keep schema v5. Row 1's remaining half is the other one: which of the two measured ratios the 5x means (frames 0.85-0.89x, model work 5.14-5.23x). Everything else is `[x]`/`[!]`/`[-]`; the one `[ ]` is `SHIPVISION-TRACK-LAST-MATCH`, which the parity register PINS open by test.
+AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is this repo's `pipeline/deepstream/run.py` deployed anywhere outside this box? It has never run HERE (no deepstream image; T4 still asks you to pull it), so if the answer is no I will make `missing_stages` per-frame everywhere and keep schema v5. Row 1's remaining half is the other one: which of the two measured ratios the 5x means -- **frames [0.94, 1.03]x (parity) and model work [5.53, 6.07]x**, both re-measured at saturation on 15 Sep; this line carried the superseded 0.85-0.89x / 5.14-5.23x pair, which were taken below our own ceiling. Everything else is `[x]`/`[!]`/`[-]`; the one `[ ]` is `SHIPVISION-TRACK-LAST-MATCH`, which the parity register PINS open by test.
 
 > ## Z · The final gate — never remove this line (V61)
 >
@@ -3574,7 +3574,24 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       That is why five sequential puts are safe and the sixth is not. All four wait now; 40/40
       at load 64 against 1-in-20 before.
 
-- [!] API-WEDGED-REPORT-FLAKE-IS-NOT-A-TIMEOUT · **IT RECURRED 15 Sep, AFTER #224, SO THE
+- [!] API-WEDGED-REPORT-FLAKE-IS-NOT-A-TIMEOUT · **THE CHEAP HALF IS DONE (#286, merged
+      15 Sep): THE NEXT OCCURRENCE WILL CARRY ITS OWN DIAGNOSIS.** The failure used to render
+      one line -- `assert watcher.entered.wait(30.0)`. It now renders every live thread with
+      the last four frames of its stack (not the top one: a parked thread's top frame is always
+      `threading.py`, which names no caller) plus the POST task's own `repr`, because a
+      SUSPENDED coroutine has no frame in a stack dump and only the repr says whether the POST
+      ran at all. The dump is built at the `raise`, so a passing run pays nothing.
+      WHY THAT AND NOT A HUNT: at 1-in-25 over a 6.5-minute suite, bisecting costs hours and
+      this session had no hypothesis to aim them at. The first line of the dump is
+      `threading.active_count()`, which IS the one hypothesis nothing has tested -- the load
+      experiment used 60 separate PROCESSES, not threads in this interpreter. In isolation the
+      dump reads `2 live threads`; in the full suite, where the flake lives, that number is the
+      measurement this hunt has never had.
+      [!] WHAT IS LEFT FOR YOU IS A BUDGET QUESTION, NOT A TECHNICAL ONE: wait for the next
+      instrumented occurrence (my default, and it costs nothing), or say the word and I will
+      spend the hours bisecting the full suite for the interacting test. Nothing is blocked
+      either way -- the suite is green and the diagnostic is merged.
+      PREVIOUS: **IT RECURRED 15 Sep, AFTER #224, SO THE
       `[x]` BELOW WAS PREMATURE -- reopened with what today adds.** Same assertion as every
       previous failure: `assert watcher.entered.wait(30.0), "the POST never asked for a
       report"` at `test_streams.py:837`. So #224's rewrite (two tasks, not two threads)
@@ -5249,6 +5266,45 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       hiding in the model mix. **[19.2, 21.2] GPUs** at this chain's cost is the honest shape --
       4 500 over tracked [848.1, 939.2] a quad -- and it was "~22" while the arithmetic ran on
       one run. The sixteen-GPU figure stays an extrapolation from four either way.
+      **AND TWO MORE SCHEDULING KNOBS WERE MEASURED 15-16 Sep, BOTH AIMED AT THE MEASURED
+      BOTTLENECK, NEITHER A LEVER.** #288's new `per_device_batches` says the detector -- the
+      busiest model on every device at 121-125% -- fills only **2.74 of its max_batch 8**, so
+      the two knobs that could change that were worth trying. Saturation, GPUs 1,3,4,6,
+      `workers 92`, alternated within one sitting per knob:
+        `max_queue_delay_us` 5 000 -> 20 000 (n=3)  batch 2.88 -> 4.20 SEPARATED
+                                                    tracked 817.5 -> 845.3 mean, OVERLAP
+        detector instances 2 -> 3 per GPU   (n=8)  batch 2.82 -> 2.04 SEPARATED
+                                                    tracked 877.1 -> 816.1 mean, OVERLAP
+      SO BOTH MOVE THE BATCH CLEANLY AND NEITHER MOVES THROUGHPUT PAST THE NOISE. The batch is
+      fillable -- 46% fuller at a 20 ms window -- and it is worth at most ~3%, so the detector
+      is not batch-starved in a way that matters.
+      THE INSTANCE MECHANISM IS THE NEW COUNTER'S and would have been invisible without it: a
+      third instance splits one request stream across more queues so each fills less, and the
+      achieved batch FALLS 2.82 -> 2.04 while `busy_pct` climbs 135% -> 210%. Read without the
+      batch column that is "more instances, more busy, less throughput" with no cause;
+      `busy_pct` over 100% is the queueing, not the work.
+      **I CLAIMED THE INSTANCE COUNT SEPARATED ON THROUGHPUT AT n=3 AND IT DOES NOT** (#289's
+      review, and it was right): three an arm gave [816.8, 849.5] against [772.7, 782.2], a
+      34.6 gap against a 32.7 spread. Five more an arm turned that into a full overlap -- the
+      same failure `WORKER-PLATEAU-ON-THE-NVDEC-ROUTE` records at n=4, on the same rig, hours
+      later. WHY THE BATCH SURVIVES THE SAME TEST: it is a ratio of two large counters with a
+      tiny within-arm spread, so its gap is 15x the spread for the window knob and 3.4x for the
+      instance count, while tracked img/s on this rig spreads up to 130 and cannot resolve 61.
+      LATENCY WAS NOT THE WINDOW'S COST HERE AND COULD NOT HAVE BEEN: at this offer
+      `frame_us_p50` is ~210 ms of queueing in both arms, so 15 ms of extra window is
+      invisible. That price has to be read at the DESIGN load, not at the ceiling.
+      THE TALLY, all three knobs measured at saturation: workers 92->140 +5.7% mean, the batch
+      window +3.4%, a third instance -7.0% -- **all three OVERLAP on throughput**. What
+      separates is never the throughput, it is the mechanism underneath: untracked fraction for
+      the worker count, achieved batch for both detector knobs. **No scheduling knob closes
+      1.37x** -- which is what [19.2, 21.2] GPUs at this chain's cost already says, now with
+      the knob space searched rather than assumed.
+      AND THE BOUND ON ALL OF IT: the CONTROL arm -- `workers 92`, `count: 2`, 5 000 us, same
+      cards, same shape -- reads **[769.3, 947.1] tracked across today's three sittings**, 23%
+      of its own low end, with sitting means 75.7 apart. So an absolute figure from this box is
+      meaningless without its sitting, a cross-sitting comparison is not a comparison, and a
+      within-sitting effect smaller than the within-arm spread is invisible however the runs
+      are ordered.
       WHAT IS STILL YOURS, and it is smaller than before: whether 4 500 on sixteen GPUs is a
       target to keep. Nothing I can measure moves the chain there.
       ORIGINAL: THE QUESTION IT SHARES HAS CHANGED, 14 Sep: both
@@ -5346,6 +5402,11 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       SATURATED** against ours accepted [821.4, 836.5] / tracked [800.8, 819.6], matched fp16,
       same four cards, same afternoon: **0.85-0.89x by frames, 5.14-5.23x by model work** (the
       baseline runs 2 invocations an image, this chain 11.74). `C1` carries the reading.
+      **BOTH OF THOSE ARE SUPERSEDED THE SAME DAY and the pair above is kept only to show what
+      it was:** ours was a run offered 1 000 img/s, which this chain does not saturate at, while
+      the baseline's 938.6 is a saturated figure. At OUR ceiling it is **[0.94, 1.03]x by frames
+      -- parity -- and [5.53, 6.07]x by model work** over eight interleaved runs. The deficit
+      never existed; `C1` carries the corrected reading too.
       WHAT THE GATE ACTUALLY WANTED, since the message says "rebuild both from one ONNX" and
       that would have restated every number in this file: the mismatch was PRECISION, not a
       missing build. The repository's plan is byte-identical to `models/yolo26n_fp16.engine`

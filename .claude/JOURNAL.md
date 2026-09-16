@@ -131,6 +131,9 @@ and the profile behind it closed four and sharpened the fifth:
   the item had the devices 25% busy.
 * `FPS-ON-FOUR-GPUS` DONE, and `C1` finally has its ratio: **0.85-0.89x by frames, 5.14-5.23x
   by model work**, matched fp16, same cards, same afternoon.
+  *(Both superseded within hours: ours was taken at 1 000 offered, below our own ceiling, while
+  the baseline's figure was saturated. At our ceiling it is [0.94, 1.03]x by frames -- parity --
+  and [5.53, 6.07]x by work.)*
 
 **Two of my own recorded claims fell in the process.** I had filed the engine-parity gate as a
 decision about the benchmark's whole history, because its message says "rebuild both from one
@@ -209,6 +212,44 @@ to ranges, and not one of them was wrong arithmetic. Each was a number taken whe
 still had headroom — the offer, or the sample. A measurement below saturation is not a small
 measurement; it is a measurement of something else, and a range read off too few runs is the
 same mistake with a different axis.
+
+**Then a counter that was never printed, and what it immediately paid for.** `rows/requests` is
+1.00 for a detector however well its batch window fills — one frame is one WorkItem and one row
+— so it reads as a batching answer and is not one. I treated it as a finding for a while before
+checking. `rows/batches` is the real number; both planes had counted `batches` since #167 and
+neither printed it. #288 prints it, and the first reading says the detector fills **2.74 of
+max_batch 8** while being the busiest model on every device.
+
+**Two knobs aimed at exactly that, and neither is a lever.** The batch window 5 → 20 ms fills
+the batch cleanly (2.88 → 4.20, separated) and moves throughput +3.4% with overlapping ranges.
+A third detector instance per GPU *lowers* the achieved batch — 2.82 → 2.04, separated at n=8 —
+because three instances split one request stream across more queues, so each fills less while
+`busy_pct` climbs to 210%. Without the batch column that reads as "more instances, more busy,
+less throughput" with no cause.
+
+**I then made the day's own mistake one more time, and the review caught it.** I reported the
+instance count as *separated on throughput* from three runs an arm: [816.8, 849.5] against
+[772.7, 782.2], a 34.6 gap against a 32.7 spread. Five more runs an arm turned it into a full
+overlap. That is the n=4 worker failure again, on the same rig, hours after I wrote the sentence
+warning about it. What survives the same test is the batch, because it is a ratio of two large
+counters whose gap is 15× its own spread.
+
+**So all three knobs overlap on throughput** — workers +5.7%, the window +3.4%, a third
+instance −7.0% — and what separates is never the throughput but the mechanism underneath.
+4 500 still wants [19.2, 21.2] GPUs at this chain's cost.
+
+**And the bound on every A/B this box can run:** the *control* arm — same workers, same
+instances, same window, same cards — reads **[769.3, 947.1] tracked across today's three
+sittings**, 23% of its own low end, sitting means 75.7 apart. An absolute figure here is
+meaningless without its sitting, and a within-sitting effect smaller than the within-arm
+spread is invisible however the runs are ordered.
+
+**And the review loop earned its keep.** #287 took seven rounds and every block was real: the
+correction kept quoting the run it was excluding — in the arm, then in the prose, then in the
+*numerator* of the chain-cost ratio (1 845 was the excluded run's partner, so I re-ran the
+matched pair rather than caveating it), then in three more files where the retracted sentence
+still read as current. The lesson is narrower than "review is good": a retraction lands where
+the numbers are, and the conclusion drawn from them lives somewhere else.
 
 ---
 

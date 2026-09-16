@@ -174,6 +174,13 @@ these numbers. Note also that at fp16 with 1 000 img/s offered the baseline repo
 **SATURATED**, so in this regime it is a real ceiling rather than the offer-bound behaviour
 recorded at other loads.
 
+> **SUPERSEDED the same day, and that last sentence is why.** The baseline's 938.6 is saturated;
+> our 821–836 is not — it is a run offered 1 000 img/s, which this chain does not saturate at,
+> so this pair compares their ceiling with our mid-range. At our own ceiling, over eight
+> interleaved runs, it is **[0.94, 1.03]× by frames — parity — and [5.53, 6.07]× by model
+> work**. See *What the chain actually costs* earlier on this page. The row is kept because the
+> mistake is the useful part: below saturation every arm returns roughly what it was offered.
+
 ### The worker count, re-swept at the ceiling instead of at the design load
 
 An earlier sweep the same day ranked 92 workers above 140 on tracked img/s and concluded that
@@ -222,6 +229,82 @@ SHIPINFER_BENCH_IMAGE=shipinfer-gst:jammy-nvdec SHIPINFER_BENCH_GPUS=1,3,4,6 \
 SHIPINFER_BENCH_CAMERAS=50 SHIPINFER_BENCH_FPS=40 SHIPINFER_BENCH_SECONDS=40 \
 SHIPINFER_BENCH_SOURCE=nvdec SHIPINFER_BENCH_WORKERS=92 \
   scripts/run_cpp_bench.sh wrep_92_1
+```
+
+### Two knobs at the detector, now that the achieved batch is readable
+
+`per_device_batches` (#288) says the detector — the busiest model on every device at 121–125% —
+fills only **2.74 of its `max_batch` 8**. Both knobs that could change that, at saturation,
+GPUs 1,3,4,6, `workers 92`, alternated within one sitting per knob.
+
+| knob | achieved detector batch | tracked img/s (mean) |
+|---|---|---|
+| `max_queue_delay_us` 5 000 → 20 000 (n=3) | 2.88 → **4.20**, separated | 817.5 → 845.3 (+3.4 %), **overlapping** |
+| detector instances 2 → 3 per GPU (n=8) | 2.82 → **2.04**, separated | 877.1 → 816.1 (−7.0 %), **overlapping** |
+
+**Both knobs move the batch cleanly and neither moves throughput past the noise.** The batch is
+fillable — 46% fuller at a 20 ms window — and it is worth at most ~3%, so the detector is not
+batch-starved in a way that matters.
+
+**The mechanism for the instance count is the new counter's**, and it would have been invisible
+without it: a third instance splits one request stream across more queues, so each fills less —
+the achieved batch *falls* 2.82 → 2.04 while `busy_pct` climbs 135% → 210%. Read without the
+batch column this is "more instances, more busy, less throughput" with no cause. `busy_pct`
+above 100% is the queueing.
+
+**Why the batch separates at n=3 and throughput does not at n=8**, which is the useful part: the
+batch is a ratio of two large counters and its within-arm spread is tiny. For the window knob
+the gap is **15×** the widest arm's spread; for the instance count, 0.61 against 0.18. Tracked
+img/s on this rig has a within-arm spread of up to **130 img/s**, so an effect of 61 cannot be
+seen at any replicate count this box affords.
+
+> **This section claimed the instance count was *separated* at n=3, and it was not.** Three runs
+> an arm gave `[816.8, 849.5]` against `[772.7, 782.2]` — a 34.6 img/s gap against a 32.7 spread.
+> Five more runs an arm turned that into a full overlap. It is the same failure the worker sweep
+> above records at n=4, on the same rig, hours later, and it was caught in review rather than by
+> me. The mechanism half stood.
+
+Latency was not the window's cost and could not have been at this offer: `frame_us_p50` is
+~210 ms of queueing in both arms, so 15 ms of extra window is invisible. That price belongs at
+the design load.
+
+**The tally: three scheduling knobs measured at saturation, three overlaps on throughput.**
+
+| knob | tracked (mean) | separated on throughput? |
+|---|---|---|
+| workers 92 → 140 | +5.7 % | no |
+| batch window 5 → 20 ms | +3.4 % | no |
+| detector instances 2 → 3 | −7.0 % | no |
+
+What separates is never the throughput — it is the mechanism underneath: untracked fraction for
+the worker count, achieved batch for both detector knobs. Nothing closes the 1.37× to 4 500,
+which is what `[19.2, 21.2] GPUs at this chain's cost` already said; the difference is that the
+knob space has now been searched rather than assumed.
+
+### One unchanged configuration, three sittings, 170 img/s apart
+
+Worth its own heading because it bounds what any of these A/Bs can claim. `workers 92`,
+`count: 2`, `max_queue_delay_us` 5 000, `--source nvdec`, GPUs 1,3,4,6, 50 × 40 fps × 40 s —
+the control arm of every sweep above — read across today's sittings:
+
+| sitting | n | tracked mean | range |
+|---|---|---|---|
+| worker sweep | 8 | 893.2 | [848.1, 939.2] |
+| batch-window sweep | 3 | 817.5 | [769.3, 858.0] |
+| instance sweep | 8 | 877.1 | [816.8, 947.1] |
+
+**[769.3, 947.1] on a configuration that did not change** — 177 img/s, 23% of the low end, and
+the sitting means differ by 75.7. So an absolute figure from this box is only meaningful with
+its sitting attached, a cross-sitting comparison is not a comparison, and a within-sitting
+effect smaller than the within-arm spread is not visible however the runs are ordered.
+
+```bash
+# each cell, alternating; `model_repository/ship_detector/config.yaml` carries the knob
+#   max_queue_delay_us: 5000 | 20000      instance_groups[0].count: 2 | 3
+SHIPINFER_BENCH_IMAGE=shipinfer-gst:jammy-nvdec SHIPINFER_BENCH_GPUS=1,3,4,6 \
+SHIPINFER_BENCH_CAMERAS=50 SHIPINFER_BENCH_FPS=40 SHIPINFER_BENCH_SECONDS=40 \
+SHIPINFER_BENCH_SOURCE=nvdec SHIPINFER_BENCH_WORKERS=92 \
+  scripts/run_cpp_bench.sh delay_5000_1
 ```
 
 ---
