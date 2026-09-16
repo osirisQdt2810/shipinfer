@@ -270,10 +270,13 @@ cleanly (dropped 0.3–5.2% against 40.3–56.7%, read *rising* 1.22× while acc
 though the accepted ranges themselves just touch at n=8 and the overloaded arm is 4× more
 variable. Measure the mechanism, not the outcome — for the fourth time today.
 
-**The full chain does not collapse, and that is the part that mattered.** Offers 1 200 / 1 600 /
-2 000 give tracked means 895.1 / 910.7 / 883.3 — 27.4 img/s between the means against a 93.2
-within-arm spread, so all three overlap. **2 000 offered, where every saturation figure today was
-taken, is not past the chain's best point.** If it had been, the whole day's ceiling would have
+**The full chain does not collapse, and that is the part that mattered.** Two independent
+sittings on different quads, eight runs per offer: pooled means **869.7 / 871.5 / 875.6** — a
+5.9 img/s spread, 0.7%, against a 238.6 within-arm spread — and the two sittings disagree about
+which offer is best, which is what a variable that does nothing looks like. **2 000 offered,
+where every saturation figure today was taken, is not past the chain's best point.** (I first
+drew this at n=3, and #292's review pointed out that I was applying the strict standard to
+everyone else's claims and not to my own null. It was right.) If it had been, the whole day's ceiling would have
 been measured downhill of the peak, and I would not have known. The difference is ADR-005 doing
 its job: the chain refuses excess at the queue (`queue_rejected` 8 600 → 38 700) before it costs
 device time, while detect-only pushes ingest itself past its limit and pays for decode nobody

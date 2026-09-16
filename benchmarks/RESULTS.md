@@ -395,19 +395,27 @@ means **−32.5 %**, but at n=8 the ranges just touch: one 4 000 run reached 1 6
 (sd 251.5 against 64.1), which is itself the finding rather than noise around it.
 
 **The full chain does not do this, and that is what protects every ceiling figure on this page.**
-Same rig, offers 1 200 / 1 600 / 2 000 round-robined three times:
+Offers 1 200 / 1 600 / 2 000, round-robined so drift cannot favour one point, in **two
+independent sittings on different quads** — eight runs per offer in total:
 
-| offered | read | tracked img/s | queue_rejected |
-|---|---|---|---|
-| 1 200 | 1 132.0 | [864.9, 929.5] mean 895.1 | ~8 600 |
-| 1 600 | 1 505.2 | [868.0, 949.6] mean 910.7 | ~22 700 |
-| 2 000 | 1 883.4 | [833.2, 926.4] mean 883.3 | ~38 700 |
+| offered | tracked, sitting A (1,2,4,6, n=3) | tracked, sitting B (2,3,4,6, n=5) | pooled mean, n=8 | queue_rejected |
+|---|---|---|---|---|
+| 1 200 | [864.9, 929.5] mean 895.1 | [824.7, 885.4] mean 854.5 | **869.7** (sd 35.2) | ~8 600 |
+| 1 600 | [868.0, 949.6] mean 910.7 | [793.3, 890.9] mean 848.0 | **871.5** (sd 52.2) | ~22 700 |
+| 2 000 | [833.2, 926.4] mean 883.3 | [739.0, 977.5] mean 870.9 | **875.6** (sd 74.7) | ~38 700 |
 
-All three overlap heavily: the spread *between* the means is **27.4 img/s** against a widest
-within-arm spread of **93.2**. So over this range the offer does not move the chain's goodput,
-and **2 000 offered — where every saturation figure on this page was taken — is not past its
-best point.** That was worth checking rather than assuming, because if it had been, the whole
-day's ceiling would have been measured downhill of the peak.
+**The two sittings do not even agree on which offer is best** — A says 1 600, B says 2 000 —
+which is what it looks like when the variable does nothing. Pooled, the spread *between* the
+three means is **5.9 img/s, 0.7 %**, against a within-arm spread of **238.6**. So the offer does
+not move the chain's goodput over this range, and **2 000 offered — where every saturation
+figure on this page was taken — is not past its best point.** Worth checking rather than
+assuming: had it been past the peak, the whole day's ceiling was measured downhill of it.
+
+This null is drawn at n=8 per point deliberately. The same page records an n=3 *separation*
+being withdrawn two sections up, and an n=3 **overlap** read as a zero is the mirror of that
+error — so three runs an arm would not have been enough to say this, whichever way it came out.
+One thing the pooled table does show: the 2 000 arm's spread (sd 74.7) is twice the 1 200 arm's
+(35.2), so offering further past saturation buys variance even where it costs no throughput.
 
 **Why the two differ, and it is ADR-005 working.** The chain's excess is refused at the queue
 — `queue_rejected` climbs 8 600 → 38 700 — before it costs device time. `detect_only` at 4 000
@@ -415,7 +423,7 @@ pushes *ingest itself* past its limit: read climbs to 2 227 img/s and that decod
 on frames nothing will accept. Backpressure protects the chain; it cannot protect a stage
 upstream of it.
 
-### One unchanged configuration, three sittings, 170 img/s apart### One unchanged configuration, three sittings, 170 img/s apart
+### One unchanged configuration, three sittings, 170 img/s apart
 
 Worth its own heading because it bounds what any of these A/Bs can claim. `workers 92`,
 `count: 2`, `max_queue_delay_us` 5 000, `--source nvdec`, GPUs 1,3,4,6, 50 × 40 fps × 40 s —
