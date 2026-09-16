@@ -197,7 +197,7 @@ class TestACardCudaCannotOpenIsRoutedAround:
             tmp_path,
         )
 
-        assert "GPU 7 (00000000:D2:00.0)" in done.stderr
+        assert "GPU(s) 7 (00000000:D2:00.0)" in done.stderr
         assert "0,1,2" in done.stderr
 
     def test_a_probe_that_finds_nothing_leaves_the_default_alone(self, tmp_path: Path) -> None:
@@ -221,3 +221,66 @@ class TestACardCudaCannotOpenIsRoutedAround:
         )
 
         assert done.stdout.split() == ["--device", "nvidia.com/gpu=all"]
+
+
+class TestTheDefaultProbePathIsTheOneProductionUses:
+    def test_the_path_the_helper_computes_when_nothing_overrides_it_exists(self) -> None:
+        """`SHIPINFER_GPU_PROBE` is a test seam; the path used in anger is asserted by nothing
+        else, and a rename would leave every box silently back on the old default."""
+        assert (ROOT / "scripts" / "usable_gpus.py").is_file()
+
+
+class TestTheProbeCannotTakeTheCallerDownWithIt:
+    """Every script sourcing `_gpus.sh` runs under `set -euo pipefail` (`_container.sh`).
+
+    Round 1 of #295 ran the probe TWICE — once for stdout, once for stderr — and the second
+    assignment had no `|| ...`. A probe that succeeded then failed aborted the sourcing script
+    with nothing on either stream: a worse failure than the `device=7, num_gpus=7` assert this
+    exists to remove, because at least that one said something.
+    """
+
+    def _under_set_e(self, script: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+        probe = tmp_path / "probe.py"
+        probe.write_text(script)
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                # `;` and NOT `&&`: an AND-list suppresses `set -e` inside the sourced file,
+                # so a `&&` here would pass whatever the helper does. Real callers source it on
+                # a line of its own (`_container.sh`), which is what this reproduces.
+                f'set -euo pipefail; . "{HELPER}"; echo "GPU_DEVICES=${{GPU_DEVICES[*]}}"',
+            ],
+            capture_output=True,
+            text=True,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "SHIPINFER_GPU_PROBE": str(probe),
+                "TMPDIR": str(tmp_path),
+            },
+        )
+
+    def test_a_probe_that_fails_after_its_first_call_does_not_abort_the_caller(
+        self, tmp_path: Path
+    ) -> None:
+        """THE round-1 regression: it is only reachable if the probe runs more than once."""
+        marker = tmp_path / "called"
+        done = self._under_set_e(
+            "import pathlib, sys\n"
+            f"m = pathlib.Path({str(marker)!r})\n"
+            "if m.exists(): sys.exit(3)\n"
+            "m.write_text('x')\nprint('0,1,2')\n",
+            tmp_path,
+        )
+
+        assert done.returncode == 0, f"the caller survived: {done.stderr}"
+        assert "GPU_DEVICES=" in done.stdout, done.stdout
+        assert marker.exists(), "and the probe did run"
+
+    def test_a_probe_that_always_fails_leaves_the_default_and_says_nothing_extra(
+        self, tmp_path: Path
+    ) -> None:
+        done = self._under_set_e("import sys; sys.exit(9)\n", tmp_path)
+
+        assert done.returncode == 0, done.stderr
+        assert done.stdout.split() == ["GPU_DEVICES=--device", "nvidia.com/gpu=all"]

@@ -17,19 +17,30 @@ disagree -- CUDA's list is dense over the cards it can open, `nvidia-smi`'s is o
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
+import os
 import subprocess
 import sys
 
 
 def _key(bus: str) -> str:
-    """A bus id the two enumerations agree on.
+    """A bus id the two enumerations agree on, DOMAIN INCLUDED.
 
     CUDA writes a four-digit domain (`0000:D2:00.0`) and the driver an eight-digit one
-    (`00000000:D2:00.0`), so the raw strings never match. The bus and device fields do, and a
-    box with two PCI domains would still differ in them.
+    (`00000000:D2:00.0`), so the raw strings never match — but dropping the domain to fix that
+    makes `0000:D2:00.0` and `0001:D2:00.0` the same card, and PCI domains exist precisely so
+    bus numbers may repeat. Parsed as a number instead, which is width-independent.
     """
-    return ":".join(bus.upper().strip().split(":")[-2:])
+    fields = bus.upper().strip().split(":")
+    if len(fields) < 3:
+        return bus.upper().strip()
+    domain = fields[0]
+    with contextlib.suppress(ValueError):
+        # Left alone if it is not hex: an unparseable domain still compares as itself, which
+        # is the conservative answer for a bus id neither enumeration produced.
+        domain = format(int(domain, 16), "04X")
+    return ":".join([domain, *fields[1:]])
 
 
 def _cuda_bus_ids() -> list[str] | None:
@@ -82,6 +93,12 @@ def _smi_bus_ids() -> list[tuple[str, str]] | None:
 
 
 def main() -> int:
+    # CUDA HONOURS `CUDA_VISIBLE_DEVICES` AND `nvidia-smi` DOES NOT, so with one set the two
+    # enumerations are not comparable and every hidden card looks unopenable. An operator who
+    # exported it on a healthy box would have had six good cards "routed around" and blamed by
+    # bus id. Cannot tell, and this script already has an answer for that.
+    if os.environ.get("CUDA_VISIBLE_DEVICES"):
+        return 1
     cuda, smi = _cuda_bus_ids(), _smi_bus_ids()
     if cuda is None or smi is None:
         # SILENT, not a guess: with nothing to compare, the caller keeps its own default.
