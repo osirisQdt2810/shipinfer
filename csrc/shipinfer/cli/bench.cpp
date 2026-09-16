@@ -34,6 +34,7 @@
 #include "shipinfer/ingest/manager.h"
 #include "shipinfer/ingest/sink.h"
 #include "shipinfer/ingest/sources/replay.h"
+#include "shipinfer/obs/device_labels.h"
 #include "shipinfer/obs/sampler.h"
 #include "shipinfer/pipeline/events/records.h"
 #include "shipinfer/pipeline/graph/bench_models.h"
@@ -108,13 +109,9 @@ namespace {
         int stop_deadline_ms = 5000;
     };
 
-    // The name a device goes by in the output: its label when `--gpu-labels` gave one, and
-    // its own ordinal otherwise. Validated at parse time, so this is a lookup and cannot fail.
+    // `obs/device_labels.h` owns the mapping; this is its one-argument spelling.
     int label_of(const Options& options, int device) {
-        for (size_t i = 0; i < options.devices.size(); ++i)
-            if (options.devices[i] == device)
-                return i < options.device_labels.size() ? options.device_labels[i] : device;
-        return device;
+        return shipinfer::label_of(options.devices, options.device_labels, device);
     }
 
     // How this binary's flags fill `BenchEngines`, which is the only place they are read.
@@ -225,15 +222,11 @@ namespace {
                 "--repository names the root a plan's `artefact` paths hang "
                 "off, so it needs --plan <file>");
         }
-        // REFUSED AT PARSE TIME rather than silently half-applied: a short label list would
-        // relabel the first devices and leave the rest reporting ordinals, which is the one
-        // output a reader cannot tell from a correct one.
-        if (!options.device_labels.empty() &&
-            options.device_labels.size() != options.devices.size()) {
-            throw ConfigError(
-                "--gpu-labels has " + std::to_string(options.device_labels.size()) +
-                " entries and --gpu-ids has " + std::to_string(options.devices.size()) +
-                "; a label per device, in the same order, or none at all");
+        // REFUSED AT PARSE TIME rather than silently half-applied; the rule and its reason
+        // live in `obs/device_labels.h`, where a test can reach them.
+        if (const std::string refusal = labels_refusal(options.devices, options.device_labels);
+            !refusal.empty()) {
+            throw ConfigError(refusal);
         }
         return options;
     }
@@ -808,11 +801,14 @@ int main(int argc, char** argv) {
                                     // which is the whole of V156's route, and the check below
                                     // is what stops a worker reading another GPU's pointer.
                                     if (item.device != device) {
+                                        // LABELLED like every other device in the output: an
+                                        // operator sent to "gpu0" by a narrowed run would open
+                                        // a card this run never touched.
                                         throw ConfigError(
                                             "frame " + item.tag.key() + " was decoded on gpu" +
-                                            std::to_string(item.device) +
+                                            std::to_string(label_of(options, item.device)) +
                                             " and this worker is on gpu" +
-                                            std::to_string(device) +
+                                            std::to_string(label_of(options, device)) +
                                             ": a device frame cannot move (ADR-004), and a "
                                             "lane per GPU is supposed to make this "
                                             "unreachable -- so it is a lane/worker mapping "
@@ -843,8 +839,9 @@ int main(int argc, char** argv) {
                                 failed.fetch_add(1);
                                 static std::atomic<int> shouted{0};
                                 if (shouted.fetch_add(1) < 5) {
-                                    std::cerr << "worker on gpu" << device << " failed frame "
-                                              << item.tag.key() << ": " << error.what() << "\n";
+                                    std::cerr << "worker on gpu" << label_of(options, device)
+                                              << " failed frame " << item.tag.key() << ": "
+                                              << error.what() << "\n";
                                 }
                             }
                             // Sealed on every path, so "every opened frame is reported exactly
@@ -853,8 +850,8 @@ int main(int argc, char** argv) {
                         }
                     }
                 } catch (const std::exception& error) {
-                    std::cerr << "worker on gpu" << device << " exited: " << error.what()
-                              << "\n";
+                    std::cerr << "worker on gpu" << label_of(options, device)
+                              << " exited: " << error.what() << "\n";
                 }
             });
         }

@@ -70,7 +70,10 @@ CAMERAS="${SHIPINFER_BENCH_CAMERAS:-50}"
 # fifty consecutive waits. So the library's 5 s default is what fifty GStreamer pipelines have
 # to share, and MEASURED at 50x20x70 s it is not enough: 31 of 50 abandoned at 5 s against 1
 # of 50 at 30 s, and an abandoned fleet used to print no counters at all. Anything the caller
-# passes in `"$@"` wins, because the binary takes the last spelling of a flag.
+# passes in `"$@"` wins, because the binary takes the last spelling of a flag -- with ONE
+# exception: `--gpu-ids`, which the narrowing below pairs with a `--gpu-labels` of the same
+# length, so overriding it alone is refused at parse time. `SHIPINFER_BENCH_NARROW=0` is the
+# way to pass your own, and the refusal says so rather than mislabelling the tables.
 STOP_MS="${SHIPINFER_BENCH_STOP_DEADLINE_MS:-$((CAMERAS > 12 ? CAMERAS * 400 : 5000))}"
 
 # THE CONTAINER SEES ONLY THE CARDS THIS RUN USES, and that is worth ~9.5 s: `cpp.sh` passes
@@ -83,23 +86,12 @@ STOP_MS="${SHIPINFER_BENCH_STOP_DEADLINE_MS:-$((CAMERAS > 12 ? CAMERAS * 400 : 5
 # ids handed to the binary are 0..N-1 and `--gpu-labels` carries the host ids through to every
 # `per_device*` line -- otherwise this run's tables would say `0: 1: 2:` where the whole
 # archive says `1: 3: 4:`. `SHIPINFER_BENCH_NARROW=0` opts out.
-# SORTED, and that is not tidiness. The container does NOT order the visible set by the order
-# the `--device` flags were passed: measured by UUID on 16 Sep, `SHIPINFER_GPUS=6,3,2` gives
-# container ordinal 0 = host 2, 1 = host 3, 2 = host 6 -- ASCENDING BY HOST INDEX. A positional
-# mapping would have printed host 2's counters under `6:`, inverted, which is the one output a
-# reader cannot tell from a correct one. So narrowing NORMALISES the order: `6,3,2` and `2,3,6`
-# are the same run, and the labels go in the same ascending order the container uses.
-# `CUDA_DEVICE_ORDER=PCI_BUS_ID` removes the remaining assumption -- CUDA's default is
-# FASTEST_FIRST, which only ties by bus id because every card here is the same model.
+# The container sees only the cards this run uses, and the tables still say HOST ids.
+# `deploy/rootless/_narrow.sh` carries the why and is sourced so a test can source it too.
 NARROW="${SHIPINFER_BENCH_NARROW:-1}"
-if [ "$NARROW" = "1" ] && [ "${SHIPINFER_GPUS:-}" = "" ]; then
-  GPU_LABELS="$(echo "$GPU_IDS" | tr ',' '\n' | sort -n | paste -sd,)"
-  export SHIPINFER_GPUS="$GPU_LABELS"
-  export CUDA_DEVICE_ORDER=PCI_BUS_ID
-  GPU_IDS="$(seq -s, 0 $(( $(echo "$GPU_LABELS" | tr ',' '\n' | wc -l) - 1 )))"
-else
-  GPU_LABELS="$GPU_IDS"
-fi
+# shellcheck source=../deploy/rootless/_narrow.sh
+source "$REPO/deploy/rootless/_narrow.sh"
+narrow_devices
 SOURCE="${SHIPINFER_BENCH_SOURCE:-replay}"
 if [ "$SOURCE" = "replay" ]; then
   SOURCE_ARGS=(--source replay)
