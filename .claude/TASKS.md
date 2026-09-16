@@ -5266,31 +5266,45 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       hiding in the model mix. **[19.2, 21.2] GPUs** at this chain's cost is the honest shape --
       4 500 over tracked [848.1, 939.2] a quad -- and it was "~22" while the arithmetic ran on
       one run. The sixteen-GPU figure stays an extrapolation from four either way.
-      **AND TWO MORE SCHEDULING KNOBS WERE MEASURED 15 Sep, BOTH AIMED AT THE MEASURED
+      **AND TWO MORE SCHEDULING KNOBS WERE MEASURED 15-16 Sep, BOTH AIMED AT THE MEASURED
       BOTTLENECK, NEITHER A LEVER.** #288's new `per_device_batches` says the detector -- the
       busiest model on every device at 121-125% -- fills only **2.74 of its max_batch 8**, so
       the two knobs that could change that were worth trying. Saturation, GPUs 1,3,4,6,
-      `workers 92`, three interleaved pairs each:
-        `max_queue_delay_us` 5 000 -> 20 000   batch 2.88 -> 4.20 (SEPARATED, 1.46x)
-                                               tracked 817.5 -> 845.3 mean, ranges OVERLAP
-        detector instances 2 -> 3 per GPU      batch 2.88 -> **2.06**
-                                               tracked 831.5 -> 778.9, **SEPARATED, 2 wins**
-      SO THE BATCH IS FILLABLE AND IT BUYS ~3% AT MOST -- a 46% fuller batch moved throughput
-      by less than the run-to-run spread, which is the same answer the worker pool gave. The
-      detector is not batch-starved in a way that matters.
-      AND A THIRD INSTANCE IS WORSE, which is the day's only knob whose ranges do not overlap:
-      -6.3% tracked. THE MECHANISM IS THE NEW COUNTER'S and would have been invisible without
-      it -- a third instance splits one request stream across more queues so each fills less,
-      and the achieved batch FALLS 2.88 -> 2.06 while `busy_pct` climbs 135% -> 210%. Read
-      without the batch column that is "more instances, more busy, less throughput" with no
-      cause; `busy_pct` over 100% is the queueing, not the work.
+      `workers 92`, alternated within one sitting per knob:
+        `max_queue_delay_us` 5 000 -> 20 000 (n=3)  batch 2.88 -> 4.20 SEPARATED
+                                                    tracked 817.5 -> 845.3 mean, OVERLAP
+        detector instances 2 -> 3 per GPU   (n=8)  batch 2.82 -> 2.04 SEPARATED
+                                                    tracked 877.1 -> 816.1 mean, OVERLAP
+      SO BOTH MOVE THE BATCH CLEANLY AND NEITHER MOVES THROUGHPUT PAST THE NOISE. The batch is
+      fillable -- 46% fuller at a 20 ms window -- and it is worth at most ~3%, so the detector
+      is not batch-starved in a way that matters.
+      THE INSTANCE MECHANISM IS THE NEW COUNTER'S and would have been invisible without it: a
+      third instance splits one request stream across more queues so each fills less, and the
+      achieved batch FALLS 2.82 -> 2.04 while `busy_pct` climbs 135% -> 210%. Read without the
+      batch column that is "more instances, more busy, less throughput" with no cause;
+      `busy_pct` over 100% is the queueing, not the work.
+      **I CLAIMED THE INSTANCE COUNT SEPARATED ON THROUGHPUT AT n=3 AND IT DOES NOT** (#289's
+      review, and it was right): three an arm gave [816.8, 849.5] against [772.7, 782.2], a
+      34.6 gap against a 32.7 spread. Five more an arm turned that into a full overlap -- the
+      same failure `WORKER-PLATEAU-ON-THE-NVDEC-ROUTE` records at n=4, on the same rig, hours
+      later. WHY THE BATCH SURVIVES THE SAME TEST: it is a ratio of two large counters with a
+      tiny within-arm spread, so its gap is 15x the spread for the window knob and 3.4x for the
+      instance count, while tracked img/s on this rig spreads up to 130 and cannot resolve 61.
       LATENCY WAS NOT THE WINDOW'S COST HERE AND COULD NOT HAVE BEEN: at this offer
       `frame_us_p50` is ~210 ms of queueing in both arms, so 15 ms of extra window is
       invisible. That price has to be read at the DESIGN load, not at the ceiling.
-      THE TALLY, all three knobs measured at saturation today: workers 92->140 +5.7% mean and
-      overlapping; the batch window +3.4% mean and overlapping; a third instance -6.3% and
-      separated. **No scheduling knob closes 1.37x** -- which is what [19.2, 21.2] GPUs at this
-      chain's cost already says, now with the knob space actually searched rather than assumed.
+      THE TALLY, all three knobs measured at saturation: workers 92->140 +5.7% mean, the batch
+      window +3.4%, a third instance -7.0% -- **all three OVERLAP on throughput**. What
+      separates is never the throughput, it is the mechanism underneath: untracked fraction for
+      the worker count, achieved batch for both detector knobs. **No scheduling knob closes
+      1.37x** -- which is what [19.2, 21.2] GPUs at this chain's cost already says, now with
+      the knob space searched rather than assumed.
+      AND THE BOUND ON ALL OF IT: the CONTROL arm -- `workers 92`, `count: 2`, 5 000 us, same
+      cards, same shape -- reads **[769.3, 947.1] tracked across today's three sittings**, 23%
+      of its own low end, with sitting means 75.7 apart. So an absolute figure from this box is
+      meaningless without its sitting, a cross-sitting comparison is not a comparison, and a
+      within-sitting effect smaller than the within-arm spread is invisible however the runs
+      are ordered.
       WHAT IS STILL YOURS, and it is smaller than before: whether 4 500 on sixteen GPUs is a
       target to keep. Nothing I can measure moves the chain there.
       ORIGINAL: THE QUESTION IT SHARES HAS CHANGED, 14 Sep: both

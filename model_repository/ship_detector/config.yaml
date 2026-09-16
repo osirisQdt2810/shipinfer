@@ -34,9 +34,10 @@ instance_groups:
   # box and a 16-GPU node. Two instances per GPU because the detector is the hot path; two
   # streams each so the host-to-device copy of the next batch overlaps the current compute.
   #
-  # TWO IS MEASURED: three per GPU is -6.3% tracked img/s at saturation, separated over three
-  # interleaved pairs, because more instances split one request stream across more queues --
-  # the achieved batch FALLS 2.88 -> 2.06 while occupancy climbs to 210%, which is queueing.
+  # TWO IS MEASURED, on the batch rather than on throughput: three per GPU splits one request
+  # stream across more queues, so the ACHIEVED batch falls 2.82 -> 2.04 (separated, n=8) while
+  # occupancy climbs to 210%, which is queueing. Tracked img/s is 7% lower on the mean and the
+  # ranges OVERLAP at n=8 -- this box cannot resolve an effect that size. Re-test before moving.
   - kind: KIND_AUTO
     count: 2
     streams: 2

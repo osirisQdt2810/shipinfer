@@ -222,15 +222,27 @@ max_batch 8** while being the busiest model on every device.
 
 **Two knobs aimed at exactly that, and neither is a lever.** The batch window 5 → 20 ms fills
 the batch cleanly (2.88 → 4.20, separated) and moves throughput +3.4% with overlapping ranges.
-A third detector instance per GPU is **worse** — −6.3% tracked, the only knob today whose ranges
-do not overlap — and the counter is what explains it: three instances split one request stream
-across more queues, so each fills less and the achieved batch *falls* to 2.06 while `busy_pct`
-climbs to 210%. Without the batch column that reads as "more instances, more busy, less
-throughput" with no cause.
+A third detector instance per GPU *lowers* the achieved batch — 2.82 → 2.04, separated at n=8 —
+because three instances split one request stream across more queues, so each fills less while
+`busy_pct` climbs to 210%. Without the batch column that reads as "more instances, more busy,
+less throughput" with no cause.
 
-**So the knob space is now searched rather than assumed**, and all three of today's knobs land
-in the same place: workers +5.7% overlapping, the window +3.4% overlapping, a third instance
-−6.3% separated. 4 500 still wants [19.2, 21.2] GPUs at this chain's cost.
+**I then made the day's own mistake one more time, and the review caught it.** I reported the
+instance count as *separated on throughput* from three runs an arm: [816.8, 849.5] against
+[772.7, 782.2], a 34.6 gap against a 32.7 spread. Five more runs an arm turned it into a full
+overlap. That is the n=4 worker failure again, on the same rig, hours after I wrote the sentence
+warning about it. What survives the same test is the batch, because it is a ratio of two large
+counters whose gap is 15× its own spread.
+
+**So all three knobs overlap on throughput** — workers +5.7%, the window +3.4%, a third
+instance −7.0% — and what separates is never the throughput but the mechanism underneath.
+4 500 still wants [19.2, 21.2] GPUs at this chain's cost.
+
+**And the bound on every A/B this box can run:** the *control* arm — same workers, same
+instances, same window, same cards — reads **[769.3, 947.1] tracked across today's three
+sittings**, 23% of its own low end, sitting means 75.7 apart. An absolute figure here is
+meaningless without its sitting, and a within-sitting effect smaller than the within-arm
+spread is invisible however the runs are ordered.
 
 **And the review loop earned its keep.** #287 took seven rounds and every block was real: the
 correction kept quoting the run it was excluding — in the arm, then in the prose, then in the
