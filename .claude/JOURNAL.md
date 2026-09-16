@@ -263,6 +263,26 @@ default is a real change rather than a one-liner, because restricting visibility
 devices and every `per_device` table on the results page reports host ids — that is now a ledger
 line with the design question on it.
 
+**And with the box working again, the question that was blocked got answered — twice over.**
+#290's review spotted what looked like a 27% goodput loss for doubling the offer. On
+`detect_only` it is real and bigger: **−32.5% of accepted**, with the mechanism separating
+cleanly (dropped 0.3–5.2% against 40.3–56.7%, read *rising* 1.22× while accepted falls) even
+though the accepted ranges themselves just touch at n=8 and the overloaded arm is 4× more
+variable. Measure the mechanism, not the outcome — for the fourth time today.
+
+**The full chain does not collapse, and that is the part that mattered.** Two independent
+sittings on different quads, eight runs per offer: pooled means **869.7 / 871.5 / 875.6** — a
+5.9 img/s spread, 0.7%, against a 238.6 within-arm spread — and the two sittings disagree about
+which offer is best, which is what a variable that does nothing looks like. **2 000 offered,
+where every saturation figure today was taken, is not past the chain's best point.** (I first
+drew this at n=3, and #292's review pointed out that I was applying the strict standard to
+everyone else's claims and not to my own null. It was right.) If it had been, the whole day's ceiling would have
+been measured downhill of the peak, and I would not have known. The difference is ADR-005 doing
+its job: the chain refuses excess at the queue (`queue_rejected` 7 700 → 34 800 pooled, 4.5×)
+before it costs
+device time, while detect-only pushes ingest itself past its limit and pays for decode nobody
+accepts. Backpressure protects the chain; it cannot protect a stage upstream of it.
+
 **The lesson, and it is the day's lesson again in a new costume.** I wrote down two causes I had
 not measured, in a file whose whole purpose is to be the number you can trust, while the tool to
 check sat one command away. "Time the parts separately" would have found this in five minutes at
