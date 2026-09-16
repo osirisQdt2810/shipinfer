@@ -3597,21 +3597,25 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       GPU 3 (#290's body), then a 99%-full `/home` (#290, merged). The engine files read at
       **1.1-1.3 GB/s**, so the filesystem was never it. The check before trusting any run here is
       `grep 'engines ready in' .artifacts/cpp/<label>.log`.
-- [ ] ENGINE-LOAD-FAILURE-SEGFAULTS-INSTEAD-OF-SAYING-WHICH-DEVICE · **a device with no room
-      turns into SIGSEGV with no diagnosis** (16 Sep). Another tenant took a card in the run's
-      set to 23 495 of 24 564 MiB; the bench got four seconds in and `exit=139`, with TensorRT
-      saying what happened on the way down:
-        `ICudaEngine::~ICudaEngine: Error Code 3: API Usage Error (Parameter check failed,
-         condition: mExecutionContextCounter.use_count() == 1. Destroying an engine object ...)`
-      So the engine is destroyed while an execution context still holds it -- the cleanup path
-      of a PARTIAL load unwinds in the wrong order -- and a recoverable "device N is full"
-      becomes a crash. 15 runs of a sweep were lost to it before the cause was read.
-      WHAT IT SHOULD DO: name the device and the shortfall and refuse, the way
-      `BackendUnavailableError`/`BackendLoadError` already do on the Python side. On a shared
-      box this is not an edge case; it is what happens whenever a neighbour's job grows.
-      WHERE: `csrc/shipinfer/cli/bench.cpp`'s engine construction loop and whatever owns the
-      `TrtInstance`/adapter pair -- the contexts must go before the engine on every exit path,
-      including the throwing one.
+- [x] ENGINE-LOAD-FAILURE-SEGFAULTS-INSTEAD-OF-SAYING-WHICH-DEVICE · **FIXED: the constructor
+      was guarded and the teardown factored, so a full device is an error again.** `TrtInstance`
+      creates its execution context and THEN allocates `DeviceBuffer`s -- which throw on OOM,
+      which is what a neighbour's job filling the card produces. A constructor that throws gets
+      no destructor while its `shared_ptr<TrtEngine>` member IS released on the way out, so the
+      context outlived the engine it points into and TensorRT said so:
+        `ICudaEngine::~ICudaEngine: Error Code 3: ... Destroying an engine object ...`
+      REPRODUCED ON DEMAND rather than argued: hold VRAM on one card until **1045 MiB** is free
+      (`cudaMalloc` blocks, coarse-then-fine because the window is under 100 MiB wide), then run
+      the 4-camera full chain on it. Old binary **3/3 emits the destroy-order error**; with the
+      fix, **0/3**. Below ~1030 MiB the context itself fails, which was always the guarded path,
+      and above ~1050 everything fits -- that narrow band is why the first five fill levels
+      missed it.
+      THE FIX IS ONE IDEA: `teardown()` is the single implementation of "release the context and
+      the stream, in the one safe order", called by the destructor AND by the constructor's
+      `catch(...)` before it rethrows, and it nulls what it frees so it is idempotent.
+      NO AUTOMATED TEST, stated rather than skipped: every C++ tier in `cpp.yml` is a no-driver
+      tier, so a GPU-OOM path has nowhere to live, and there is no injection seam that would let
+      `DeviceBuffer` fail without one. The repro recipe above is the regression check.
 - [ ] BENCH-SHOULD-NOT-SEE-GPUS-IT-DOES-NOT-USE · the workaround above should be the default:
       `scripts/run_cpp_bench.sh` knows which devices the run uses and should hand them to
       `_gpus.sh` rather than letting `cpp.sh` pass `--device nvidia.com/gpu=all`. Worth ~9.5 s

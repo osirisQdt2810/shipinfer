@@ -5,6 +5,22 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-16 — a full device is an error again, not a segfault (TensorRT seam)
+
+`TrtInstance` creates its execution context, then allocates `DeviceBuffer`s — which throw on OOM,
+which is what a neighbour filling a shared card produces. A constructor that throws gets no
+destructor while its `shared_ptr<TrtEngine>` member *is* released, so the context outlived the
+engine it points into: `Destroying an engine object before its execution contexts`, then UB.
+
+`teardown()` is now the single implementation of "release the context and the stream in the one
+safe order", called by `~TrtInstance` and by the constructor's `catch(...)` before it rethrows,
+and it nulls what it frees so it is idempotent.
+
+Reproduced rather than argued: hold VRAM until 1045 MiB is free, run the 4-camera full chain.
+Old binary 3/3 emits the destroy-order error, fixed 0/3; the window is under 100 MiB wide.
+
+---
+
 ## 2026-09-15 — the per-device table reports the achieved batch size (both planes)
 
 `rows/requests` is 1.00 for a detector however well the batch window fills — one frame is one

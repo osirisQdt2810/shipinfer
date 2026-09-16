@@ -162,28 +162,47 @@ namespace shipinfer {
         GPU_CHECK(gpuSetDevice(device_));
         context_ = engine_->raw()->createExecutionContext();
         if (context_ == nullptr) throw BackendError("createExecutionContext returned null");
-        GPU_CHECK(gpuStreamCreate(&stream_));
+        // EVERYTHING PAST THE CONTEXT IS GUARDED, because a constructor that throws gets no
+        // destructor while its `shared_ptr<TrtEngine>` member is still released on the way
+        // out -- so a leaked context would outlive the engine it points into, and TensorRT
+        // turns that into `Destroying an engine object before its execution contexts` and a
+        // SIGSEGV. The throw that matters is `DeviceBuffer`'s: on a shared box a neighbour's
+        // job fills the card, and "device N is full" must stay an error a caller can read.
+        try {
+            GPU_CHECK(gpuStreamCreate(&stream_));
 
-        const int batch = engine_->max_batch();
-        for (const auto& spec : engine_->inputs()) {
-            input_buffers_.emplace_back(spec.row_bytes() * static_cast<size_t>(batch));
-            context_->setTensorAddress(spec.name.c_str(), input_buffers_.back().get());
-        }
-        for (const auto& spec : engine_->outputs()) {
-            const size_t bytes = spec.row_bytes() * static_cast<size_t>(batch);
-            output_buffers_.emplace_back(bytes);
-            host_outputs_.emplace_back(bytes);
-            context_->setTensorAddress(spec.name.c_str(), output_buffers_.back().get());
+            const int batch = engine_->max_batch();
+            for (const auto& spec : engine_->inputs()) {
+                input_buffers_.emplace_back(spec.row_bytes() * static_cast<size_t>(batch));
+                context_->setTensorAddress(spec.name.c_str(), input_buffers_.back().get());
+            }
+            for (const auto& spec : engine_->outputs()) {
+                const size_t bytes = spec.row_bytes() * static_cast<size_t>(batch);
+                output_buffers_.emplace_back(bytes);
+                host_outputs_.emplace_back(bytes);
+                context_->setTensorAddress(spec.name.c_str(), output_buffers_.back().get());
+            }
+        } catch (...) {
+            teardown();
+            throw;
         }
     }
 
     TrtInstance::~TrtInstance() {
+        teardown();
+    }
+
+    void TrtInstance::teardown() noexcept {
         // Order matters: the context references the buffers, so it goes first. And the stream
         // is synchronised before anything is freed, because a free racing an in-flight kernel
         // is a crash somewhere else entirely.
         if (stream_ != nullptr) gpuStreamSynchronize(stream_);
         if (context_ != nullptr) delete context_;
         if (stream_ != nullptr) gpuStreamDestroy(stream_);
+        // NULLED, not just freed: `teardown` runs twice on the throwing path if the caller
+        // ever gains a destructor, and a double `delete` is worse than the leak it replaces.
+        context_ = nullptr;
+        stream_ = nullptr;
     }
 
     void* TrtInstance::scratch(size_t bytes) {
