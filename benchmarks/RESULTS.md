@@ -364,10 +364,10 @@ visible set narrowed to the three GPUs it actually uses:
 startup_s 41.1741 → 0.484967      frames_read 0 → 4699
 ```
 
-```bash
-# host ids in SHIPINFER_GPUS; the bench then addresses them as container-local 0..N-1
-SHIPINFER_GPUS=1,2,6  SHIPINFER_BENCH_GPUS=0,1,2  scripts/run_cpp_bench.sh <label>
-```
+**This is the default now**, so no recipe is needed: `run_cpp_bench.sh` hands `_gpus.sh` the
+cards the run uses and passes `--gpu-labels` so every `per_device*` line still reports the HOST
+id — `per_device ship_detector 2:1576 3:1577 6:1575`, the labelling the rest of this page uses.
+`SHIPINFER_BENCH_NARROW=0` reproduces the old behaviour.
 
 I first attributed all this to a tenant holding GPU 3, then to a 99%-full `/home`. Both were
 wrong and both are corrected here rather than quietly: the engine files read at **1.1–1.3 GB/s**,

@@ -57,6 +57,7 @@ exec docker run --rm --pid=host "${GPU_DEVICES[@]}" \
   -e SHIPINFER_CUDA_BLOCKING_SYNC -e SHIPINFER_DEVICE_FOLD \
   -e SHIPINFER_RTSP_PERSON_DATA -e SHIPINFER_RTSP_SHIP_DATA -e SHIPINFER_RTSP_PORT \
   -e SHIPINFER_CPP_BINARY \
+  -e CUDA_DEVICE_ORDER \
   -v "$REPO:/work" \
   -v "$TRT_DIR:/tensorrt:ro" \
   "${mount_libs[@]}" \

@@ -34,6 +34,7 @@
 #include "shipinfer/ingest/manager.h"
 #include "shipinfer/ingest/sink.h"
 #include "shipinfer/ingest/sources/replay.h"
+#include "shipinfer/obs/device_labels.h"
 #include "shipinfer/obs/sampler.h"
 #include "shipinfer/pipeline/events/records.h"
 #include "shipinfer/pipeline/graph/bench_models.h"
@@ -71,6 +72,12 @@ namespace {
         std::string repository;
         std::string log_path = "buffers.jsonl";
         std::vector<int> devices{0};
+        // WHAT TO CALL EACH DEVICE IN THE OUTPUT, when the two differ. CUDA numbers what the
+        // container can SEE from 0, so narrowing the visible set to the cards a run uses --
+        // which is worth ~9.5 s of enumeration on a shared box -- renumbers them, and every
+        // archived `per_device*` line on this project's results page reports HOST ids. Empty
+        // means "the same as `devices`", so nothing changes for a run that narrows nothing.
+        std::vector<int> device_labels;
         int cameras = 12;
         double fps = 10.0;
         double seconds = 40.0;
@@ -101,6 +108,11 @@ namespace {
         //: without a summary -- so the run that most needs reading produces no numbers.
         int stop_deadline_ms = 5000;
     };
+
+    // `obs/device_labels.h` owns the mapping; this is its one-argument spelling.
+    int label_of(const Options& options, int device) {
+        return shipinfer::label_of(options.devices, options.device_labels, device);
+    }
 
     // How this binary's flags fill `BenchEngines`, which is the only place they are read.
     BenchEngines engines_of(const Options& options) {
@@ -156,6 +168,8 @@ namespace {
                 options.log_path = next();
             else if (flag == "--gpu-ids")
                 options.devices = parse_ints(next());
+            else if (flag == "--gpu-labels")
+                options.device_labels = parse_ints(next());
             else if (flag == "--cameras")
                 options.cameras = std::stoi(next());
             else if (flag == "--fps")
@@ -208,6 +222,12 @@ namespace {
                 "--repository names the root a plan's `artefact` paths hang "
                 "off, so it needs --plan <file>");
         }
+        // REFUSED AT PARSE TIME rather than silently half-applied; the rule and its reason
+        // live in `obs/device_labels.h`, where a test can reach them.
+        if (const std::string refusal = labels_refusal(options.devices, options.device_labels);
+            !refusal.empty()) {
+            throw ConfigError(refusal);
+        }
         return options;
     }
 
@@ -250,7 +270,7 @@ namespace {
         }
         out << ", \"gpus\": [";
         for (size_t i = 0; i < options.devices.size(); ++i) {
-            out << (i ? ", " : "") << options.devices[i];
+            out << (i ? ", " : "") << label_of(options, options.devices[i]);
         }
         out << "]}, \"models\": [";
         for (size_t i = 0; i < models.size(); ++i) {
@@ -781,11 +801,14 @@ int main(int argc, char** argv) {
                                     // which is the whole of V156's route, and the check below
                                     // is what stops a worker reading another GPU's pointer.
                                     if (item.device != device) {
+                                        // LABELLED like every other device in the output: an
+                                        // operator sent to "gpu0" by a narrowed run would open
+                                        // a card this run never touched.
                                         throw ConfigError(
                                             "frame " + item.tag.key() + " was decoded on gpu" +
-                                            std::to_string(item.device) +
+                                            std::to_string(label_of(options, item.device)) +
                                             " and this worker is on gpu" +
-                                            std::to_string(device) +
+                                            std::to_string(label_of(options, device)) +
                                             ": a device frame cannot move (ADR-004), and a "
                                             "lane per GPU is supposed to make this "
                                             "unreachable -- so it is a lane/worker mapping "
@@ -816,8 +839,9 @@ int main(int argc, char** argv) {
                                 failed.fetch_add(1);
                                 static std::atomic<int> shouted{0};
                                 if (shouted.fetch_add(1) < 5) {
-                                    std::cerr << "worker on gpu" << device << " failed frame "
-                                              << item.tag.key() << ": " << error.what() << "\n";
+                                    std::cerr << "worker on gpu" << label_of(options, device)
+                                              << " failed frame " << item.tag.key() << ": "
+                                              << error.what() << "\n";
                                 }
                             }
                             // Sealed on every path, so "every opened frame is reported exactly
@@ -826,8 +850,8 @@ int main(int argc, char** argv) {
                         }
                     }
                 } catch (const std::exception& error) {
-                    std::cerr << "worker on gpu" << device << " exited: " << error.what()
-                              << "\n";
+                    std::cerr << "worker on gpu" << label_of(options, device)
+                              << " exited: " << error.what() << "\n";
                 }
             });
         }
@@ -1222,15 +1246,15 @@ int main(int argc, char** argv) {
             }
             std::cout << "per_device " << name;
             for (const auto& [device, count] : by_device)
-                std::cout << " " << device << ":" << count;
+                std::cout << " " << label_of(options, device) << ":" << count;
             std::cout << "\n";
             std::cout << "per_device_rows " << name;
             for (const auto& [device, count] : rows_by_device)
-                std::cout << " " << device << ":" << count;
+                std::cout << " " << label_of(options, device) << ":" << count;
             std::cout << "\n";
             std::cout << "per_device_batches " << name;
             for (const auto& [device, count] : batches_by_device)
-                std::cout << " " << device << ":" << count;
+                std::cout << " " << label_of(options, device) << ":" << count;
             std::cout << "\n";
             // doc: long why this is a percentage and not the microseconds it is made of
             // OCCUPANCY, not raw time. A microsecond total is unreadable without the wall
@@ -1250,7 +1274,7 @@ int main(int argc, char** argv) {
                 // onto the stream and cut the next double printed anywhere to one digit.
                 std::ostringstream cell;
                 cell << std::fixed << std::setprecision(1) << pct;
-                std::cout << " " << device << ":" << cell.str();
+                std::cout << " " << label_of(options, device) << ":" << cell.str();
             }
             std::cout << "\n";
         }

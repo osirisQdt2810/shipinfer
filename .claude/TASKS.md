@@ -3591,8 +3591,9 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       this session has otherwise not seen. Four of the eight held other tenants' allocations.
       AND THE BOX IS MEASURABLE AGAIN: the same 12-camera run that read zero frames gives
       **`startup_s` 41.1741 -> 0.484967 and `frames_read` 0 -> 4699** with the visible set
-      narrowed. Recipe: `SHIPINFER_GPUS=1,2,6 SHIPINFER_BENCH_GPUS=0,1,2 scripts/run_cpp_bench.sh`
-      -- host ids in the first, container-local 0..N-1 in the second.
+      narrowed. That was a hand recipe when this was written and is **the default now**
+      (`BENCH-SHOULD-NOT-SEE-GPUS-IT-DOES-NOT-USE`): `run_cpp_bench.sh` narrows and passes
+      `--gpu-labels`, so the tables keep reporting host ids. `SHIPINFER_BENCH_NARROW=0` opts out.
       TWO WRONG CAUSES RECORDED BEFORE THIS ONE, because both reached the tree: a tenant holding
       GPU 3 (#290's body), then a 99%-full `/home` (#290, merged). The engine files read at
       **1.1-1.3 GB/s**, so the filesystem was never it. The check before trusting any run here is
@@ -3632,17 +3633,33 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       `cpp.yml` is a no-driver tier, so a GPU-OOM path has nowhere to live, and there is no
       injection seam that would let `DeviceBuffer` fail without one. The repro recipe above is
       the regression check. (The Python half needed no device, which is why it has tests.)
-- [ ] BENCH-SHOULD-NOT-SEE-GPUS-IT-DOES-NOT-USE · the workaround above should be the default:
-      `scripts/run_cpp_bench.sh` knows which devices the run uses and should hand them to
-      `_gpus.sh` rather than letting `cpp.sh` pass `--device nvidia.com/gpu=all`. Worth ~9.5 s
-      of startup on a shared box, and the 50-camera shape does not survive paying it.
-      THE DESIGN QUESTION THAT STOPS IT BEING A ONE-LINER, and why this is a line rather than a
-      commit: restricting visibility RENUMBERS the devices to 0..N-1, so every `per_device*`
-      table would report container-local ordinals where the whole archive reports host ids --
-      `1:9071 3:8841 4:9217 6:8942` becomes `0: 1: 2: 3:`. That is a comparability break across
-      every run on this page. Either the bench maps them back when printing (it knows the list
-      it was given), or the output states both. Deciding that is the work; the measurement above
-      is already done.
+- [x] BENCH-SHOULD-NOT-SEE-GPUS-IT-DOES-NOT-USE · **DONE, AND THE LABELS SURVIVED, which was
+      the whole design question.** `run_cpp_bench.sh` now hands `_gpus.sh` the cards the run
+      actually uses, so the container stops enumerating the rest -- worth 9.96/10.07 s against
+      0.658/0.665 s of first-CUDA-context on a box where four cards are held by other tenants,
+      and at fifty cameras the difference is a run that reads zero frames.
+      THE RENUMBERING IS HANDLED RATHER THAN ACCEPTED: narrowing makes CUDA number the visible
+      set from 0, so the binary takes `--gpu-labels` beside `--gpu-ids` and every `per_device*`
+      line -- and the jsonl's `gpus` list -- reports the HOST id. Verified end to end:
+        `per_device ship_detector 2:1576 3:1577 6:1575`   with `startup_s 0.397`
+      which is the same labelling the whole of `benchmarks/RESULTS.md` uses. Without it those
+      cells would have read `0: 1: 2:` and no comparison on that page would have survived.
+      **AND THE MAPPING IS NOT POSITIONAL, which #294's review caught before it shipped.** The
+      container does NOT order the visible set by the order the `--device` flags were passed:
+      measured by UUID, `SHIPINFER_GPUS=6,3,2` gives container ordinal 0 = host 2, 1 = host 3,
+      2 = host 6 -- ASCENDING BY HOST INDEX. A positional label list would have printed host 2's
+      counters under `6:`, inverted. So narrowing SORTS: `6,3,2` and `2,3,6` are the same run.
+      Verified end to end with the out-of-order input -- `per_device ship_detector 2:1479
+      3:1150 6:993`, `"gpus": [2, 3, 6]` -- and `CUDA_DEVICE_ORDER=PCI_BUS_ID` removes the last
+      assumption, since CUDA's default FASTEST_FIRST only ties by bus id because every card
+      here is the same model. Confirmed by bus id: ordinals 0,1,2 are 53/56/D1 = hosts 2,3,6.
+      A LABEL LIST THAT DOES NOT MATCH IS REFUSED AT PARSE TIME, because a SHORT one would
+      relabel the first devices and leave the rest reporting ordinals -- the one output a
+      reader cannot tell from a correct one:
+        `--gpu-labels has 3 entries and --gpu-ids has 2; a label per device, in the same
+         order, or none at all`
+      `SHIPINFER_BENCH_NARROW=0` opts out and reproduces the old behaviour; `SHIPINFER_GPUS`
+      set by hand still wins, so the recipe in the previous item keeps working.
 - [!] API-WEDGED-REPORT-FLAKE-IS-NOT-A-TIMEOUT · **THE CHEAP HALF IS DONE (#286, merged
       15 Sep): THE NEXT OCCURRENCE WILL CARRY ITS OWN DIAGNOSIS.** The failure used to render
       one line -- `assert watcher.entered.wait(30.0)`. It now renders every live thread with
