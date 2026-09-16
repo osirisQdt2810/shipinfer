@@ -328,14 +328,52 @@ db_5000_4, db_20000_4    engines ready in 49.9 s, 50.4 s  frames_read 0
 ```
 
 and it did not recover: a later 12-camera run on three *unshared* GPUs took **41.2 s** and also
-read nothing. So it is neither the camera count nor a contended device. What the box does show is
-`/home` at **99% full** and four other tenants' jobs running at load ~55, which is the shape of
-TensorRT deserialising a plan against a thrashing filesystem instead of a warm page cache.
+read nothing. So it is neither the camera count nor a contended device.
 
-I first attributed it to a tenant taking GPU 3. That was wrong — the 12-camera run on free cards
-rules it out — and it is corrected here rather than quietly. **The three completed pairs all
-predate the step change**, and no further measurement on this box is trustworthy until engine
-load returns to sub-second.
+**It is CUDA device enumeration, and the bench was doing it over every GPU on the box.** Timing
+the three parts of `engines ready in` separately, inside the container:
+
+```
+import tensorrt        0.18 – 0.80 s
+first CUDA context     9.4 – 10.1 s        <- all of it is here
+each context after     0.16 – 0.41 s
+read a .plan           0.007 – 0.081 s     8.3 MB and 47.6 MB files
+deserialise a .plan    0.020 – 0.145 s
+```
+
+So the plans are not the cost: all four read and deserialise in about **0.2 s together**. The
+cost is one per-process CUDA initialisation, and it is not a sick card either — whichever device
+is touched first pays it, and the order can be permuted. What sets it is **how many devices the
+container can see**, interleaved both directions:
+
+| container sees | first CUDA context |
+|---|---|
+| all 8 GPUs | 9.957 s, 10.066 s |
+| host GPUs 1,2,6 | 0.658 s, 0.665 s |
+
+A 9.3 s gap against a 0.11 s within-arm spread — 85×. Four of the eight were holding other
+tenants' large allocations, and enumerating them is what cost the ten seconds; when the box was
+quieter the same enumeration was sub-second, which is the 0.35–0.54 s the six good runs recorded.
+
+**The fix is on our side and it is one variable.** `deploy/rootless/cpp.sh` passes
+`--device nvidia.com/gpu=all` whatever `SHIPINFER_BENCH_GPUS` says, and `_gpus.sh` already
+supports restricting it. The same 12-camera run that read zero frames, with the container's
+visible set narrowed to the three GPUs it actually uses:
+
+```
+startup_s 41.1741 → 0.484967      frames_read 0 → 4699
+```
+
+```bash
+# host ids in SHIPINFER_GPUS; the bench then addresses them as container-local 0..N-1
+SHIPINFER_GPUS=1,2,6  SHIPINFER_BENCH_GPUS=0,1,2  scripts/run_cpp_bench.sh <label>
+```
+
+I first attributed all this to a tenant holding GPU 3, then to a 99%-full `/home`. Both were
+wrong and both are corrected here rather than quietly: the engine files read at **1.1–1.3 GB/s**,
+so the filesystem was never the problem. **The three completed pairs all predate the step
+change**, and the check before trusting any run on this box is one line:
+`grep 'engines ready in' .artifacts/cpp/<label>.log`.
 
 **And one question this sweep raises stays open, because the box failed before it could be
 answered.** Against the chain-cost sitting's `detect_only` row — same chain, same `workers 92` —
