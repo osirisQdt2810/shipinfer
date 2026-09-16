@@ -102,10 +102,18 @@ namespace shipinfer {
             self->engine_ = self->runtime_->deserializeCudaEngine(blob.data(), blob.size());
         }
         if (self->engine_ == nullptr) {
+            // THE DEVICE'S FREE MEMORY FIRST, because the plan-is-wrong reading below is an
+            // ACTIVELY misleading diagnosis when the real cause is a full card -- and that is
+            // the fill level next door to the one the instance constructor fails at.
+            size_t free_bytes = 0, total_bytes = 0;
+            if (gpuMemGetInfo(&free_bytes, &total_bytes) != gpuSuccess)
+                free_bytes = total_bytes = 0;
             throw BackendError(
-                "deserializeCudaEngine returned null for " + plan_path +
-                " — the plan is truncated, or was built for a different TensorRT "
-                "version or compute capability");
+                "deserializeCudaEngine returned null for " + plan_path + " on device " +
+                std::to_string(device) + " (" + std::to_string(free_bytes >> 20) + " of " +
+                std::to_string(total_bytes >> 20) +
+                " MiB free) — too little room on the device, or the plan is truncated, or it "
+                "was built for a different TensorRT version or compute capability");
         }
         self->introspect();
         return self;
@@ -182,6 +190,19 @@ namespace shipinfer {
                 host_outputs_.emplace_back(bytes);
                 context_->setTensorAddress(spec.name.c_str(), output_buffers_.back().get());
             }
+        } catch (const std::exception& error) {
+            teardown();
+            // NAMED, because the operator's next move depends on it: with eight devices in a
+            // run and the `max_batch` banner printed only for the first, a bare "out of memory
+            // at buffers.cpp:9" sends them back to `nvidia-smi` to work out which card. The
+            // free/total pair is read AFTER teardown, so it is what the next attempt would see.
+            size_t free_bytes = 0, total_bytes = 0;
+            if (gpuMemGetInfo(&free_bytes, &total_bytes) != gpuSuccess)
+                free_bytes = total_bytes = 0;
+            throw BackendError("loading " + engine_->path() + " on device " +
+                               std::to_string(device_) + ": " + error.what() + " (" +
+                               std::to_string(free_bytes >> 20) + " of " +
+                               std::to_string(total_bytes >> 20) + " MiB free)");
         } catch (...) {
             teardown();
             throw;
@@ -199,8 +220,9 @@ namespace shipinfer {
         if (stream_ != nullptr) gpuStreamSynchronize(stream_);
         if (context_ != nullptr) delete context_;
         if (stream_ != nullptr) gpuStreamDestroy(stream_);
-        // NULLED, not just freed: `teardown` runs twice on the throwing path if the caller
-        // ever gains a destructor, and a double `delete` is worse than the leak it replaces.
+        // NULLED, not just freed. Not because this can run twice today -- a constructor that
+        // throws gets no destructor, so it cannot -- but because that is the only thing keeping
+        // it single-entry, and a double `delete` is worse than the leak it replaces.
         context_ = nullptr;
         stream_ = nullptr;
     }

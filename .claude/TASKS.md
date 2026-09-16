@@ -3613,9 +3613,25 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       THE FIX IS ONE IDEA: `teardown()` is the single implementation of "release the context and
       the stream, in the one safe order", called by the destructor AND by the constructor's
       `catch(...)` before it rethrows, and it nulls what it frees so it is idempotent.
-      NO AUTOMATED TEST, stated rather than skipped: every C++ tier in `cpp.yml` is a no-driver
-      tier, so a GPU-OOM path has nowhere to live, and there is no injection seam that would let
-      `DeviceBuffer` fail without one. The repro recipe above is the regression check.
+      **AND IT NAMES THE DEVICE, which is what this item is called after** (#293's review was
+      right that the refuse half alone left the title unfixed). The typed catch reads the
+      device's free memory AFTER teardown -- what a retry would see -- and reports:
+        `loading .../ship_embedder/1/model.plan on device 0: gpuMalloc(...) failed: out of
+         memory at .../buffers.cpp:9 (46 of 24142 MiB free)`
+      so the plan, the device, the cause and the shortfall are all in one line. `gpuMemGetInfo`
+      is newly aliased in BOTH blocks of `core/platform.h`; a raw `cudaMemGetInfo` would have
+      broken the ROCm build. `TrtEngine::load`'s null-engine message is widened the same way --
+      it used to read "the plan is truncated, or was built for a different TensorRT version",
+      which is an actively wrong diagnosis at the fill level next door.
+      AND THE PYTHON PLANE HAD THE SAME HOLE (V88/V89, found by the same review): `initialize()`
+      sets `_initialized` only after `_do_initialize`, so `finalize()` returned at its own guard
+      and `_do_finalize` -- the one place that spells out bindings, then context, then engine --
+      was unreachable on exactly the failing path. Guarded, with three tests in
+      `tests/backends/test_part_built_initialize.py`; two of them fail without the guard.
+      NO AUTOMATED TEST FOR THE C++ HALF, stated rather than skipped: every C++ tier in
+      `cpp.yml` is a no-driver tier, so a GPU-OOM path has nowhere to live, and there is no
+      injection seam that would let `DeviceBuffer` fail without one. The repro recipe above is
+      the regression check. (The Python half needed no device, which is why it has tests.)
 - [ ] BENCH-SHOULD-NOT-SEE-GPUS-IT-DOES-NOT-USE · the workaround above should be the default:
       `scripts/run_cpp_bench.sh` knows which devices the run uses and should hand them to
       `_gpus.sh` rather than letting `cpp.sh` pass `--device nvidia.com/gpu=all`. Worth ~9.5 s

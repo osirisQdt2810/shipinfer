@@ -12,12 +12,13 @@ which is what a neighbour filling a shared card produces. A constructor that thr
 destructor while its `shared_ptr<TrtEngine>` member *is* released, so the context outlived the
 engine it points into: `Destroying an engine object before its execution contexts`, then UB.
 
-`teardown()` is now the single implementation of "release the context and the stream in the one
-safe order", called by `~TrtInstance` and by the constructor's `catch(...)` before it rethrows,
-and it nulls what it frees so it is idempotent.
-
-Reproduced rather than argued: hold VRAM until 1045 MiB is free, run the 4-camera full chain.
-Old binary 3/3 emits the destroy-order error, fixed 0/3; the window is under 100 MiB wide.
+`teardown()` is now the one implementation of that release, called by `~TrtInstance` and by the
+constructor's `catch(...)`, which also NAMES the device: `loading .../model.plan on device 0:
+gpuMalloc(...) out of memory (46 of 24142 MiB free)`. `gpuMemGetInfo` aliased in both
+`platform.h` blocks. Same hole on the Python plane (V88/V89) — `initialize()` set `_initialized`
+after `_do_initialize`, so `finalize()` skipped `_do_finalize` — guarded, three tests, two fail
+without it. Reproduced rather than argued: hold VRAM until 1045 MiB free and run the 4-camera
+chain; old binary 3/3 emits the destroy-order error, fixed 0/3, window under 100 MiB wide.
 
 ---
 
