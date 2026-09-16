@@ -5,6 +5,23 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-16 — a full device is an error again, not a segfault (TensorRT seam)
+
+`TrtInstance` creates its execution context, then allocates `DeviceBuffer`s — which throw on OOM,
+which is what a neighbour filling a shared card produces. A constructor that throws gets no
+destructor while its `shared_ptr<TrtEngine>` member *is* released, so the context outlived the
+engine it points into: `Destroying an engine object before its execution contexts`, then UB.
+
+`teardown()` is now the one implementation of that release, called by `~TrtInstance` and by the
+constructor's `catch(...)`, which also NAMES the device: `loading .../model.plan on device 0:
+gpuMalloc(...) out of memory (46 of 24142 MiB free)`. `gpuMemGetInfo` aliased in both
+`platform.h` blocks. Same hole on the Python plane (V88/V89) — `initialize()` set `_initialized`
+after `_do_initialize`, so `finalize()` skipped `_do_finalize` — guarded, three tests, two fail
+without it. Reproduced rather than argued: hold VRAM until 1045 MiB free and run the 4-camera
+chain; old binary 3/3 emits the destroy-order error, fixed 0/3, window under 100 MiB wide.
+
+---
+
 ## 2026-09-15 — the per-device table reports the achieved batch size (both planes)
 
 `rows/requests` is 1.00 for a detector however well the batch window fills — one frame is one

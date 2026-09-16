@@ -187,6 +187,12 @@ namespace shipinfer {
         const TrtEngine& engine() const { return *engine_; }
 
       private:
+        // The context and the stream, released in the one order that is safe. Called by the
+        // destructor AND by the constructor when it throws part-built: a `TrtInstance` whose
+        // constructor threw never gets a destructor, so without this the context outlives the
+        // engine its `shared_ptr` member releases on the way out.
+        void teardown() noexcept;
+
         std::shared_ptr<TrtEngine> engine_;
         int device_ = 0;
         nvinfer1::IExecutionContext* context_ = nullptr;

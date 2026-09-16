@@ -14,6 +14,7 @@ duplicate that machinery and make ordering guarantees impossible to reason about
 from __future__ import annotations
 
 import abc
+import contextlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
@@ -140,10 +141,23 @@ class ModelBackend(abc.ABC):
     # -- lifecycle -----------------------------------------------------------------------
 
     def initialize(self) -> None:
-        """Load the model. Idempotent."""
+        """Load the model. Idempotent, and it cleans up after a PART-BUILT attempt.
+
+        `_initialized` is set after `_do_initialize`, so without this `finalize()` returns at
+        its own guard and the one place that spells out the release order never runs -- on
+        precisely the path that needs it. TensorRT allocates its context before its bindings
+        and a full device throws between them (`csrc`'s twin: `TrtInstance::teardown`).
+        """
         if self._initialized:
             return
-        self._do_initialize()
+        try:
+            self._do_initialize()
+        except BaseException:
+            # `_do_finalize` on a half-built backend, so its own guards decide what exists.
+            # Swallowed, because the caller must see the ORIGINAL failure, not a cleanup one.
+            with contextlib.suppress(Exception):
+                self._do_finalize()
+            raise
         self._initialized = True
         _LOG.info("loaded %s on %s", self._context.instance_name, self.device)
 
