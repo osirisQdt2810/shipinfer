@@ -6034,6 +6034,23 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       believed then: "this plane has no such step" is FALSE. `shard.cpp` maps tracks onto rows
       by `Track::last_match`, exactly. See CSRC-TRACKER-ATTRIBUTION's ruling.
 
+- [!] **GPU 7 IS INVISIBLE TO CUDA AND HAS BEEN SINCE AT LEAST 1 Sep -- ONE OF YOUR EIGHT
+      A5000s IS NOT BEING USED BY ANYTHING.** The driver enumerates it and `nvidia-smi` lists
+      it; the CUDA runtime cannot open it. On the HOST, not just in a container:
+        `cudaGetDeviceCount` -> **7**      `nvidia-smi` -> **8**   `torch.cuda.device_count()` -> **8**
+      CUDA's bus ids are 4F, 52, 53, 56, 57, CE, D1; `nvidia-smi` additionally lists
+      **D2:00.0 = GPU 7**. So ~12% of the box's GPU capacity is idle, and every tier that
+      enumerates all eight dies at init -- `torch.cuda.__init__` queues `_check_capability`,
+      which walks every VISIBLE device:
+        `RuntimeError: device >= 0 && device < num_gpus INTERNAL ASSERT FAILED ... device=7, num_gpus=7`
+      WHICH IS THE 1 Sep INCIDENT, VERBATIM. `deploy/rootless/_gpus.sh`'s header quotes that
+      exact line and has since then; its default stayed `all`, so it took the tier down again
+      today for a session that did not know to set the variable. **That half is fixed here**
+      (`usable_gpus.py` + the default routing around it), so the documented commands work.
+      [!] OPERATOR: **the card itself is yours.** A GPU the driver lists but CUDA cannot open
+      is usually `nvidia-smi --gpu-reset -i 7` (needs root and nothing holding it), or a reseat
+      if it does not come back. Until then every run here is on seven cards, and the 16-GPU
+      extrapolations in `benchmarks/RESULTS.md` are from a box that currently has seven.
 - [ ] SHIPVISION-TRACK-LAST-MATCH · **PINNED OPEN BY DESIGN -- this one cannot be closed, and
       that is the register working.** `benchmarks/parity/known.py`'s `tracker_options` entry
       cites this line, and `test_every_entry_has_an_open_ledger_line_and_a_reproducing_case`

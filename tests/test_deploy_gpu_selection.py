@@ -59,9 +59,16 @@ def _effective(path: Path, seen: frozenset[str] = frozenset()) -> str:
     return "\n".join(parts)
 
 
-def _expand(value: str | None) -> subprocess.CompletedProcess[str]:
-    """Source the helper with `SHIPINFER_GPUS` set, and print what it built."""
-    env = {"PATH": "/usr/bin:/bin"} | ({"SHIPINFER_GPUS": value} if value is not None else {})
+def _expand(value: str | None, *, probe: str = "0") -> subprocess.CompletedProcess[str]:
+    """Source the helper with `SHIPINFER_GPUS` set, and print what it built.
+
+    `probe` defaults to OFF so these cases stay about the expansion. With it on, `_gpus.sh`
+    asks which cards CUDA can open and routes around the ones it cannot -- asserted separately
+    below, with a stub, because the real answer depends on the box the suite runs on.
+    """
+    env = {"PATH": "/usr/bin:/bin", "SHIPINFER_GPU_PROBE": probe} | (
+        {"SHIPINFER_GPUS": value} if value is not None else {}
+    )
     return subprocess.run(
         ["bash", "-c", f'. "{HELPER}" && echo "${{GPU_DEVICES[*]}}"'],
         capture_output=True,
@@ -124,6 +131,10 @@ class TestTheHelperExpandsWhatItIsGiven:
         assert done.returncode == 0, done.stderr
         assert done.stdout.split() == ["--device", "nvidia.com/gpu=all"]
 
+    def test_unset_still_means_every_device_when_the_probe_is_off(self) -> None:
+        """The pre-16-Sep contract, kept reachable: `SHIPINFER_GPU_PROBE=0` restores it."""
+        assert _expand(None, probe="0").stdout.split() == ["--device", "nvidia.com/gpu=all"]
+
     def test_a_list_becomes_one_flag_per_index(self) -> None:
         """One `--device` per index, not a comma list: a typo in a comma list is a device
         named `0,1` that resolves to nothing and hands the container no GPU at all."""
@@ -145,3 +156,68 @@ class TestTheHelperExpandsWhatItIsGiven:
 
         assert done.returncode == 2, f"{value!r} was accepted: {done.stdout!r}"
         assert "is not an index" in done.stderr
+
+
+class TestACardCudaCannotOpenIsRoutedAround:
+    """`_gpus.sh`'s whole reason for existing, finally the default rather than an incantation.
+
+    Its header has quoted `device=7, num_gpus=7` since 1 Sep -- `torch.cuda.__init__` walks
+    every VISIBLE device, so one card the driver enumerates and CUDA cannot open takes the tier
+    down. The default stayed `all` and it happened again on 16 Sep. Stubbed here because the
+    real probe's answer depends on the machine.
+    """
+
+    def _with_probe(self, script: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+        probe = tmp_path / "probe.py"
+        probe.write_text(script)
+        return subprocess.run(
+            ["bash", "-c", f'. "{HELPER}" && echo "${{GPU_DEVICES[*]}}"'],
+            capture_output=True,
+            text=True,
+            env={"PATH": "/usr/bin:/bin", "SHIPINFER_GPU_PROBE": str(probe)},
+        )
+
+    def test_the_healthy_cards_become_the_default(self, tmp_path: Path) -> None:
+        done = self._with_probe("print('0,1,2')\n", tmp_path)
+
+        assert done.returncode == 0, done.stderr
+        assert done.stdout.split() == [
+            "--device",
+            "nvidia.com/gpu=0",
+            "--device",
+            "nvidia.com/gpu=1",
+            "--device",
+            "nvidia.com/gpu=2",
+        ]
+
+    def test_it_says_which_card_it_dropped(self, tmp_path: Path) -> None:
+        """A silently smaller device set is how somebody benchmarks seven cards and reports eight."""
+        done = self._with_probe(
+            "import sys\nprint('0,1,2')\nprint('7 (00000000:D2:00.0)', file=sys.stderr)\n",
+            tmp_path,
+        )
+
+        assert "GPU 7 (00000000:D2:00.0)" in done.stderr
+        assert "0,1,2" in done.stderr
+
+    def test_a_probe_that_finds_nothing_leaves_the_default_alone(self, tmp_path: Path) -> None:
+        """Agreement, no runtime, no `nvidia-smi` -- all of them print nothing and exit 1."""
+        done = self._with_probe("raise SystemExit(1)\n", tmp_path)
+
+        assert done.stdout.split() == ["--device", "nvidia.com/gpu=all"]
+
+    def test_an_explicit_choice_is_never_second_guessed(self, tmp_path: Path) -> None:
+        probe = tmp_path / "probe.py"
+        probe.write_text("print('0,1,2')\n")
+        done = subprocess.run(
+            ["bash", "-c", f'. "{HELPER}" && echo "${{GPU_DEVICES[*]}}"'],
+            capture_output=True,
+            text=True,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "SHIPINFER_GPU_PROBE": str(probe),
+                "SHIPINFER_GPUS": "all",
+            },
+        )
+
+        assert done.stdout.split() == ["--device", "nvidia.com/gpu=all"]
