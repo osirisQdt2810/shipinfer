@@ -5,6 +5,23 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-16 — a card CUDA cannot open no longer takes the whole GPU tier
+
+`_gpus.sh` has documented this assert since 1 Sep — `device=7, num_gpus=7`, because
+`torch.cuda.__init__` walks every VISIBLE device — and still defaulted to `all`, so the same
+card took the same tier down again today. Documenting an incantation is not a fix.
+
+`scripts/usable_gpus.py` asks the CUDA runtime which cards it can open and matches them to the
+driver's indices **by PCI bus id** — the two enumerations are exactly what disagree, CUDA's
+being dense over openable cards. It exits non-zero when they agree, when either is unavailable,
+or when the answer is empty, so it only fires on an already-broken box.
+
+On this box `cudaGetDeviceCount` says 7 against `nvidia-smi`'s 8, the missing card being
+`D2:00.0` = GPU 7. The default tier died on the assert before and runs after, naming what it
+dropped. The card itself is an operator item.
+
+---
+
 ## 2026-09-16 — a full device is an error again, not a segfault (TensorRT seam)
 
 `TrtInstance` creates its execution context, then allocates `DeviceBuffer`s — which throw on OOM,
