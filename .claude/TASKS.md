@@ -3644,6 +3644,15 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
         `per_device ship_detector 2:1576 3:1577 6:1575`   with `startup_s 0.397`
       which is the same labelling the whole of `benchmarks/RESULTS.md` uses. Without it those
       cells would have read `0: 1: 2:` and no comparison on that page would have survived.
+      **AND THE MAPPING IS NOT POSITIONAL, which #294's review caught before it shipped.** The
+      container does NOT order the visible set by the order the `--device` flags were passed:
+      measured by UUID, `SHIPINFER_GPUS=6,3,2` gives container ordinal 0 = host 2, 1 = host 3,
+      2 = host 6 -- ASCENDING BY HOST INDEX. A positional label list would have printed host 2's
+      counters under `6:`, inverted. So narrowing SORTS: `6,3,2` and `2,3,6` are the same run.
+      Verified end to end with the out-of-order input -- `per_device ship_detector 2:1479
+      3:1150 6:993`, `"gpus": [2, 3, 6]` -- and `CUDA_DEVICE_ORDER=PCI_BUS_ID` removes the last
+      assumption, since CUDA's default FASTEST_FIRST only ties by bus id because every card
+      here is the same model. Confirmed by bus id: ordinals 0,1,2 are 53/56/D1 = hosts 2,3,6.
       A LABEL LIST THAT DOES NOT MATCH IS REFUSED AT PARSE TIME, because a SHORT one would
       relabel the first devices and leave the rest reporting ordinals -- the one output a
       reader cannot tell from a correct one:
@@ -3651,6 +3660,2380 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
          order, or none at all`
       `SHIPINFER_BENCH_NARROW=0` opts out and reproduces the old behaviour; `SHIPINFER_GPUS`
       set by hand still wins, so the recipe in the previous item keeps working.
+- [!] API-WEDGED-REPORT-FLAKE-IS-NOT-A-TIMEOUT · **THE CHEAP HALF IS DONE (#286, merged
+      15 Sep): THE NEXT OCCURRENCE WILL CARRY ITS OWN DIAGNOSIS.** The failure used to render
+      one line -- `assert watcher.entered.wait(30.0)`. It now renders every live thread with
+      the last four frames of its stack (not the top one: a parked thread's top frame is always
+      `threading.py`, which names no caller) plus the POST task's own `repr`, because a
+      SUSPENDED coroutine has no frame in a stack dump and only the repr says whether the POST
+      ran at all. The dump is built at the `raise`, so a passing run pays nothing.
+      WHY THAT AND NOT A HUNT: at 1-in-25 over a 6.5-minute suite, bisecting costs hours and
+      this session had no hypothesis to aim them at. The first line of the dump is
+      `threading.active_count()`, which IS the one hypothesis nothing has tested -- the load
+      experiment used 60 separate PROCESSES, not threads in this interpreter. In isolation the
+      dump reads `2 live threads`; in the full suite, where the flake lives, that number is the
+      measurement this hunt has never had.
+      [!] WHAT IS LEFT FOR YOU IS A BUDGET QUESTION, NOT A TECHNICAL ONE: wait for the next
+      instrumented occurrence (my default, and it costs nothing), or say the word and I will
+      spend the hours bisecting the full suite for the interacting test. Nothing is blocked
+      either way -- the suite is green and the diagnostic is merged.
+      PREVIOUS: **IT RECURRED 15 Sep, AFTER #224, SO THE
+      `[x]` BELOW WAS PREMATURE -- reopened with what today adds.** Same assertion as every
+      previous failure: `assert watcher.entered.wait(30.0), "the POST never asked for a
+      report"` at `test_streams.py:837`. So #224's rewrite (two tasks, not two threads)
+      narrowed it but did not remove the mechanism, and the closure rested on "passes 3/3
+      locally and main's last six runs are green" -- which is absence of evidence.
+      WHAT TODAY RULES OUT, each measured rather than reasoned:
+        * NOT load starvation. 6 runs with 60 CPU spinners, box load 46 -> 86: **0 failures**.
+          That was my hypothesis on seeing it fail while a 2 000 img/s benchmark ran; refuted.
+        * NOT reproducible in isolation. 10 consecutive runs of the class: **0 failures**.
+      WHAT IT LEAVES, and it contradicts this item's own "WHAT IS RULED OUT" line: it appears
+      only in the FULL SUITE. That line says "it is not order-dependence, since the full local
+      suite passes" -- one observation, and today the full local suite failed it. Frequency
+      today: **once in ~25 full-suite runs** (~6.5 min each), which is why neither loop above
+      could catch it and why a hunt is expensive rather than hard.
+      NOT CHASED FURTHER HERE, deliberately: at 1-in-25 over a 6.5-minute suite, bisecting for
+      the interacting test is hours of runs, and this session has no evidence about WHICH test.
+      What it has is the correction -- the item is not done, and the next approved diff it
+      blocks should not be a surprise.
+      ORIGINAL: **DONE, and it was done on 11 Sep by #224 --
+      this line just never heard about it.** It parked a question ("say if you want it chased
+      now") and named the remaining hypothesis: one starlette `TestClient` driven from two
+      threads, with the fix being "an async test driving both requests as tasks". #224 is
+      titled "The wedged-report test drives two tasks, not one client from two threads" and
+      merged three days before this audit found it.
+      VERIFIED 14 Sep rather than inferred from the title: the test is `async` over
+      `httpx.AsyncClient` with two tasks, and its own comment now reads "THE SHAPE IS THE
+      FIX" while recording that the thread version failed CI's py3.10 leg four times.
+      Passes 3/3 locally, and main's last six ci.yml runs are green -- the py3.10 leg
+      included, which is the one that used to fail.
+      THE LESSON IS THE `[!]`, not the flake. An item blocked on an operator answer stays
+      blocked even after someone answers it by ACTING, because nothing walks back from the
+      PR to the line that asked. Three of these turned up in one audit today; this is the
+      fourth and the oldest.
+      ORIGINAL: `tests/api/test_streams.py::
+      TestNothingBlockingRunsOnTheEventLoop::test_a_wedged_report_is_a_504_and_the_next_request_still_answers`
+      fails on CI's **py3.10** leg and passes locally on the same interpreter (3.10.12), three
+      for three in isolation and in the full suite. It has now failed three times on #222 and
+      blocked an APPROVED diff twice.
+      WHAT I GOT WRONG: #223 widened the RENDEZVOUS wait (`entered.wait(5.0)` -> 30 s) on the
+      reasoning that a thread start was being starved by the parallel C++ jobs. It failed again
+      at 30 s, so that was not the cause and the fix bought nothing -- I am recording that rather
+      than leaving the PR body's claim standing.
+      WHAT IS RULED OUT: no exception reaches the posting thread (CI shows no captured stderr and
+      no traceback, only the timed-out wait); the handler's own deadline is not it either --
+      `anyio.fail_after` cannot interrupt the wedged `health()`, which runs in a worker thread,
+      and a local probe at `_ADD_TIMEOUT_S = 0.001` still passes; and it is not order-dependence,
+      since the full local suite passes.
+      WHAT IS LEFT, and it needs a decision: the test drives one starlette `TestClient` from TWO
+      threads (the POST from a worker, the GET from the main thread), which starlette does not
+      document as safe. Either that is the bug in the test -- and the property it measures
+      ("nothing blocking runs on the event loop") wants a different shape, e.g. two clients over
+      one app, or an async test driving both requests as tasks -- or it is a real defect in the
+      portal's dispatch under load, which would matter in production. THE QUESTION FOR YOU: this
+      is an API-suite investigation with no bearing on the mtmc chain or the target, so I am
+      parking it rather than spending an afternoon on it while #222 waits. Say if you want it
+      chased now; otherwise the next person to touch `api/streams.py` owns it.
+
+- [x] MTMC-EIGHT-OPEN-INSTANTS-IS-A-SMALL-GROUP'S-BOUND · MEASURED, FIXED AND PROVED 11 Sep.
+      SWEPT at the design load (50 cameras x 20 fps, pan fixture, GPUs 0/2/5/6, 92 workers,
+      40 s, one plan line different): at the default 8 the run evicted 20.2-28.4% of every
+      instant it opened (three runs), admitted 97-545 observations and resolved ZERO global
+      ids; from 16 up it evicts exactly nothing, admits 527-2 258, and resolves ids in five of
+      six runs. The knee is 16 and 32/64/128 buy nothing over it -- eviction is a step, not a
+      slope. Table on `benchmarks/RESULTS.md`.
+      NOT A THROUGHPUT KNOB, and the first pair said otherwise: 29 565/31 760/30 725 frames
+      accepted at 8 against 31 729-34 908 above it, overlapping ranges. One pair would have
+      read as +18%; three runs an arm is what refused it.
+      THE FIX, both planes: the bound follows the FLEET when the chain names none --
+      `max(kDefaultMaxInstants, cameras seen or announced)`, recomputed in `refresh_live` /
+      `_refresh_live` as cameras arrive and leave. Seen UNION announced, not `live_`: the live
+      set is a roster decision, and `ship_person_cpu.yaml` declares four cameras against a
+      fifty-camera fleet, so a roster-derived bound would have been 8 again on the shipped
+      configuration. PROVED on that configuration, unchanged: bound 54, nothing evicted, 1 683
+      observations admitted and **25 global identities over 68 tracks** where the default bound
+      resolved none in three runs. Every camera holds one instant open and
+      seals more as it advances, so the number legitimately open scales with the fleet; a
+      constant below it spends eviction on buckets the group is still filling rather than on
+      the stale clock eviction is for. A named number stays exact in BOTH directions, which
+      keeps eviction testable and lets an operator who measured their own spread say so.
+      `mtmc_max_instants` is now a bench counter, because the bound is no longer a constant a
+      reader can look up.
+      WHAT IT DOES NOT ANSWER: identity is erratic at this load -- 0 to 25 ids across the nine
+      runs above the knee, and the arm that admitted the MOST observations (2 180, the
+      fifty-camera roster) resolved NONE. The bound fixed eviction, deterministically; what the
+      clusterer then does with a 50-camera instant is the next question and is not this item's.
+      FILED AS `MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD` below.
+
+- [x] MTMC-A-DRAIN-CAN-EVICT-WHAT-THE-SURVIVORS-ARE-FILLING · FIXED 12 Sep on both planes.
+      FOUND by #238's review, and it is the other side of the derived bound. `drop_camera`
+      recomputes the bound DOWNWARD, so tearing a 50-camera group down to 8 drops it to 8
+      while up to 50 buckets are open -- the
+      next `open()` then evicts down to 7 in one `while` pass and marks `evicted` on buckets
+      the surviving cameras are still filling.
+      SELF-LIMITING, which is why it is a note and not a defect: those buckets retire on their
+      own deadlines one window later, so the burst needs the drop and the submit inside the
+      same 60 ms. It has never been seen -- no run here shrinks a fleet mid-flight.
+      DONE: both planes clamp the recomputed bound to `len(buckets) + 1` -- plus one because
+      the eviction test is `>=` and the bound must leave room for the bucket about to open. It
+      is a snapshot taken when the fleet changes, not a ratchet: it falls with the map as those
+      buckets retire on their own deadlines, so a fleet that really did shrink still converges.
+      EVIDENCE: `test_a_drain_does_not_evict_what_the_survivors_are_still_filling` in both
+      planes, twelve open instants drained to four. Deleting the clamp turns the C++ check red
+      on both of its assertions (139 checks, 2 failures) and the Python one on the bound.
+
+- [x] MTMC-GATE-COUNTS-INSTANTS-NOT-SIGHTINGS · DONE 12 Sep, ALL FIVE STEPS. THE UPSTREAM HALF of
+      `MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD`, opened as shipvision#16 on 12 Sep.
+      `ObservationGate` enforced "consecutive" by REPLACING its hit map every call, so a track
+      lost its streak whenever its camera was not in the instant the caller built -- fine when
+      an instant holds the whole group, wrong at fleet scale where it holds 24% of it. A streak
+      now survives an instant its camera did not report in and breaks when the camera WAS there
+      without it, bounded by `max_absent_instants` (32, ~2 s at a 60 ms window) so a camera
+      that goes away for good does not leave its streaks behind.
+      ROUND 1 CAME BACK BLOCKING and is FIXED at `0282ba3`: `present` was derived from the
+      observations, so a camera that reported an EMPTY VIEW left no trace and read as absent --
+      a single track flickering on/off reached `min_hits` without ever having two consecutive
+      sightings, and `max_absent_instants` cannot catch it because the counter resets on every
+      sighting. `filter` now takes `cameras` and the tracker passes `cluster.cameras`.
+      THE SEQUENCE FROM HERE, and none of it is optional: (1) shipvision#16 merges; (2) bump
+      `3rdparty/shipvision` in its own commit (ADR-010); (3) port the same rule to
+      `csrc/shipinfer/pipeline/mtmc/gate.cpp`, which is this repository's twin and carries the
+      V88 sync rule -- and it must TAKE THE ROSTER from the start rather than re-derive it,
+      which is the round-1 defect above arriving pre-solved;
+      (1)-(4) DONE 12 Sep. shipvision#16 merged at `9c53df1`; the pin is bumped in its own
+      commit; `gate.{h,cpp}` carries the streak, the absence counter and `max_absent_instants`,
+      and `filter` REQUIRES the roster where the reference defaults it -- one production caller
+      here, so a defaulted one would be a trapdoor with nobody to justify it. The roster comes
+      from the barrier's own `InstantEntry`s in `stages.cpp`, which is the only place that
+      knows a camera reported an empty view, and `ClusterTracker::ids` carries it down.
+      THE HARNESS REACHES IT NOW, which it could not before: the shared scenario format takes
+      a bare camera name for "reported, saw nothing", so `absence_carries_the_run` and
+      `an_empty_view_restarts_the_run` are two scenarios that differ only in the roster and
+      the golden gives them opposite answers. `max_absent_instants` is the one default no
+      scenario can reach (33 instant lines for one number), so a new test compares the C++
+      constant against the reference's signature directly.
+      EVIDENCE: both probes are parity failures at the right lines -- dropping the carry
+      breaks golden lines 21-22, deriving the roster instead of taking it breaks line 27.
+      (5) MEASURED 12 Sep at the design load, two arms, and it is decisive. 50 x 20 fps over
+      GStreamer RTSP, 4 GPUs, 70 s: admission goes 2.2% -> **84.2% and 83.8%**, and identities
+      go 18 over 18 TRACKS to 16 over 167 and 22 over 193 -- about nine tracks an identity
+      where every identity used to hold exactly one. Cameras per instant is the control and it
+      did not move (11.8 -> 11.2 / 11.3), so the jump is the counting rule and not a
+      differently-shaped instant. Frames and latency are NOT attributable here: 61 981/61 979
+      accepted at 279/267 ms p50 on 16.2 cores, but several unrelated changes merged between
+      this run and the 36 081 in the window table, so that is not a control for it.
+      NEW, from the same run: `mtmc_frames late` is 24 950 of 68 538 frames read -- better than
+      a third of the fleet's frames reach the barrier after their instant closed. Filed as
+      `MTMC-A-THIRD-OF-FRAMES-ARRIVE-LATE`. (4) re-emit the gate goldens (`benchmarks/parity/scenarios/gate`) and any
+      identity golden the change moves; (5) re-run the design load and compare admission and
+      identities against 2.2% / 18-over-18. Only (5) answers whether the fix is the whole of it.
+
+- [x] MTMC-IDENTITY-IS-ERRATIC-AT-THE-DESIGN-LOAD · DONE 12 Sep, (a) (b) and (c). MEASURED with a new instrument and
+      ONE HYPOTHESIS REFUTED BY THE SECOND MEASUREMENT, which is why both are here.
+      `mtmc_instant_cameras` says how much of the fleet an instant held when it ended -- the
+      number `window` and `advanced` cannot give. The fleet-size contrast:
+
+      | fleet | cameras an instant held (mean / largest) | offered | admitted | ids / tracks |
+      |---|---|---|---|---|
+      | 50 x 20 fps, 92 workers | **11.8 / 47** of fifty (24%) | 90 265 | **1 987 (2.2%)** | 18 / 18 |
+      | 12 x 20 fps, 24 workers | **10.5 / 12** of twelve (88%) | 42 067 | **31 440 (74.7%)** | 13 / 72 |
+
+      An instant holds about ELEVEN cameras whatever the fleet size, so the fleet grew and the
+      window did not. The arithmetic that fits THIS pair: `min_hits` counts consecutive
+      qualifying instants and a track can only qualify in an instant its camera is in, so
+      0.24^3 = 1.4% against 0.88^3 = 68% -- close to the measured 2.2% and 74.7%.
+      THE WINDOW SWEEP REFUTES THAT AS THE WHOLE STORY, same fleet, same load, window varied:
+
+      | sync_window_ms | cameras / instant | instants | admitted | ids / tracks | frames | p50 |
+      |---|---|---|---|---|---|---|
+      | 60 (default) | 11.8 | 1 951 | 1 987 | 18 / 18 | 36 081 | 259 ms |
+      | 120 | 9.4 | 3 067 | 898 | 42 / 67 | 33 272 | 309 ms |
+      | 250 | 12.3 | 2 335 | 3 512 | **50 / 77** | 30 085 | 334 ms |
+
+      Cameras per instant barely moves while admission goes 1 987 -> 898 -> 3 512 and identities
+      go 18 -> 42 -> 50, so cameras-per-instant is NOT the variable identity tracks. What does
+      move is the close REASON: `advanced` is 21% of instants at 60 ms and 85% at 250 ms,
+      because a window wider than the frame period (50 ms at 20 fps) puts a camera's next frame
+      inside its own bucket's span -- which `barrier.h`'s own docstring predicted and this is
+      the first time it has been measured.
+      SO THE WINDOW IS A REAL LEVER AND IT IS NOT FREE: 250 ms buys 18 -> 50 identities and
+      costs 17% of the frames (36 081 -> 30 085) and 29% of p50 latency (259 -> 334 ms).
+      (a) MEASURED, and it is decisive. `min_hits 1` at the default window: admission goes
+      2.2% -> **99.9%** (75 322 of 75 376) and the identities go 18 over 18 tracks to 23 over
+      **190**. Read the second number: at the shipped defaults every identity holds EXACTLY ONE
+      track, which is not cross-camera association at all -- it is eighteen cameras each holding
+      its own. With the gate open, 190 tracks resolve into 23 identities, about eight tracks
+      each, which is what the stage exists to produce. Cost: 34 419 frames against 36 081 and
+      282 ms p50 against 259.
+      SO THE GATE IS THE VARIABLE, and `min_hits 3` is not conservative at this fleet size, it
+      is UNREACHABLE: three consecutive qualifying instants, a track qualifying only in an
+      instant its camera is in, a camera in 24% of them.
+      WHAT REMAINS: (c) the same sweep at 12 cameras, to tell the fleet size apart from the
+      rate.
+      (b) DONE 12 Sep and it was the whole of it. shipvision#16 made `min_hits` count the
+      instants a camera WAS in; #249 ported it. Re-measured at the design load, two arms:
+      admission 2.2% -> 84.2% / 83.8%, identities 18 over 18 tracks -> 16 over 167 and 22 over
+      193. AND IT COST NEITHER LATENCY NOR FRAMES, which is what this line predicted: p50 279
+      and 267 ms against 259, frames 61 981/61 979, where the window lever bought 50 identities
+      for 17% of the frames and 29% of p50. The 12-camera control reproduces its old row
+      exactly (13 identities over 72 tracks), so the instrument has not moved under us.
+      (c) DONE 12 Sep and it names the variable. The same 60/120/250 ms sweep at TWELVE
+      cameras: identities 17/96, 18/95, 17/96 and admission 89.9% at all three -- FLAT, where
+      the fifty-camera fleet moved 18 -> 42 -> 50 and paid 17% of its frames for it. What still
+      moves is the close reason (`window` 1169 -> 4 -> 2, `advanced` 365 -> 1465 -> 1466), so a
+      wider window changes how an instant ends and not what it holds.
+      AND THE ARRIVAL LAG SAYS WHY, which is what made this answerable at all: 19.4 ms p50 at
+      twelve cameras, INSIDE a 60 ms window, against 237-248 ms at fifty -- four windows. Same
+      rate both times, so it is not the rate: it is how long a frame takes to reach the
+      barrier, and the window was a lever at fifty only because the lag had outgrown it.
+      WHAT IS LEFT is upstream of the barrier -- the chain's latency to `mtmc` and its variance
+      -- which is `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` and `EXECUTE-BLOCKS-THE-INSTANCE-
+      THREAD`, not this item.
+
+- [x] MTMC-A-THIRD-OF-FRAMES-ARRIVE-LATE · ANSWERED 12 Sep, and the window is not the lever. MEASURED on the gate's design-load arm and
+      not yet explained. `mtmc_frames late` is 24 950 of 68 538 frames read at 50 x 20 fps --
+      better than a third of the fleet reaches the barrier after its instant has already closed,
+      so those frames carry no global id at all. It is a different question from the gate's
+      (which decided what an OPEN instant admits) and the two were measured in the same run, so
+      the number is free of confounds even though the cause is not known.
+      WHAT IT IS NOT: `late` is not `would_starve` (8) and not `expired` (1); those are bounded
+      and tiny. It is frames whose capture stamp falls inside a bucket that has already ended.
+      THE FIRST QUESTION is whether it is the barrier's window or the chain's own latency: p50
+      per frame is 267-279 ms against a 60 ms window, so a frame that takes four windows to
+      reach `mtmc` is late by construction and the window is not the variable. If that is it,
+      the fix is upstream of the barrier (the chain's latency) or the barrier has to bucket on
+      arrival rather than capture -- and ADR-022 says why it keys on capture.
+      MEASURE FIRST: the distribution of (arrival - capture) at the mtmc stage, which nothing
+      reports today. Do not touch the window until that histogram exists.
+      IT EXISTS NOW and it settles the question. `mtmc_arrival_lag_us`, both planes, measured
+      at the STAGE because it is the only place holding both stamps on one clock (the capture
+      stamp is wall time and the barrier's own clock is deliberately steady). Two arms at the
+      design load: p50 248.5/246.8 ms, p95 582.9/580.7, p99 785.9/792.9, max ~1.21 s, against
+      a 60 ms window. So a frame reaches the barrier a median of FOUR WINDOWS after it was
+      captured, and that lag is most of the frame's whole 284 ms.
+      AND IT IS THE SPREAD, NOT THE DELAY, that strands a frame: a fleet delayed uniformly by
+      247 ms would bucket together perfectly. The dispersion is p50 247 ms to p99 790 ms, about
+      540 ms, which is nine times the window -- so no window this side of a second closes it,
+      and the sweep already priced 250 ms at 17% of the frames and 29% of p50.
+      WHAT IS LEFT is upstream of the barrier: the chain's latency to reach `mtmc` and its
+      variance. That is `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` and `EXECUTE-BLOCKS-THE-
+      INSTANCE-THREAD` territory, not the barrier's, and this item closes having said which.
+
+- [x] MTMC-INSTANTS-NEED-A-SHARED-MONOTONIC-CLOCK · (a) DONE 11 Sep, (b) DONE 13 Sep. #222 converged the two planes onto the
+      CAPTURE (wall) stamp, because keying instants on different clocks is two sets of global
+      ids for one clip and the sync rule makes that a defect. The risk the old comment argued
+      is real and now has nowhere to hide: NTP can step the wall clock, including backwards,
+      and a stepped frame lands in the WRONG instant rather than merely late. The steady stamp
+      cannot replace it -- it is per process, so a fleet's shards could never share an instant
+      -- so the answer is a clock that is both shared and monotonic.
+      WHAT TO MEASURE FIRST: how far this box's `CLOCK_REALTIME` actually steps under `chrony`
+      (`chronyc tracking` reports the last correction), because a 60 ms window tolerates a
+      slew and not a step. THE SHAPES: (a) refuse a frame whose capture stamp goes backwards
+      past the window and count it, which turns a step into a visible eviction rather than a
+      silent mis-bucket; (b) key on the stamp a shard's ingest writes ONCE per frame and pass
+      it through the RPC, so the group shares one process's monotonic clock; (c) accept the
+      step and rely on the barrier's `late` counter to make it visible -- which is what today
+      does, unlabelled.
+      MEASURED FIRST, as the item asked: this box has NO clock discipline at all -- no chrony,
+      `timedatectl` says `NTP service: inactive` and `System clock synchronized: no`, and the
+      RTC is already ~2 s off system time. So the step cannot be demonstrated here and the
+      choice could not be made from this box's behaviour.
+      (a) IS DONE on both planes: a capture stamp that goes backwards by more than a
+      window, measured against THAT CAMERA's own newest stamp, is refused as `backward` and
+      counted instead of opening an instant in the past that no other camera will ever join.
+      Per camera deliberately: a camera whose clock merely sits behind the group is not a
+      stepped one, and refusing its frames would be a second wrong answer to a fault
+      `silent_cameras` and the `window` reason already report.
+      (b) REMAINS, and it is the fleet's answer rather than a barrier's: the stamp a shard's
+      ingest writes once per frame, carried through the RPC, so a group shares one process's
+      monotonic clock. That belongs with `launch/`'s control plane and needs the proto to carry
+      it; until then (a) makes a step visible on any box rather than silent on all of them.
+
+      (b) DONE 13 Sep, AND THE RPC WAS NOT THE WORK -- the premise above is false, checked line
+      by line. "A fleet's shards could never share an instant with [a steady stamp]" assumes
+      shards DO share one. They cannot: a barrier is an object in ONE process (one non-test
+      construction per plane), `_pin_to_group` keeps every camera of a group on one shard and
+      raises `NoShardAvailableError` rather than splitting it, `runners/fleet.py` refuses to
+      execute an item at all ("frames enter a shard through its own decode element"), and
+      `shard.proto` carries eight control RPCs and no frame. There is no path where two
+      processes' frames meet one barrier, so there was no wire to carry a stamp across.
+      AND THE STAMP WAS ALREADY ON EVERY ITEM: ingest reads BOTH clocks in one expression at
+      decode on both planes. The work was to READ THE OTHER FIELD, which is what was done --
+      `_capture_s` and `stages.cpp` key on `captured_ns` now, with the zero refusal following
+      the field. Recorded as ADR-022, because two places in the tree already cited "the ADR on
+      the capture stamp" and no such ADR existed.
+      KEPT DELIBERATELY: the backward guard, which is unreachable for an ingest-stamped frame
+      and still load-bearing for the DeepStream path (its stamp is the camera's own clock); and
+      the arrival-lag diagnostic, which now names `captured_unix_ns` explicitly rather than
+      taking the key -- with the key monotonic, that pair is the only signal left that a
+      SOURCE's clock and this shard's disagree.
+      WHAT IT BUYS, measured against the real barrier before the change: a 2 s backward step at
+      50 cameras and a 60 ms window cost 40 of 80 instants, and a 5 s step 75 of 79 -- while
+      `backward` read a flat 50 (one per camera) and the damage was counted as `late`, which
+      reads to an operator as "the chain is too slow". The residual scales with `_recent_limit`
+      (~10 s of history at 50 cameras), which is why (a)'s 3-camera tests never reached it.
+      NOT COVERED BY EITHER (a) OR (b), and worth its own line if anyone re-litigates this: a
+      chain with ONE UNROSTERED `mtmc` slot passes load, is pinned by nothing, and gives N
+      shards N identity spaces under one declared group -- `silent_cameras` cannot report it
+      because nothing was announced. `topology/ship_person.yaml` is exactly that chain. It is
+      not this item (N separate barriers, not one shared one, and no clock would fix it).
+
+- [x] CSRC-MTMC-TWO-GROUPS-PER-SHARD · DONE 12 Sep. #222 carried the chain's `group:`/`cameras:` roster onto
+      the plan and announces it to the barrier, so the refusal of a SECOND `mtmc` slot no
+      longer rests on "no chain states which cameras belong to which" -- the chain does. What
+      is missing is the ROUTING: `MtmcStage` hands its camera's rows to the one barrier it was
+      constructed with, and nothing picks a barrier by roster, so two slots would both take
+      every camera the shard sees. The Python plane supports two groups today (the budget is
+      process-wide precisely so two can coexist).
+      THE FIX: `build_dag` builds one stage per `mtmc` slot and each stage takes its roster;
+      a frame whose camera is in no roster is published with a null global id rather than
+      forced into a group (that decision is the interesting half -- the alternative is
+      refusing the frame, and a camera nobody grouped is a configuration fact rather than a
+      fault). Then the refusal becomes support and `plan_stages`'s message goes away.
+      MEASURED WHILE WIRING IT, and worth keeping: with the roster honoured, a chain whose
+      `cameras:` do not match the running fleet makes the barrier wait for cameras that never
+      report (`complete 0, advanced 428`), while a roster matching the fleet closes the most
+      instants on evidence of any configuration measured (`complete 366` of 662).
+      DONE: `MtmcStage` takes its `cameras:` roster and passes over a frame from any other
+      camera -- published with a NULL global id, never submitted, so this group's barrier does
+      not wait on it and its identity space does not hold it. `from_plan` hands the roster
+      down; the blanket refusal in `plan_stages` is gone.
+      THE REFUSAL IS NARROWER NOW, not absent, which is the part worth reading: one camera in
+      TWO rosters is refused (two identity spaces would each give its objects an id and the
+      last stage to run would win, silently), and a second slot that names NO cameras is
+      refused (an empty roster means every camera, which is exactly the old failure). One slot
+      with no roster still means every camera -- that is every chain written before rosters
+      existed, `ship_person_cpu.yaml` among them, and a rule that refused it would be wrong.
+      AND THE OLD REFUSAL HAD NO TEST, which is why nothing went red when it was deleted. The
+      four cases above have them now: two disjoint rosters build (71 checks in
+      `test_plan_stages`, was 65), a shared camera is refused, an unrostered SECOND slot is
+      refused, and one slot with no roster still means every camera.
+      EVIDENCE: the stage ignoring its roster turns `test_mtmc_stage` red on "nor did its
+      barrier, which must not wait on a camera that is not its own" (35 checks, 1 failure, on
+      real GPUs), and allowing one camera in two groups turns `test_plan_stages` red on its
+      own refusal.
+      ROUND 1 OF #258's REVIEW CORRECTED THE CENTRAL DECISION, and it is worth reading because
+      the "DONE" above states the WRONG one. Passing over a frame from any other camera fired
+      whenever the roster was non-empty -- the single-group case too, which is every chain
+      here. `ship_person_cpu.yaml` declares `cam-01..cam-04` and every bench fleet is
+      `cam00..cam11`, so not one frame would have been submitted: no instant, a null
+      `global_id` on every object, and not one counter moving to say so. The measurement three
+      lines above (`complete 0, advanced 428`) is that same mismatch, and it is what the
+      re-run should have caught.
+      A ROSTER IS THE FLEET'S PLACEMENT HINT: `runners/fleet.py::_camera_groups` reads it to
+      decide which SHARD a camera goes to, and the element associates every camera it is handed
+      (`elements/mtmc.py::camera_added` warns and carries on). So the filter applies only when
+      the plan built more than one group, and when it fires the pass-over is counted as
+      `not_mine` with the camera NAMED -- `silent_cameras()` answers the opposite question and
+      named the four declared cameras rather than the twelve dropped.
+      MEASURED, which is what the review asked for and what would have caught this: the same
+      chain, 12 cameras x 20 fps over GStreamer RTSP, 4 GPUs, 70 s, one variable.
+        with the fix:  1 418 instants (9.76 cameras each, largest 12), 53 712 of 59 942
+                       observations admitted, `mtmc_identities 19 102`, no `not_mine` at all
+        as pushed:     `mtmc_frames not_mine 14107` -- EVERY frame -- `instant_cameras 0
+                       largest 0 over 0`, observations 0, `mtmc_identities 0 0`
+      Both arms accepted ~14 000 frames with `queue_rejected 0` and `frames_dropped 0`, so the
+      difference is the roster and nothing else. Note the `not_mine` counter is itself part of
+      this fix: as pushed there was no counter, so the second arm would have read as a healthy
+      run that simply issued no ids -- which is the shape the review objected to.
+      AND `silent_cameras` NAMES THE MISMATCH in both arms (`cam-01..cam-04` declared against
+      `cam00..cam11` running), which is the diagnostic that survives and the reason the chain's
+      own roster should be fixed or dropped -- a separate question from this PR.
+
+- [x] MTMC-PYTHON-ROUTES-BY-SHARD-ONLY · the C++ plane routes two groups on one shard and the
+      Python plane cannot. Opened by #258, which landed the C++ half: with more than one `mtmc`
+      slot `MtmcStage` routes by roster, while `MtmcElement._do_process` has no roster test at
+      all and `camera_added` warns-and-associates. That is right for Python TODAY because its
+      fleet puts each group on its own shard (`_camera_groups` places them), so no Python
+      process ever holds two groups -- but the `inprocess` runner does not shard, and two mtmc
+      slots there would have both elements take every camera and issue two contradictory sets
+      of ids, which is the bug the C++ refusal used to prevent.
+      Registered as `mtmc_group_routing` in `benchmarks/parity/known.py`, reproduced by
+      `test_python_mtmc_has_no_roster_routing`. THE FIX is one of two, and the choice is the
+      item: give `MtmcElement` the same route-when-more-than-one-group test, or refuse two
+      mtmc slots in the `inprocess` runner and say the fleet is the only way to have two.
+      DONE 12 Sep, #263, on the FIRST -- the planes converge rather than one documenting what
+      the other cannot do. Refusing would have left a permanent divergence and this register
+      entry open forever, which is what V88 is against; converging closes both.
+      THE HOOK ALREADY EXISTED, which is what made the choice cheap: `ElementContext` carries
+      `waiter_budget` precisely because "two `mtmc` slots would each admit `workers - 1` and
+      park every worker between them" -- a process-wide fact the runner resolves and hands
+      down. `camera_groups` lands beside it for the same reason, counted through
+      `Element.camera_group()` with NO KIND TEST, which is `_camera_groups`' own argument one
+      process down: the element declares, the runner collects.
+      SO THE ELEMENT ROUTES WHEN `camera_groups > 1` and not otherwise -- the same guard as
+      the other plane's `routes_`, and for the same reason. With one group a roster stays the
+      FLEET's placement hint and `camera_added` warns-and-associates, which is what every
+      chain here relies on; `ship_person_cpu.yaml` declares `cam-01..04` against a
+      `cam00..11` fleet, and filtering on that is what dropped every frame on the C++ side
+      before #258's review caught it.
+      COUNTED, not silent: `MISSED_NOT_MINE` ("not_mine") on both planes, because #258's
+      review showed a pass-over with no counter reads as a healthy run that simply issued no
+      ids.
+      EVIDENCE: four cases in `TestTwoGroupsInOneProcessRouteByRoster`, probed BOTH ways --
+      never routing turns 2 red, routing for one group turns the compatibility case red. The
+      `mtmc_group_routing` register entry and its reproducing case are DELETED rather than
+      narrowed, which is what the register asks for when a divergence is closed by converging.
+      ROUND 1 FOUND THREE DEFECTS, all in the configuration this PR newly declares supported,
+      and all invisible to the first four tests because every one opened a SINGLE element and
+      never built a chain or drove the lifecycle:
+        (1) the routed-away camera was still ANNOUNCED, so it sat in the barrier's live set and
+            was never submitted -- completeness is `live <= reported`, so not one instant could
+            close `complete` for the process's life, every one paid the full window holding a
+            waiter permit, and `_note_silent_roster` then reported the OTHER group's cameras as
+            this group's configuration fault. `camera_added` routes on the same predicate now.
+        (2) the count was of declared group NAMES, and `camera_group()` answers `None` for a
+            slot that named no `cameras:` -- so one rostered slot beside one bare one counted
+            1, neither element routed, and both claimed every camera. The count comes from the
+            shared `camera_groups` (hoisted out of `fleet.py` into `topology/chain.py`, where
+            it is pure and both runners can reach it), and a chain with two `mtmc` slots where
+            either declares no roster is REFUSED at load -- the fleet cannot place that chain
+            either, and the other plane already refuses it.
+        (3) the pass-over marked the KIND, so this slot marking a frame it does not own said
+            the mtmc stage was missing on the very event the other slot filled with ids --
+            `is_partial()` true on every frame of a two-group deployment. The not-mine path
+            returns the item UNCHANGED: this process did answer the frame, from another slot.
+      A HEALTHY TWO-GROUP DEPLOYMENT TICKS `not_mine` AT FULL FRAME RATE per non-owning slot,
+      on both planes -- `frames_missing` rising at 1000/s with nothing wrong. The counter is
+      the C++ one's twin and stays; it is a sentence the runbook owes the first two-group
+      deployment, not a defect.
+      A CAMERA IN NO ROSTER AT ALL is the residue of (3), and it has its own line below
+      (`MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED`) rather than prose inside a closed item.
+
+- [x] MTMC-A-TRACKLESS-FRAME-IS-MARKED-BY-EVERY-SLOT · `_do_process` tests `tracks is None`
+      before it tests ownership, so in a two-slot chain a frame the tracker never answered for
+      gets `"mtmc"` appended by BOTH slots and `missing_stages` reads `("mtmc", "mtmc")`.
+      Harmless -- `is_partial()` is a membership test -- but it is noise on a diagnostic field,
+      and hoisting the ownership test above the `tracks` lookup would also spare a non-owning
+      slot the lookup on every foreign frame. Found by #263's approving review.
+      DONE: hoisted, to the order `stages.cpp::do_run` already had. THE NOISE WAS THE SMALL
+      HALF -- asking second also made a foreign frame with no tracks `no_tracks` here and
+      `not_mine` there, which is a plain sync-rule break, and let a non-owning slot's
+      `ValidationError` on `meta['tracks']` fail the frame for the slot that DOES own the
+      camera (the runner fails an item's future on any exception).
+      EVIDENCE: `test_the_ownership_test_comes_before_the_frame_is_read` and
+      `test_a_foreign_frames_bad_tracks_do_not_fail_the_slot_that_owns_it`; both fail against
+      the element exactly as main had it.
+
+- [x] MTMC-AN-UNROSTERED-SLOT-IN-A-TWO-GROUP-PROCESS-IS-SILENT · the Python routing test is
+      `self._routes and self._roster_set and camera_id not in self._roster_set`; the C++ twin
+      is `routes_ && roster_.count(...) == 0`, with no roster-is-empty conjunct. Through
+      `Topology.from_spec` the difference is unreachable (an unrostered second slot is refused
+      at load), but a `Topology` assembled another way plus `camera_groups=2` has the Python
+      slot silently claim every camera where the C++ one claims none. An assert would say it
+      out loud. Found by #263's approving review.
+      DONE: BOTH, which is better than either. The conjunct is gone, so the two per-frame
+      tests now read the same on both planes; and each plane refuses the state the conjunct
+      was hiding -- `_do_open` and the `MtmcStage` constructor both throw when a slot must
+      route and names no cameras. A loud refusal beats a term that quietly makes the planes
+      disagree.
+      EVIDENCE: `test_a_slot_that_must_route_and_names_no_cameras_is_refused_at_open` with
+      `test_one_group_may_still_name_no_cameras` beside it, and
+      `a_routing_slot_that_names_no_cameras_is_refused` / `a_lone_slot_may_name_no_cameras`
+      in `test_mtmc_stage.cpp`.
+
+- [x] MTMC-THE-ROUTING-DIAGNOSTIC-IS-ACTIONABLE · two notes from #266's approving review,
+      both about a thing being true but unreachable.
+      (1) `cameras_not_mine` had no operational consumer on this plane -- the C++ bench prints
+      it per slot while here only a test could reach it, and the metric's own help text told an
+      operator to read it. It is named in the silent-roster warning now, which is the moment it
+      is worth reading: `silent_cameras` lists what the roster PROMISED, so on a routing mistake
+      it points away from the cause and the routed-away set points at it. Only when non-empty,
+      so a one-group chain sees no new clause.
+      (2) The unrostered-slot refusal sat AFTER `load_mtmc()`, so a pure chain-file question
+      could only be tested where the submodule is checked out -- which is not what CI has. It
+      is asked before the bridge loads, and its two cases moved out of the `@needs_shipvision`
+      class: on main they SKIP with no submodule, on this branch they PASS.
+
+- [x] MTMC-THE-NTP-PROPERTY-IS-PYTHON-ONLY · DONE 14 Sep. ADR-022's property -- a wall-clock
+      step moves no instant, because the key is monotonic -- was asserted on the Python plane
+      only (`TestAnNtpStepDoesNotMoveAnInstant`). Found by #272's review; the twin is now
+      `a_wall_clock_step_moves_no_instant` + `the_lag_diagnostic_still_sees_the_step` in
+      `csrc/tests/test_mtmc_stage.cpp`, so this is under the sync rule rather than under one
+      plane's word for it. 52 checks, 0 failures, in the container.
+      NOT IN `test_mtmc_barrier.cpp`, which is where this line guessed it would go, and the
+      correction is the useful part: `InstantBarrier::submit` takes ONE stamp, so by the time
+      the barrier sees a frame the choice between the clocks is already made. A twin there
+      could only assert that a monotonic sequence is not backwards -- true of any sequence,
+      and a check that cannot fail. `MtmcStage::do_run` is what picks (`capture_s` from
+      `captured_ns`, `lag_ns` from `captured_unix_ns`), so the stage is the only place the
+      property is expressible. Both halves probed by flipping the stage to the wall key: the
+      first check fails alone, and reading the lag off the key fails four.
+
+- [x] MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED · DONE 14 Sep, all three halves: the runner names
+      it (#274), the C++ plane names it (#276), and the event's promise is corrected here.
+      With two groups, a camera NEITHER roster names
+      is returned unchanged by every slot, so its event carries no `global_ids`, no marker
+      saying why, and `is_partial()` false. Reachable: add a camera by API that the chain
+      file never listed. It IS counted -- twice, as `not_mine`, once per slot -- so a run says
+      something is wrong without saying which camera. Naming it on the event needs a
+      slot-scoped marker, and `missing_stages` is a tuple of KINDS: the other slot fills that
+      same event with ids, so a kind marker would read as "mtmc did not run" on a frame where
+      it did. Found by #263's review; recorded rather than solved because the marker is a
+      schema question and the PR was a routing one.
+      NAMED NOW, 13 Sep, AT THE RUNNER -- which is the only layer that can. A slot sees a
+      camera outside its own roster and cannot tell "another group's" (every frame of every
+      foreign camera on a healthy two-group chain) from "nobody's"; the runner holds every
+      roster. `InprocessRunner._warn_if_no_group_owns` warns once per camera, naming it and
+      the slots that could have claimed it. NOT a refusal: a roster is written once and
+      cameras arrive by API, so one unlisted camera must not fail a fleet that is correct.
+      THE BARRIER'S `cameras_not_mine` DID NOT COVER THIS, and #266/#267 believed it did.
+      Its one reader is the silent-roster warning, gated on `silent_cameras` being non-empty
+      -- a DIFFERENT fault -- and an orphan can never be silent: `camera_added` returns before
+      announcing it and `_do_process` turns it away before `submit`, so it enters neither
+      `_announced` nor `_seen`. Measured: `cameras_not_mine ['cam-orphan']`,
+      `silent_cameras []`, no warning, even with the 100-window latch forced open.
+      THE EVENT HALF IS SETTLED 14 Sep, BY CORRECTING THE PROMISE rather than by adding a
+      marker, and the measured table below is the reason. Absence of `global_id_group` has
+      THREE causes and only one is a frame-level fact; the schema comment claimed it was
+      always the fact `missing_stages` carries, which is false for two of the three rows.
+      `as_dict` now says what absence does and does not mean, and the convergence is
+      asserted AT THE CHAIN LEVEL, which is the only place the two deployment rows are two
+      different things: `test_chain_to_events.py::TestTheTwoSilencesAreIndistinguishable`
+      runs a chain with no `mtmc` element beside a two-group chain with an orphan camera and
+      holds their key sets and their four cause-bearing fields equal. NOT RUN BY CI: it is
+      `@needs_shipvision`, because the orphan row needs the real roster turn-away in
+      `ShipvisionMtmc._do_process` rather than a double, and CI does not check the submodule
+      out -- so the convergence is local evidence only. The no-tier row alone is pinned
+      offline (`TestAChainWithNoTierPublishesTheSilentShape`). #277's review caught
+      the first version asserting it at the SCHEMA layer, where one factory builds both rows
+      and the comparison is `f(x) == f(x)` -- green for any deterministic serialiser, and
+      blind to the exact regression it advertised. Probed both ways now: a naming `reason`
+      on one configuration reddens it, and so does one of them growing `missing_stages`.
+      WHY NOT A MARKER: the two indistinguishable rows are DEPLOYMENT facts, constant for
+      the life of the process, and a per-frame key is the wrong shape for a fact that cannot
+      change while the process lives. They are said once at start-up instead, on both planes
+      -- `InprocessRunner._warn_if_no_group_owns` (#274) and `cameras_no_group_owns` in
+      `cli/bench.cpp` (#276) -- which is what those two PRs were for.
+      THE TABLE, which is what all of that is about:
+        cause                                  partial  missing_stages     global_id_group
+        camera no roster names (two groups)    false    []                 ABSENT
+        chain has NO mtmc element at all       false    []                 ABSENT
+        owning slot, tracker gap               true     ["track","mtmc"]   ABSENT
+        owning slot, barrier gap (late/failed) true     ["mtmc"]           ABSENT
+        owning slot, zero or gated tracks      false    []                 present
+      The first two rows are BYTE-IDENTICAL, and `topology/detect_only.yaml` ships with no
+      mtmc, so both are real. A consumer cannot tell "no group owns this camera" from "this
+      deployment has no cross-camera tier" -- and that is now DOCUMENTED as the decision it
+      is, rather than being a sentence in the schema that was simply wrong.
+      AND THE C++ PLANE NOW SAYS IT TOO (V88/V89), 14 Sep. `plan_stages.cpp` already refused
+      the two plan-time roster faults -- one camera in two rosters, a second slot naming none
+      -- and an orphan is neither: it is a fleet-vs-roster mismatch. THE PLANES DIFFER IN
+      SHAPE HERE FOR A STATED REASON: Python warns from the runner because cameras arrive by
+      API at run time, while this plane builds its whole fleet up front in `cli/bench.cpp`
+      (there is no run-time camera API), so the same fact is knowable BEFORE the run. The
+      question is `cameras_no_group_owns(planned, cameras)` in the CUDA-free reader, which is
+      what lets the offline tier ask it with no fleet; `bench.cpp` does the reporting, in the
+      same words. NOT a refusal on either plane. Same floor too -- two slots -- because below
+      that a roster is a placement hint and the slot associates an unlisted camera anyway.
+      The frame path itself is NOT divergent, as below.
+
+      IT IS NOT A CROSS-PLANE DIVERGENCE, and an earlier version of this line said it was.
+      The C++ not-mine path attaches an EMPTY `ObjectBatch` under the slot's own name
+      (`stages.cpp`) where Python returns the item untouched, but that reaches no reader:
+      `records.cpp` takes the SAME `continue` for an empty batch as for an absent one, so both
+      planes publish every `*_global_id_vec` entry null, `missing_stages` `[]`, `partial`
+      false and NO `global_id_group` key. The attach buys an in-process name-exists join that
+      no stage and no consumer reads. `benchmarks/parity/known.py` needs no entry -- an entry
+      whose divergence does not exist is the rot that file warns about. What IS missing is a
+      slot-scoped marker on the event, which is this item.
+
+- [x] MTMC-PYTHON-HAS-NO-NOT-MINE-DIAGNOSTIC · the C++ barrier remembers WHICH cameras a group
+      passed over (`cameras_not_mine()`, printed per slot by `cli/bench.cpp`). The Python
+      barrier has the counter and not the names, so a routing mistake there is a number with
+      nothing to point at -- and `silent_cameras()` answers the opposite question, naming the
+      declared roster rather than what was dropped. Found by #263's review; out of scope there
+      because the counter is what the PR needed and the names are a second seam.
+      DONE: `InstantBarrier.note_not_mine` and `.cameras_not_mine`, `not_mine_`'s twin down to
+      the details that matter -- both halves under ONE lock because they are one fact, and
+      `drop_camera` deliberately does NOT erase it, because what happened happened.
+      EVIDENCE: `TestTheCamerasThisGroupPassedOver` (five cases, including the one that tells
+      it apart from `silent_cameras` on one barrier), and the element test asserts both
+      properties on the same run -- `cameras_not_mine == {cam-south}` while
+      `silent_cameras == {cam-north}`, which is the confusion the item is about.
+
+- [x] MTMC-TWO-GROUPS-SHARE-AN-ID-SPACE-DOWNSTREAM · group north's global id 7 and group
+      south's id 7 are the same number and a reader cannot tell them apart. Each group gets its
+      own `IdentityMap` with its own `counter_++` (`mtmc/identity.h`), which is correct -- two
+      groups are two identity spaces -- but `ObjectRecord` carries no group or slot, so the
+      event stream flattens them. Pre-existing on both planes; #258 is what makes it reachable,
+      since before it a second group was refused outright. Found by #258's review.
+      DONE: the FIELD, and on `PerceptionEvent` rather than `ObjectRecord`. Schema v5 adds
+      `global_id_group`, the `mtmc` SLOT that answered. NOT its `group:`, which is a PLACEMENT
+      label two slots may legally share (#263's `test_two_slots_may_share_one_group_name`), so
+      naming it would give two identity spaces one name -- the confusion this item is about.
+      PER EVENT and not per object because the wire format is per-class vectors and a frame's
+      camera is in exactly one group: one string, not four more arrays.
+      The other candidate -- ids minted from a per-group base -- was rejected for the reason
+      the item states: it spends id space and HIDES the group, so a reader still cannot name
+      the space it is holding.
+      WRITTEN ONLY WHEN A SLOT ANSWERED FOR THAT FRAME, unlike the v4 arrays, which are always
+      present: an array is indexed by row and a missing one breaks the join, while this is a
+      scalar with nothing to stay aligned with. NOT a per-deployment saving -- a one-group
+      chain writes it on every frame its slot associates -- so absence is the frame-level fact
+      `missing_stages` carries. The "every chain here has one group, so the key costs bytes
+      for nothing" reasoning was wrong and is recorded here because it was written into four
+      files before a review round caught it.
+      THAT LAST SENTENCE IS ITSELF WRONG and was corrected 14 Sep -- see
+      `MTMC-A-CAMERA-IN-NO-ROSTER-IS-UNNAMED`. Absence has THREE causes and only the missed
+      instant is a fact `missing_stages` carries; a chain with no `mtmc` slot and a camera no
+      roster names are byte-identical. Left in place because this is a log of what was decided
+      when, with the pointer so the next reader does not re-derive it.
+      EVIDENCE: `mixed_frame.scn` names a slot and the other three event goldens do not, so
+      the byte gate compares BOTH readings -- with the directive ignored on the C++ side it
+      reports `differs at column 854`. The end-to-end is
+      `test_each_cameras_events_name_the_slot_that_minted_their_ids`: two real slots, disjoint
+      rosters, BOTH declaring `group: quay`, and each camera's four events naming its own slot
+      -- a field carrying the group would name both spaces `quay` and fail there.
+      Offline suite 4409 passed / 9 skipped, and 4168 passed / 236 skipped with `shipvision`
+      unfindable; 30 offline C++ binaries green; `test_mtmc_stage` 46 checks and
+      `test_event_records` 24 checks in the container. Both planes probed red: dropping
+      `state.note_global_id_group` fails the stage check; filing `_group` instead of the slot
+      fails the element test, the end-to-end and the real-tier chain test.
+
+- [x] CSRC-MTMC-GATE-OPTIONS · THE GATE'S THRESHOLDS ARE NOT SETTABLE FROM THE CHAIN, and
+      MEASURED 11 Sep that is what makes the chain issue zero global ids: at 12 cameras x 20 fps
+      with zero frames dropped and the barrier closing instants on evidence
+      (`complete 282 advanced 184 window 522`), the run reports
+      `mtmc_observations offered 3768 admitted 0` and `mtmc_identities 0 0`. Lower the floor and
+      the SAME run answers `admitted 4046` and `identities 20 52` -- 20 global ids across 52
+      tracks -- so the chain is proven end to end and the gate is what closed it.
+      WHY: `ObservationGate`'s defaults are the reference's production values --
+      `min_height_fraction = 1/9`, which is 120 px of a 1080-tall frame and
+      "roughly the smallest crop its re-ID model was trained to handle" -- and the benchmark's
+      2K crowd frames have people below that. The mtmc node's `params:` carry `group`,
+      `cameras`, `sync_window_ms` and `max_instants`; `min_hits` and `min_height_fraction` are
+      not on the plan at all, so neither a site nor a benchmark can say otherwise.
+      THE FIX is the sibling of `CSRC-TRACKER-OPTIONS`: carry them on `MtmcStageSpec` the way
+      `sync_window_ms` now is, refuse the out-of-range values the way the reference does
+      (`min_hits >= 1`, `min_height_fraction` in [0, 1)), and thread them into
+      `create_cluster_tracker`. The one design question worth stating: a tracker is cached per
+      (impl, slot), so two chains asking for different options on one slot must be REFUSED
+      rather than silently sharing the first one's gate.
+      DONE 11 Sep, #225: both numbers on the plan's `mtmc` node and in `MtmcStageSpec::gate`,
+      one set of bounds per plane, and `create_cluster_tracker(impl, slot, options)` refuses a
+      second set on one slot. Eight red probes; `test_plan_parity` 127, `test_plan_stages` 65,
+      `test_mtmc_cluster` 20, `test_tracking_cluster_parity` 11, offline suite 4246 passed. The
+      lane check is the knob's own price: a 60 px subject is never admitted at the reference's
+      floor and is identified on the FIRST instant at the chain's. The MEASUREMENT with the
+      floor set from the chain is `BENCH-FOOTAGE-IS-BELOW-THE-MTMC-GATE`'s option (c).
+
+- [x] BENCH-FOOTAGE-IS-BELOW-THE-MTMC-GATE · REFUTED 11 Sep. `benchmarks/baseline/data/{person_2K,ship_2K}` is
+      what every measurement uses, and its subjects are shorter than the gate's 120 px floor at
+      1080p -- so a bench run cannot exercise cross-camera association at the reference's
+      defaults, whatever else it proves (measured, see `CSRC-MTMC-GATE-OPTIONS`). THE OPTIONS:
+      (a) footage whose people clear a ninth of the frame -- the `person_4K`/`ship_4K` sets are
+      already in the submodule and worth measuring first, since a 4K frame's ninth is 2 160/9
+      = 240 px and the subjects may scale with it; (b) crop the existing frames so the subjects
+      are proportionally taller, which changes what the detector sees and is therefore a
+      different measurement; (c) set the gate's floor from the chain and say in the report what
+      it was. (c) is honest and cheap; (a) is the one that measures the deployment.
+      REFUTED 11 Sep, with the knob #225 added: the premise is false. Nine arms at 12 cameras x
+      20 fps x 40 s (GPUs 0/2/5/6, 24 workers, `--source nvdec`), one variable each. At
+      `min_hits 1` the gate admits EXACTLY what it is offered -- 3 680 of 3 680, and 3 317 of
+      3 317 -- with the height floor at the reference's own 1/9, so every box already clears
+      120 px. Lowering ONLY the floor (0.02, `min_hits` left at 3) admits 0. The first reading
+      lowered both at once and blamed the footage. Options (a) and (b) are moot: (a) is
+      additionally impossible with this data, because `person_4K` is `person_2K`'s own scenes
+      at 2x (mean |diff| 1.8/255 after downscaling), so the FRACTION a subject occupies is
+      identical. What actually closes the gate is the AGE test, filed as
+      `MTMC-MIN-HITS-CANNOT-BE-MET-BY-A-FREE-RUNNING-FLEET`; `benchmarks/RESULTS.md` has the
+      table.
+
+- [x] MTMC-MIN-HITS-CANNOT-BE-MET-BY-A-FREE-RUNNING-FLEET · REFUTED 11 Sep. MEASURED: at the reference's
+      `min_hits = 3` the gate admits NOTHING on a 12-camera run; at 2 it admits ~25% (969/3 739
+      and 847/3 330 in two independent arms); at 1 it admits 100%. It is not the window (200 ms
+      still admits 0, with the closes moved from `window` to `advanced`) and not the roster
+      (25.4% against 25.9% at `min_hits 2`, with and without a roster that matches the fleet).
+      WHY: `min_hits` counts CONSECUTIVE qualifying instants and `ObservationGate` REPLACES its
+      hit map each instant -- deliberately, so that "consecutive" means consecutive -- while an
+      instant here is a wall-clock bucket that one camera lands in intermittently: 3 480
+      observations over 905 instants is 3.8 per instant across 12 cameras, so a given
+      (camera, track) is present in under a tenth of them. The reference's default assumes
+      instants that hold every camera's current frame. THE QUESTION, and it is a semantics one:
+      should hits be counted over the GROUP's instants (today) or over the instants that
+      CONTAINED that camera? Read `shipvision/mtmc/gating.py` and its tests before changing the
+      port -- a divergence here is a parity break, not a fix.
+      REFUTED the same day, and the semantics need no change: `min_hits = 3` admits 61.9% of
+      42 063 observations on footage a tracker can follow (`benchmarks/harness/pan.py`), at the
+      same 12 x 20 x 40 s, the same window and the same defaults. The fleet was never the
+      problem; the INPUT was ten unrelated photographs replayed at 20 fps, so no track survived
+      one frame, let alone three consecutive instants. Nothing in the port changes.
+
+- [x] MTMC-ROSTER-NAMES-NO-CAMERA-A-RUN-HAS · CLOSED 12 Sep with ADR-021, which answers the
+      question this item was really asking. `topology/ship_person_cpu.yaml` declares
+      `cam-01 ... cam-04` and every bench fleet is `cam00 ...`, so the barrier waits for four
+      cameras that never connect -- and that is now a configuration fault BOTH planes report
+      (`mtmc_cameras_silent`, and the element's warning) rather than a divergence that hid it.
+      The chain file is the deployment's, so it keeps its roster: a bench run that wants
+      complete instants names its own fleet, which is what the measured arms here did.
+      MEASURED at both scales: at twelve cameras a matching roster is worth 421 complete
+      instants of 905 against zero; at fifty, `complete` is unreachable with either roster, so
+      the mismatch costs nothing at the design load. Numbers on `benchmarks/RESULTS.md`.
+
+- [x] PYTHON-COLLECTOR-HAS-NO-UNCONDITIONAL-STAGE · DONE 11 Sep. FOUND by #234's review, and it was the hole
+      that PR's own reasoning closes on the other plane. `pipeline/runner.py:489` calls
+      `collector.open(state)` with no `expected` at all, and `reassembly/collector.py`'s
+      `_complete` is `self._expected.issubset(self._delivered)` -- trivially TRUE on an empty
+      expected set. So a frame that dies between `open` and the graph's first `planned()` is
+      reported COMPLETE on the Python plane, where the C++ plane reports it Incomplete because
+      it keeps `detect` on the list for exactly this reason.
+      NARROW BUT REAL: the window is one frame's worth of work before the first stage is
+      planned, and what it costs is the one thing this pipeline was rebuilt to remove -- a lost
+      frame reported as a good one. THE FIX is the C++ shape: open with the one stage that
+      always runs, which on that plane is whatever the chain's first element is (the runner
+      knows the node order, so it can name it rather than hard-code `detect`).
+      NOT a V88 divergence to settle by copying: the C++ side is right and the Python side has
+      the hole, so this is a port of a decision rather than a choice between two.
+      DONE: `PipelineGraph.unconditional_stage` names the entry stage -- the one that consumes
+      the frame itself, so it is runnable for every frame there is -- and `PipelineRunner` opens
+      the collector with it. It is a PROPERTY rather than a literal for the reason #234's
+      review gave about the other plane: a stage is named for its slot, and the runner already
+      knows the order. Three tests: the collector reports a frame with an EMPTY expected set as
+      Complete (the hole, pinned so the runner's argument cannot be deleted as redundant), the
+      same frame with one expected stage as Incomplete naming it, and the runner opening with
+      the graph's own entry stage. A probe that restores `open(state)` turns the last one red.
+
+- [x] MTMC-THE-TWO-PLANES-DISAGREE-ABOUT-THE-ROSTER · DECIDED AND CLOSED 12 Sep by ADR-021:
+      the declared roster IS the group, on both planes. `ShipvisionMtmc.open()` announces it
+      (`_announce_roster`), which is what `graph/from_plan.cpp` has done since #222 and what
+      its comment already claimed this element did. The comment now says what is true.
+      WHY (a) AND NOT (b): a group is an atomic unit of placement, so its membership is
+      configuration rather than observation; ids that change as cameras join are worse than ids
+      that are late; and the fault (b) avoids is no longer silent -- `silent_cameras` names a
+      declared camera that never sent, on both planes (#233).
+      MEASURED COST, and it is a small-fleet one: a camera that never connects makes `complete`
+      unreachable, so that group's instants pay their full window -- at twelve cameras, not one
+      complete instant in six runs against 421 of 905 with a matching roster. At FIFTY cameras
+      `complete` is unreachable either way (no run closed one with either roster), so the
+      decision costs nothing at the design load and the diagnostic carries it below that.
+      WHAT IT DID NOT BUY: the parity harness has no barrier scenario family -- its families are
+      cluster, identity, gate, masks, records, queues and plans -- so the property is carried by
+      barrier unit tests on both planes instead. A barrier family is worth having the day a
+      second behaviour needs it; one test is not a family.
+
+- [x] MTMC-OFFERS-A-THIRD-OF-A-FRAMES-ROWS · ANSWERED 11 Sep. MEASURED: 3 480 observations from 9 538
+      frames is 0.36 per frame, while the same run's embedders processed 77 777 person crops
+      and 13 124 ship crops -- about 9.5 embedded rows per frame. `MtmcStage::do_run` builds one
+      observation per TRACK row that also has an embedding, so the rows go missing at the track
+      batch, and nothing measures that: `track_frames_untracked` counts FRAMES with no ids at
+      all, and there is no counter for tracked ROWS. Suspected: the associator confirms a track
+      after N frames and the replayed stream is a 10-image loop, so few rows ever carry an id --
+      52 distinct tracks in a 40 s, 12-camera run. Count tracked rows first; the number decides
+      whether this is a tracker configuration or a scatter defect.
+      ANSWERED: neither. A row carries an id only once the tracker has CONFIRMED it, and the
+      fixture was ten unrelated photographs at 20 fps -- a scene change every 50 ms, so
+      bytetrack confirmed almost nothing. On the pan fixture the same graph offers **4.42
+      observations per frame** (42 063 in 9 517 frames) against 0.36, with no code change. The
+      counter for tracked ROWS is still worth having, but it would have measured the input.
+
+- [x] MTMC-REAL-WORK-COSTS-A-SIXTH-OF-THE-EVENTS · REFUTED 11 Sep -- IT WAS NOT mtmc AND NOT THE WINDOW. MEASURED on the pan fixture, which is
+      the first run where `mtmc` does real per-instant work: **1 483 of 9 520 events incomplete
+      (15.6%)**, against ZERO on the old fixture at the same reassembly window, same cameras,
+      same rate, same workers. `reassembly_us_max` 303 ms. Nothing is dropped upstream
+      (`frames_dropped 0`, `queue_rejected 0`), so this is the collector's window against a
+      pipeline that now includes a barrier wait and a clusterer. THE WINDOW HAS NOT BEEN
+      RE-CHOSEN since either landed (`pipeline.reassembly`, `core/settings/`), and every
+      latency number on the page was measured with the gate admitting nothing. Sweep the window
+      against completeness on the pan fixture before changing the default.
+      REFUTED the same day, and no sweep was needed: `collector_timeouts 0` already said the
+      window was not it, so the first step was a counter for WHICH stage never answered
+      (`events_missing_stage`, #234). The answer was `crop`, for 1 123 of 1 123 incomplete
+      events. `cli/bench.cpp` opened every frame expecting `{"detect", "crop"}`, and
+      `Dag::runnable` requires every `needs()` input NON-EMPTY -- so a frame the detector found
+      nothing in never makes `crop` runnable and was sealed Incomplete for a stage that had
+      nothing to do. Nothing was lost in any of them. With `crop` off that list the SAME run
+      answers `events_complete 7118`, `events_incomplete 0`. The Python plane never had this:
+      `pipeline/runner.py` calls `collector.open(state)` with no expected set at all and lets
+      `planned()` widen it, which is what the C++ side does now.
+
+- [x] BENCH-DEFAULT-FIXTURE-IS-A-SLIDESHOW · DECIDED AND DONE 11 Sep. `scripts/rtsp_serve.py`'s default data is
+      `person_2K`, ten unrelated photographs, and every number on `benchmarks/RESULTS.md` was
+      measured on it. It is a fine detection and throughput fixture and it exercises NO
+      tracking and NO cross-camera identity, which is what took three items and two days to
+      see. THE DECISION: make the pan fixture the default (`SHIPINFER_RTSP_PERSON_DATA` selects
+      it today) and re-base the page, or keep both and say per number which was used. What
+      argues for switching is that the deployment tracks; what argues against is that every
+      historical figure becomes incomparable in one commit. RECOMMENDATION: keep both, make the
+      pan the default for any run that includes `track` or `mtmc`, and mark the page's rows.
+      DONE that way (#235): `run_cpp_bench.sh` reads the plan it has just written and, when it
+      holds a `track` or `mtmc` node and no `SHIPINFER_RTSP_*_DATA` is set, generates the pan
+      fixture from the 4K sources if it is not there yet and serves that instead. So the
+      fixture follows the CHAIN rather than a flag nobody sets: detection-only numbers stay
+      comparable with their own history, and a chain whose point is identity stops being
+      measured on input that cannot have any. MEASURED: the stock chain with nothing set now
+      generates both fixtures and answers `mtmc_identities 4 14` in a 15 s run, where the
+      photographs answered 0. An explicit fixture always wins, which is what makes the
+      two-fixture comparison on one chain possible at all.
+
+- [x] MTMC-GATE-COMMITS-BEFORE-THE-GRAM-CAN-THROW · NOT A PORT DEFECT, pinned 11 Sep. `ShipvisionCluster::ids()` is not atomic on
+      refusal while the half it wraps promises it is: `identity.h` says "EVERY EMBEDDING IS
+      CHECKED BEFORE ANYTHING IS MUTATED, so a refusal leaves the instant unapplied and the
+      caller may retry it", but `gate_.filter()` has already done `hits_ = std::move(hits)`
+      before `gram_of` or `assign` can throw. A caller that takes the assigner at its word and
+      retries advances every track's consecutive run TWICE, so `min_hits = 3` is satisfied
+      after two real instants -- the gate loosened by one, silently. Named by #221's review as
+      a non-blocker.
+      THE FIX is two-phase: `filter` answers the admitted rows AND the hit-map delta, and the
+      caller commits it after the assign succeeds -- which also makes the gate's own contract
+      match the identity map's, so a reader of either finds the same promise. Cheap; it needs
+      one API change and a test that retries a refused instant and asserts the runs did not
+      double-advance.
+      MEASURED 11 Sep, and it changes who owns the fix: THE REFERENCE DOES THE SAME.
+      `shipvision/mtmc/gating.py::filter` assigns `self._hits = hits` and `MTMC.track` then
+      runs the gram, the clusterer and the assigner, any of which can raise. Run against the
+      submodule: `instant 1 hits=1 admitted=0`, `instant 2 hits=2 admitted=0`,
+      `RETRY of instant 2 hits=3 admitted=1`. So a two-phase `filter` in the port ALONE would
+      be a parity break -- the Python plane calls the reference directly -- and the fix belongs
+      upstream in shipvision, where `filter` would answer the delta and `track` commit it.
+      PINNED INSTEAD, both planes: `csrc/tests/test_mtmc_gate.cpp` asserts a re-submitted
+      instant advances the run, and `tests/pipeline/test_gate_parity.py` asserts the reference
+      still does, so the day upstream fixes it this repository is told rather than left to
+      discover it. No caller retries today: the stage catches the refusal and publishes the
+      frame unidentified.
+
+- [x] MTMC-GRAM-WANTS-A-REAL-GEMM · MEASURED 11 Sep: 14.5 OBSERVATIONS PER INSTANT, not 750, so neither way out is needed yet. `shipvision_cluster.cpp::gram_of` is a scalar triple loop,
+      and `matchers/appearance/matcher.h` names exactly this code as the thing not to write:
+      "`features @ features.T` is what BLAS is for -- multithreaded, blocked for the cache --
+      and a triple loop in this file would be slower than the thing it replaced while looking
+      like an optimisation." #221's review measured the first draft; I re-measured both shapes
+      in the container at `-O2` (`.artifacts/gram_bench.cpp`, three passes each):
+      | n admitted | dim | first draft | flat + float + symmetric (#221) |
+      |---|---|---|---|
+      | 120 | 512 | 13.7 ms | **6.8 ms** |
+      | 120 | 2048 | 63.1 ms | **26.9 ms** |
+      | 300 | 512 | 89.9 ms | **37.7 ms** |
+      | 300 | 2048 | 507.4 ms | **171.7 ms** |
+      | 750 | 512 | 650.6 ms | **243.4 ms** |
+      | 750 | 2048 | 3881.7 ms | **1189.6 ms** |
+      The rewrite is 2.1-3.3x and NOT ENOUGH: `ids()` holds its lock across the gram, the
+      instant budget at 20 fps is 50 ms, and the design load's 50 cameras x ~15 tracks = 750
+      observations puts a 512-d embedder at 243 ms and a 2048-d one at 1.2 s. At the load
+      actually measured (12 cameras, n ~ 120) it is 6.8 ms and invisible, which is why the
+      chain runs today and why this is an item rather than a blocker.
+      TWO WAYS OUT, the first being the real one: (a) a BLAS `cblas_ssyrk` (or Eigen) behind
+      the `shipvision` lane -- E.E^T is one call, ~1-3 ms at n=750 -- which adds a
+      `pkg-config` package to that lane and nothing to the offline tier; (b) bound the admitted
+      count per instant, which is what `ObservationGate` is for, and state the bound. Measure
+      the group size a deployment actually produces before choosing: 750 is the sizing table's
+      number, not an observation.
+      MEASURED, which is what this item asked for first. At the DESIGN load -- 50 cameras x
+      20 fps x 40 s on four A5000s, the pan fixture -- the run answers 56 050 observations over
+      3 866 instants: **14.5 per instant**. At 12 cameras it is 41.1. The sizing table's 750 is
+      not what a barrier collects, because an instant holds a fraction of the fleet's frames
+      rather than all of them: 26% of instants were evicted and 11 858 frames arrived late.
+      At n = 15 the gram is microseconds and invisible, so (a) and (b) are both unnecessary now.
+      REOPEN WHEN an instant carries hundreds -- and note what that implies: the number that
+      makes the gram matter is the number that says the barrier is finally collecting whole
+      groups, so the ordering work (`PIPELINE-WORKERS-NEED-CAMERA-AFFINITY`) comes first and
+      this gets re-measured after it, not before.
+
+- [x] CI-BUILDING-JOBS-IS-AN-ALLOW-LIST · DONE 12 Sep. #236's review, non-blocking, and it turns that PR's
+      own thesis on the PR: `tests/test_ci_runs_what_it_builds.py`'s `BUILDING_JOBS` is a
+      hand-written list, so a future `cpp-<something>-lane` that globs one prefix is not
+      covered and nothing goes red. "A convention nobody can see is not a guard" applies to the
+      guard itself. THE BETTER SHAPE ALREADY EXISTS next door: `tests/test_optional_deps_reach_ci.py`
+      derives its set and asserts its exceptions rather than trusting a list. Derive from "any
+      job with a step containing `for candidate in csrc/build/test_`", and keep `cpp-syntax`
+      and `cpp-gst-lane` as an ASSERTED exception pair. Two smaller notes from the same review:
+      the lane's `-ge 4` cannot tell the 30-binary superset from the 27-binary core, and
+      `run_step` joins comments into the text it greps, so a comment quoting the bad glob as an
+      example would fail the test that forbids it.
+      DONE: `building_jobs()` derives the set from the workflow, `EXEMPT` carries a reason per
+      entry and `test_an_exempt_job_still_earns_its_exemption` proves each one still deserves
+      it, and a closure test refuses a job that is neither. Comment lines are stripped before
+      anything greps a `run:` block, which closes the third note -- the derivation made it
+      worse, not better: an unstripped grep pulls `cpp-syntax` into the rule on one comment.
+      EVIDENCE, four probes: a new `cpp-future-lane` globbing one prefix is caught with no
+      edit to the test (the case the list could not see); a job that is neither covered nor
+      exempt fails the closure; an exempt job that starts globbing fails its own exemption and
+      then the whole rule; and a comment naming the glob leaves the job out. The `-ge 4` note
+      is left as the review left it -- defensible as written, because the build step refuses
+      outright when the submodule is absent, so the count is not what proves the lane compiled.
+
+- [x] CSRC-BUILD-CRASHES-WITHOUT-PKG-CONFIG · FIXED 12 Sep. FOUND while trying to run the GPU-tier
+      C++ tests in the container for #249. `python scripts/build_csrc.py` (no `--offline`)
+      probes each external lane with `subprocess.run(["pkg-config", ...])` and catches only
+      `SystemExit`, so on a machine with no `pkg-config` BINARY the probe raises
+      `FileNotFoundError` and the whole build dies before compiling anything -- instead of
+      taking the "left out with a loud warning" path the comment five lines above it describes.
+      THE BENCH IMAGE IS SUCH A MACHINE: `deploy/rootless/run.sh bash -c 'command -v
+      pkg-config'` answers ABSENT, so a full C++ build has never worked inside the container
+      the container rule sends every accelerator build to. The offline build is unaffected --
+      it enables no lane it was not asked for, so it never probes.
+      THE FIX is four lines in `pkg_config_flags`: catch `FileNotFoundError` and raise the same
+      `SystemExit` the unresolvable-package path raises, naming the missing tool rather than
+      the missing package. A test can pin it by putting an empty directory first on `PATH`.
+      DONE: the probe is wrapped and a missing tool raises the same `SystemExit` an
+      unresolvable package does, naming the TOOL rather than the package -- a reader told
+      `opencv4` cannot be resolved goes and installs a `-dev` package they already have. Two
+      tests: the refusal, and the lane loop that has to survive it, because a `SystemExit`
+      alone does not prove the warn-and-continue branch is reached. Both go red with the catch
+      removed. In the container the build now reaches the next real obstacle (TensorRT headers)
+      instead of dying at the first lane.
+      AND THE MOTIVATION ON THE ORIGINAL LINE WAS WRONG, which is worth leaving visible: this
+      does NOT unblock building the C++ plane in the container, because that image has no
+      compiler either. `deploy/rootless/cpp.sh` documents the real arrangement -- host-built
+      binary, executed inside the container -- and that path works today (#249's
+      `test_mtmc_stage` ran 31 checks through it). So the fix stands on being right for any
+      host without `pkg-config`, not on a capability it was expected to restore.
+
+- [x] CI-WORKFLOW-PRS-MAY-BE-REVIEWABLE · ANSWERED 12 Sep. OBSERVED on #236: the Claude review job ran to
+      completion on a PR that edits `.github/workflows/**` and returned APPROVE, which is not
+      what CLAUDE.md's "known permanent exception" predicts. One observation is not a rule, and
+      the wrong correction is expensive in both directions -- deleting the exception when it is
+      real strands PRs, keeping it when it is dead makes every workflow PR a manual merge.
+      THE CHECK WAS: open the next workflow-touching PR WITH the `automerge` label and see
+      whether the gate merges it. The PR that removes the claim IS that PR -- it edits
+      `pr-pipeline.yml` and carries the label, so it either merges itself and proves the point
+      or fails and names the job that refused.
+      AND THE EXPERIMENT ANSWERED AGAINST MY FIRST READING, which is why it was worth running
+      rather than reasoning about. #253 edits `pr-pipeline.yml` and carries the label; its
+      review job failed three token exchanges with
+        401 Unauthorized - Workflow validation failed. The workflow file must exist and have
+        identical content to the version on the repository's default branch.
+      So the App validates the WORKFLOW THAT IS RUNNING against the default branch's copy of
+      it -- not the PR's diff, and not a `workflows: write` scope, which was my guess from the
+      permissions block and was wrong. #236 edited `cpp.yml`, which left `pr-pipeline.yml`
+      identical to main's, so its token minted and the review returned APPROVE.
+      THE RULE, measured: a PR editing `pr-pipeline.yml` cannot pass review and needs a manual
+      merge (V169 permits it). A PR editing any OTHER workflow file goes the ordinary
+      review-and-automerge way. That is narrower than what the three files said and broader
+      than what I first wrote; both are corrected.
+      THE LESSON worth keeping: the permissions block was consistent with my wrong theory and
+      with the right one, so reading it proved nothing. The run's own error message is what
+      settled it.
+
+- [x] CPP-LANE-JOB-GLOBS-ONE-PREFIX · DONE 11 Sep, NEEDS A MANUAL MERGE. `.github/workflows/cpp.yml`'s lane job collected
+      binaries with `for candidate in csrc/build/test_tracking_*`, so a lane binary named
+      anything else is BUILT BY CI AND NEVER RUN -- the `CSRC-BENCH-UNCOMPILED` shape, found by
+      #221's review on `test_cluster_parity`. The offline job globs `test_*` and counts, but it
+      builds without `--with-external shipvision`, so a lane unit is not compiled there at all.
+      WORKED AROUND by naming the binary `test_tracking_cluster_parity`, which the existing
+      glob catches, and the convention is stated in `build_csrc.py`'s lane list. THE FIX: run
+      every binary the lane build produced with a count guard, the way the offline job does.
+      IT NEEDS A MANUAL MERGE -- a PR touching `.github/workflows/**` cannot pass the review
+      job (CLAUDE.md's known permanent exception), which is why it is not folded into a normal
+      PR.
+      DONE: the lane job globs `csrc/build/test_*` with a count guard, exactly as the offline
+      job does. Rehearsed against this tree WITHOUT running anything: the loop would run 30
+      binaries where the prefix ran 3, so 27 were built by that job and never run. It re-runs
+      the offline binaries, which is a feature -- they are compiled there WITH the lane, so
+      running them proves the lane changed nothing they assert. "Was the lane compiled at all"
+      is guarded by the BUILD step, which refuses outright when `3rdparty/shipvision/csrc` is
+      absent, rather than by counting names. `tests/test_ci_runs_what_it_builds.py` holds the
+      rule for every job that builds binaries, and a prefix restored turns it red.
+
+- [x] WHOSE-LIBCUDART-DOES-THE-PYTHON-FLAG-SET · MEASURED 11 Sep: ONE RUNTIME, and the flag is read back. Whether this plane's blocking-sync
+      flag reaches torch's streams at all. #214's review predicted that a second
+      `DeviceManager` in one process gets `cudaErrorSetOnActiveProcess` on every device, and
+      it did NOT: on GPU 2, default path, `validate_on_start=True` so the first manager takes
+      a primary context, the second took the flag again (`took=[0]` both rungs). The likely
+      reason is two CUDA RUNTIME INSTANCES -- `prefer_blocking_sync` goes through `ctypes` into
+      the loader's `libcudart`, torch uses its own copy under `torch/lib/` -- in which case the
+      flag is being set on a runtime nothing in this plane synchronises through, and the
+      Python default flipped on the C++ plane's evidence plus symmetry. The C++ measurement
+      stands (one binary, one runtime).
+      MEASURED IN THE BENCH IMAGE (`shipinfer-gst:jammy-nvdec`, GPU 2, container), and the
+      two-runtime hypothesis is FALSE where every measurement is taken: after `import torch`,
+      `/proc/self/maps` holds exactly one libcudart --
+      `/opt/conda/lib/python3.11/site-packages/nvidia/cuda_runtime/lib/libcudart.so.12` -- and
+      `ctypes.CDLL("libcudart.so.12")` adds nothing new, because the loader hands back the
+      mapping torch already had. So `prefer_blocking_sync` sets the flag on the runtime torch
+      synchronises through.
+      AND THE DEVICE REPORTS IT BACK. `cudaGetDeviceFlags` answers 0 before, 0x04 after the set,
+      and STILL 0x04 once `torch.zeros(1, device="cuda:0")` has created the primary context --
+      so torch's context carries the flag rather than replacing it.
+      WHAT THE SAME PROBE REFUTES is #214's review's other prediction: `cudaSetDeviceFlags` is
+      NOT refused after a context on this runtime. Setting the same value again returns 0, and
+      so does setting the OPPOSITE (0x01, spin) -- after which `cudaGetDeviceFlags` reports 1.
+      That is why a second `DeviceManager` "took" the flag on both rungs: the call always
+      succeeds here, so `took` means "the call returned 0", not "a live context changed".
+      CONSEQUENCE worth knowing rather than changing: `harness/shipinfer.py`'s
+      `_announce_blocking_sync` refuses an arm where no visible device took the flag, and on
+      this runtime that condition cannot arise -- the guard is for a driver that does refuse.
+      WHAT REMAINS UNPROVEN is whether a flag set after a context changes that context's
+      SYNCHRONISE behaviour; `cudaGetDeviceFlags` reporting it is not that. The discriminator is
+      still an A/B at load, which is what #214 carries on this plane.
+      ORIGINAL TEST: an interleaved pair on the Python plane at a
+      fixed load with the knob on and off, host CPU per thread group as the discriminator --
+      `scripts/host_cpu.py` already reports it. If the flag does nothing here, either load
+      libcudart the way torch does (`torch/lib/libcudart.so.12`) or read the flag through
+      torch and drop the ctypes route.
+
+- [x] BENCH-PRECISION-SELECTS-NO-PLAN · HALF DONE 12 Sep: the knob no longer LIES, and it
+      still does not SELECT. `--precision` names the BASELINE's flat engines; our side loads
+      `model_repository/<name>/1/model.plan` whatever precision it holds, so on a
+      `--systems shipinfer` run the flag changed nothing except which file the digest guard
+      compared against -- and when that flat file was absent the guard warned and continued,
+      while `summary.json` reported the precision anyway.
+      DONE, MERGED as #245 (two review rounds). Naming a precision is a CLAIM now, and one
+      the run has to be able to keep.
+      `--precision` defaults to `None` ("nobody asked") rather than to `fp32`, and
+      `require_same_engines` REFUSES when a precision was named and there is no flat engine to
+      hold the plan to -- naming both ways out (build and install them, or drop the flag and
+      measure what is installed). An unnamed precision keeps today's behaviour and its warning,
+      which is what every chain run here takes. Round 1 found the remedy line naming
+      `build_engines.py --precision`, a flag that parser has never had, so the operator's way
+      out did not start -- fixed, and the test now hands the printed command to the real
+      parser instead of matching a substring of it. Round 2 ungated the refusal: it had been
+      conditional on a plan existing, so a named precision with neither engine nor plan fell
+      through in silence and the server autobuilt from ONNX after the guard passed.
+      WHAT REMAINS is the selection, and the design call is now MADE, 12 Sep, in favour of
+      INSTALLING rather than path-resolving. Read the two against the code:
+        (a) `model.<precision>.plan` via `parameters.engine_file`. But `engine_file` is ONE
+            value read straight off `config.yaml`
+            (`repository/model_config.py::engine_file`), so a precision-aware path means
+            either a config file per precision or a dynamic override -- and an override
+            teaches the REPOSITORY layer about precision, which is not its question. Worse,
+            `serve` would then load a different file from `bench` on the same repository,
+            which is the divergence this whole item exists to close.
+        (b) the bench installs the precision's plan first, exactly as
+            `scripts/build_engines.py::_install` already does: copy the flat engine into
+            every version dir under the name `engine_file` resolves to. Precision stays out
+            of the repository entirely, and the digest guard stops being a comparison -- both
+            sides load the same bytes because the run put them there.
+      (b) WINS, and the deciding evidence is that the refusal added by #245 ALREADY tells the
+      operator to do this by hand: `benchmarks/harness/config.py` prints "Build the flat
+      engines with `scripts/build_engines.py <flag>` (which also installs the plan)". The
+      selection half is that sentence stopping being homework. THE COST, stated: the bench
+      would write into `model_repository/<name>/1/` before measuring. That is not a new
+      behaviour -- `--install` is the documented workflow and does it today -- only a new
+      caller, and it needs the same "already identical, skip the copy" guard `_install` has.
+      `int8` comes back to the choices on the day this lands.
+      DONE 12 Sep, #262, on option (b) exactly as decided above. `require_same_engines` had
+      the two paths it needed already: it resolves the flat engine AND the plan's destination,
+      and it digests both. A named precision whose digests differ now INSTALLS the flat engine
+      at that destination instead of refusing -- so the flag selects, and the digest equality
+      the guard enforces holds by construction rather than by the operator having run the
+      installer by hand.
+      NO PRECISION NAMED IS STILL THE OLD REFUSAL, and that is the line worth keeping: the
+      install is what a CLAIM buys. With nothing claimed there is nothing to select, and
+      overwriting the operator's repository on a difference nobody asked about would be a
+      worse defect than the one this closes.
+      THE COST, as stated when it was decided: the bench writes into `model_repository` before
+      measuring. `build_engines.py --install` is the documented workflow and does exactly
+      this, so it is a new caller rather than a new behaviour -- and the refusal it replaces
+      already printed "(which also installs the plan)" as the operator's remedy.
+      EVIDENCE: `test_a_named_precision_installs_the_plan_it_names` (the plan starts fp32,
+      ends fp16, and a second call copies nothing) and
+      `test_without_a_named_precision_a_mismatch_is_still_refused` (the refusal stands and
+      nothing is written). Probed by making the install branch unreachable: the first turns
+      red on the refusal it replaced.
+      `int8` comes back to the choices now that this has landed -- and what it waits on is the
+      BUILDER, not this flag: the segmenter does not build at int8 on this box.
+      ROUND 1 CAUGHT THE HALF THAT WOULD HAVE HURT: the install sat below the
+      `system == "baseline"` scoping, which skips only the embedder PAIR -- so
+      `--systems baseline --precision fp16` rewrote the detector and segmenter while leaving
+      both embedders, on a run where nothing of ours loads a plan at all. A MIXED repository,
+      and the next unnamed run is documented to "measure whatever is installed and say so",
+      so it would have said so about a half-converted one. Gated on the system now, and this
+      method already held that acting on an artefact a baseline-only run does not load is a
+      defect -- overwriting one is worse.
+      AND THE OPERATOR-FACING TEXT SAID THE OPPOSITE, which is where the cost had to be
+      stated: `--precision`'s `--help` still said a mismatch is "refused rather than reported"
+      and never mentioned the write. It now says WRITES INTO THE MODEL REPOSITORY at the flag
+      that triggers it, and the two `config.py` comments that called the flag a non-selector
+      are corrected rather than left inverted.
+      THE WRITE IS ATOMIC: staged beside the plan and `os.replace`d, because `write_bytes`
+      truncates first and a Ctrl-C mid-copy would leave a truncated plan and no original.
+      AND THE IDEMPOTENCE TEST DID NOT TEST IT -- a second call rewriting identical bytes
+      passed the bytes check identically. It asserts on `st_mtime_ns` now, and goes red when
+      the digest skip is removed.
+      ROUND 2 FOUND THAT ROUND 1'S GATE BROKE THE DEFAULT RUN, which is the more useful
+      finding of the two: `run_bench.py`'s pre-flight called `baseline` first, so on
+      `--systems baseline,shipinfer` -- the default -- the baseline arm's digest check refused
+      the very mismatch the install exists to resolve, and the flag selected only on
+      `--systems shipinfer`. The pre-flight runs the arm that WRITES first now; the
+      measurement loop keeps the baseline's order, because only the pre-flight has a writer.
+      AND NOTHING DROVE THE SEQUENCE, which is why two rounds of unit tests missed it: each
+      called one arm in isolation, and one passed `require_same_engines()`'s `"both"` default,
+      a value no production caller produces. There is a test for the ORDER now, and a control
+      asserting the old one refuses -- so the order is a decision rather than an accident of
+      how the loop happens to be written.
+      ROUND 3 FOUND THE MIXED REPOSITORY AGAIN, by a third route: the copy sat INSIDE the
+      per-model loop, and `_ENGINE_PAIRS` puts the two that install cleanly first and the two
+      that most often fail last -- so an abort on the embedders left the repository half fp16
+      and half fp32, permanently, from a run the operator asked to measure. Worse than r1's,
+      whose mixed state came from a run that measured nothing of ours.
+      SO IT IS TWO PASSES: the loop COLLECTS what it has earned and every raise in it is a
+      reason to write nothing at all; the copies happen after all four models clear. "All four
+      or none" is the invariant `--precision` already claims, and now the one it keeps.
+
+- [x] BENCH-ENGINE-CHECKS-ARE-CHAIN-WIDE · **MERGED as #218 (squash `1054479`, 10 Sep),
+      APPROVE on round 3 after two BLOCKING rounds.** Round 2's five findings, and the first is a
+      promise this PR itself broke: scoping the embedder pair to shipinfer-only moved the
+      guard BEHIND ~80 s of measurement, because each system calls the check for itself
+      inside the measurement loop and the baseline runs first -- so `require_inputs`'s own
+      first line ("fail before a run rather than after 70 s of measuring nothing") stopped
+      being true of the check that states it. One pre-flight loop over the selected systems
+      now runs above the loop, and `FileNotFoundError` joins the `except` tuple. Then: the
+      body described four of the nine changed files (rewritten from `git diff --name-only`);
+      the guard hardcoded `model.plan` while the installer honours `parameters.engine_file`,
+      which is the same unfixable-remedy loop one artefact along, so the name is resolved
+      through `ModelRepository` and an unreadable repository is REFUSED rather than guessed;
+      the fanout's own test read `version_dirs[0]`, leaving `ship_embedder` unchecked by the
+      one test whose job is catching a plan installed under a name nothing loads; and two
+      docstrings said `reid` "has no `version_dir` at all" when it has two. 4 202 offline
+      green, 428 in the touched suites, `pre-commit` clean, rebased (it had been reverting 93
+      lines of this file). Round 1 fixed and pushed (`79ac5eb`). ONE BLOCKING, and it was THIS PR's OWN DEFECT ONE LEVEL DOWN: an engine
+      check demanding an artefact the run does not load, in `require_same_engines` rather than
+      `require_inputs`. `--systems baseline` was refused because `person_embedder` had no plan,
+      with a message claiming "the baseline loads reid_r50_fp32.engine" -- which the same
+      docstring contradicts two paragraphs above -- and a remedy that could not work, because
+      `Target("reid", ..., version_dir=None)` meant `--force` rebuilt the engine, printed
+      success and installed it nowhere. The operator runs the printed command, the guard fails
+      identically, and the only exit was a manual `cp` no message mentions.
+      FIXED AT THE ROOT: `version_dir` becomes `version_dirs`, a tuple, and `reid` names BOTH
+      embedders -- so `--force` is a remedy that works for all four models, which is also what
+      lets one message serve every pair. The two embedder READMEs said "two steps"; they say
+      one step now. Plus the reviewer's two smaller halves: the guard takes `system` and skips
+      the embedder pair for a baseline-only run, and the absent-plan message no longer claims
+      the baseline loads an engine it never loads. And one test asserted the OPPOSITE of the
+      new behaviour because its premise WAS the defect
+      (`test_a_target_with_no_version_dir_is_never_asked` pinned that reid installs nowhere). On `fix/the-engine-checks-follow-the-chain`:
+      `require_inputs(system)` takes the caller's own name -- each system already called it for
+      itself, so the name was available and simply not asked for -- the baseline needs the two
+      FLAT engines, our side needs the repository, and an unknown name is refused rather than
+      silently checking nothing. `require_same_engines` covers FOUR models: for the embedders
+      it is not a cross-system check (the baseline runs one model per image) but the one that
+      says our side loaded the precision ASKED for, which `--precision fp16` never did for the
+      two models carrying ~9 of the chain's ~11.7 invocations. The silent skip is loud now.
+      4 198 offline tests green, `pre-commit` clean. `int8` deliberately does NOT come back to
+      the bench: the blocker removed here was one of two, since our side loads
+      `model_repository/<m>/1/model.plan` whatever it holds -- so on a shipinfer-only run the
+      flag selects nothing at all. That is `BENCH-PRECISION-SELECTS-NO-PLAN`, below.
+      A box-dependent fixture was fixed on the way: `_config` left `emb_engine` unset, so
+      `resolved()` filled it from the repository root and the test checked whatever engines the
+      box happened to hold -- passing in a worktree with an empty `models/` and failing in a
+      checkout that has them.
+      ORIGINAL: scope the engine existence and digest checks to the
+      models a run actually loads. Found by #216's first review round. `require_inputs`
+      (`benchmarks/harness/config.py`) demands BOTH `yolo26n_<prec>.engine` and
+      `yolo26n-seg_<prec>.engine` unconditionally -- no reference to `--systems` or to which
+      models the chain holds -- and `harness/shipinfer.py` calls it on the shipinfer-only path
+      too, so `--systems shipinfer` does not dodge it. Two consequences, both live: a
+      detect-only measurement cannot be driven from `run_bench.py` at all, and `--precision
+      int8` could only ever raise because the SEGMENTER does not build at int8 on this
+      hardware (TensorRT finds no implementation for its mask-prototype head). #216 removed
+      `int8` from the bench's choices rather than leave a flag that always fails; this item is
+      what earns it back. `require_same_engines` has the mirror-image gap: it covers
+      `ship_detector` and `ship_segmenter` only, so on `ship_person_cpu` the two embedders'
+      plans are outside the byte-identity guard entirely.
+
+- [x] MAIN-WENT-RED-ON-A-RACE-NOT-A-FLAKE · **TWO INDEPENDENT REDS, BOTH REAL, BOTH FIXED
+      (15 Sep). #283 and #284.**
+      (1) THE BAND RACE, and it is the ADR-005 inversion this project exists to prevent. CI's
+      coverage leg asserted `{BACKGROUND}` and got `{TRACKING_CRITICAL}` on
+      `test_a_refused_add_does_not_re_band_the_camera_that_is_already_running`, on a commit
+      whose diff was `.claude/*.md` only. `add_camera` wrote the band, called
+      `manager.add_camera`, and rolled back in the `except` -- but a camera refused as a
+      DUPLICATE is by definition already running, its decode thread publishing while this one
+      writes, and the band is read per frame. Between the write and the rollback a running
+      camera's frames went out in the lane a REJECTED request asked for. Fixed by refusing the
+      duplicate before writing anything (`IngestManager.__contains__`); the rollback stays for
+      the narrower case of two threads adding the same NEW id, named in the comment.
+      THE REGRESSION TEST ASSERTS THE PROPERTY, NOT THE TIMING: for an already-running camera
+      `record_placement` is never reached. Mutation-checked -- without the fix it fails showing
+      both writes, `[TRACKING_CRITICAL, BACKGROUND]`, with no interleaving needed. That matters
+      because the ORIGINAL test only fails when a frame lands in the window, which is why a slow
+      CI leg is what caught it and why it would pass on a good day.
+      (2) THE C++ TRACKING LANE, which then blocked #283. `test_a_broken_read_rebuilds_the_source`
+      polls until the factory hands back a second source, then asserts `frames_read >= 1` with
+      NO wait -- two different events, the asserted one strictly later. MEASURED rather than
+      assumed: a probe printing `frames_read` at the instant the old assertion fired reports
+      **2218-20139** over 30 runs here, so the local margin is thousands of frames and 40 runs
+      with the poll removed all passed. The defect is the ORDERING, not the duration; on a
+      contended runner the thread is descheduled between the rebuild and the first read.
+      WHAT I TOOK FROM IT: a green suite on this box is not evidence about either, because both
+      windows are invisible at this load. The coverage leg is slower than anything I run, and
+      that is exactly what made it the one to catch a real inversion.
+
+- [x] HOST-DECODE-IS-THE-HOST-BUDGET · **RECORDED AS `ADR-023` (15 Sep), because `DECISIONS.md` is what a later change reads and this only lived here.** MEASURED 15 Sep: THE DECODE ROUTE IS WORTH 6-7x THE
+      HOST BUDGET, AND IT IS THE ROUTE V156 ALREADY MANDATES.** Interleaved A/B at twelve
+      cameras x 20 fps x 20 s on GPUs 1,2,4,6, three replicates each, arms alternating, ONE
+      variable (`--source`) and the SAME image for both so the lanes cannot differ:
+        `--source gstreamer`  host  61.8, 75.7, 61.8 -> [61.8, 75.7] ms per frame READ
+        `--source nvdec`      host   9.7,  9.9, 10.2 -> [ 9.7, 10.2] ms per frame READ
+      NON-OVERLAPPING with room to spare, and the mechanism is visible rather than inferred:
+      the 46 s thread group that is 46% of `command_cpu_s` on the gstreamer arm is ABSENT from
+      the nvdec arm's thread table, because nvdec takes the bitstream off RTSP and decodes with
+      libnvcuvid on the device instead of running `avdec_h264` + `videoconvert` on the srcpad
+      task. `gst-inspect` in the bench image confirms what was available to run: `avdec_h264`
+      and `videoconvert` present, `nvh264dec` and `nvvideoconvert` ABSENT, on both images.
+      THE THROUGHPUT DIFFERENCE IS THE SAME FACT FROM THE OTHER SIDE. Offered 4 800 frames:
+      gstreamer READ [1264, 1565] (26-33% -- the host could not even read them) and accepted
+      [1068, 1402]; nvdec read [4703, 4726] (98%) and accepted [4715, 4738], with
+      `frames_dropped 0`, `queue_rejected 0`, `collector_timeouts 0` and `events_incomplete 0`.
+      The host-bound arm is also the UNSTABLE one: 334 frames of spread against 23.
+      SECONDARY, AND STATED NARROWLY because the big identity numbers belong to the design-load
+      runs and not to this shape: mtmc admission 89% (18 489/20 689) against 66-75%, and
+      tracking continuity 16 frames untracked of 4 738 (0.34%) against 85-91 of ~1 100-1 400
+      (~7%). More identities too (72 against 7-36), but nvdec also saw 3x the frames, so that
+      number is not a like-for-like.
+      WHAT IT MEANS FOR ROW 7's ARITHMETIC. That row prices the host budget at 21 ms of CPU per
+      image -- 63 cores at 3 000 -- and credits the two merged levers with closing it. They act
+      on the model threads (12-19% here, 4% at fifty) and cannot. The ROUTE can: at ~10 ms per
+      image, 3 000 img/s is ~30 cores, under 48. Twelve cameras at full rate cost 1.72 of 48.
+      WHAT THIS DOES NOT SETTLE, said plainly: the GPUs were NOT saturated here (240 fps offered
+      to four A5000s), so this measures the HOST COST PER FRAME and not the device ceiling. The
+      design-load run that settles `V167`/`EXECUTE-BLOCKS`/`FPS-ON-FOUR-GPUS` is still owed and
+      still needs a quiet box. What has changed is that the host budget is no longer the thing
+      standing in the way, and the lever that moved it was an instruction already given.
+
+- [x] DID-THE-EARLIER-DESIGN-RUNS-ACTUALLY-USE-NVDEC · **SETTLED THE SAME HOUR: THEY DID, AND
+      `RESULTS.md` IS RIGHT. My suspicion was wrong (15 Sep).** The discriminator is per-camera
+      thread cost divided by that camera's frames: on the nvdec route the GStreamer thread does
+      depay + parse only, on the host route it also decodes and converts. Over every archived
+      `.artifacts/cpp/*.log` with a real fleet:
+        gstreamer arms (today's A/B)          27.6-34.7 ms per frame per camera thread
+        every other archived fleet run         0.3-1.5 ms
+      `gate_design_load`, `gate_design_load_2`, `threadcpu-nvdec*` and all six `k1_*` arms sit
+      at 0.3-1.5, so they are genuinely nvdec and the page describes what was run.
+      WHAT MISLED ME was `design60`, which is 12.78 s per camera thread (49 ms/frame) with FOUR
+      `pipe` threads -- but that is MY OWN scratch run on the host route with a starved worker
+      count, in the scratchpad and never published. Reasoning from it to the published runs was
+      the error; the archived logs were on disk the whole time and answer it directly.
+      AND SETTLING IT CORRECTED A CLAIM I HAD JUST COMMITTED. Because the 12 Sep runs are nvdec,
+      they are the like-for-like comparand: 885.4 img/s at 16.19 cores and 84.2% mtmc admission
+      with 167 ids. So identity did NOT newly survive today, and today's throughput is not an
+      improvement -- what improved is host CPU an image, 19.9 -> 6.9 ms, which is #214's -40%
+      confirmed at the design load. Fixed in row 7 and in `V167-GSTREAMER-ONLY-3000`.
+
+- [x] WORKER-PLATEAU-ON-THE-NVDEC-ROUTE · **THE DEFAULT STAYS AT 23 PER GPU, BUT NOT FOR THE
+      REASON BELOW: "more workers LOSE tracked frames" WAS MEASURED BELOW CAPACITY AND IS
+      WITHDRAWN (15 Sep, re-swept at 2 000 offered).** Same error as `C1`'s and V167's on the
+      same day -- a ranking taken at 1 000 offered ranks the OFFER, and this chain's ceiling
+      is above it. **SIXTEEN runs, EIGHT PER ARM, strictly alternated A/B by one script in one
+      sitting**, 50 cameras x 40 fps x 40 s, `--source nvdec`, GPUs 1,3,4,6, workers the only
+      variable:
+        workers  92  (n=8)  accepted [ 884.5,  971.1] mean  925.2   untracked [ 3.0,  4.1]%
+                            **TRACKED [848.1,  939.2] mean 893.2, sd 37.1**
+        workers 140  (n=8)  accepted [ 979.0, 1149.5] mean 1058.5   untracked [ 9.5, 12.4]%
+                            **TRACKED [857.7, 1040.8] mean 943.8, sd 56.2**
+      READ AS RANGES, and they say three different things at once:
+        * ACCEPTED separates cleanly and 140 wins -- no overlap over sixteen runs, 1.144x.
+        * UNTRACKED separates cleanly too, and **the mechanism this item named is CONFIRMED**:
+          more workers really do scatter a camera's consecutive frames across more threads, and
+          the tracker really does refuse ~3x the fraction. That half was right at both loads.
+        * TRACKED -- the metric V164 fixed -- **does NOT separate**. 140's mean is 5.7% higher,
+          and its FLOOR (857.7) is below 92's MEAN (893.2). Neither "140 loses tracked frames"
+          nor "140 wins" is supported by one run at either setting.
+      **THE n=4 READING SAID THE OPPOSITE, AND THAT IS THE LESSON UNDER THE LESSON.** At four
+      replicates an arm the two separated -- 92 topped out at 939.2, 140 bottomed at 946.2, a
+      **6.95** img/s gap (939.225 against 946.175, unrounded so it can be checked against the
+      table) -- and #287's review was right to compute it. Four more replicates an arm turned that
+      gap into an 81.5 OVERLAP. A separation smaller than either arm's own
+      spread is a coin-flip dressed as a result, and n=4 could not see that.
+      ONE RUN WAS DROPPED FROM THE ARM, deliberately, and #287's review is why: an earlier
+      `sat` run at the same settings (tracked 952.4) was taken by a DIFFERENT script an hour
+      before, so it was never part of an alternation and belongs to a different box state.
+      Keeping 92's low reading while quietly keeping a borrowed high one was an asymmetry, and
+      it is gone -- all sixteen runs above come from one interleaved script.
+      SO THE DEFAULT STAYS, ON AN EFFICIENCY ARGUMENT RATHER THAN A LOSS ONE: 140 workers pull
+      14.4% more frames through the whole model chain for a tracked mean 5.7% higher that no
+      single run can tell from 92's. That is device time spent on frames the tracker refuses.
+      SIXTEEN-GPU EXTRAPOLATION, x4 and therefore an extrapolation rather than a measurement:
+      92 -> [3392, 3757], 140 -> [3431, 4163]. Both clear V167's 3 000 at the floor; neither
+      reaches V165's 4 500 at the ceiling.
+      WHAT WOULD SETTLE IT is not more replicates -- sixteen runs is where this stopped paying,
+      and the arms still overlap. It is a metric that charges for the refused frames, or the
+      reordering fixed at the source (`PIPELINE-WORKERS-NEED-CAMERA-AFFINITY`), after which the
+      accepted-frame win would carry through to tracked.
+      ORIGINAL (drawn at 1 000 offered; its conclusion is the one withdrawn above): The 23-per-GPU plateau in
+      `run_cpp_bench.sh` was measured on the HOST-DECODE route and its own comment says
+      "re-sweep before trusting it", so with decode off the host it was worth redoing. Design
+      load, `--source nvdec`, four GPUs, one variable:
+        workers  92   accepted 755.4 img/s   untracked  3.3%   **TRACKED 730.8**
+        workers 140   accepted 794.2 img/s   untracked 10.5%   **TRACKED 711.2**
+        workers 188   accepted 717.5 img/s   untracked 10.1%   **TRACKED 644.9**
+      READ AS RANGES, which changes what can be claimed: the four workers=92 runs today span
+      [30 217, 33 459] accepted (10.7%), and 140's 31 769 sits INSIDE that, so at n=1 a point
+      THIS SWEEP DOES NOT SEPARATE 92 FROM 140 on accepted frames. What it does separate is
+      TRACKED: 92's four runs give [730.8, 819.6] and both 140 and 188 fall below all four.
+      THE MECHANISM IS THE ONE `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` NAMES. More workers
+      means a camera's consecutive frames land on more threads, so they arrive at the tracker
+      more reordered and it refuses more of them -- untracked triples, 3.3% -> 10.5%. The
+      metric V164 fixed is images PROCESSED, and a frame the tracker refused is not one.
+      SO THE 13% QUEUE REFUSALS ARE NOT TO BE CHASED WITH WORKERS. At 188 they nearly vanish
+      (3.3% of read) and it is the WORST arm, because frames READ collapse 21% (29 649 against
+      37 414-38 289) -- the ingest threads and the workers are competing for the same cores.
+      Refusals move upstream rather than away. The remaining headroom is camera affinity, which
+      is that item's territory, not a bigger thread pool.
+      CONCLUSION: `WORKERS_PER_GPU=23` stays, now for a measured reason on THIS route rather
+      than an inherited one. `run_cpp_bench.sh`'s comment that the per-GPU form is an
+      assumption still stands -- this re-sweep was at four devices, like the last one.
+      (The 188 arm was not re-run at saturation: it lost on BOTH accepted and tracked at
+      1 000 offered, and its stated cause -- ingest threads and workers competing for cores --
+      gets worse, not better, when the offer doubles.)
+- [x] **V167-GSTREAMER-ONLY-3000 · ANSWERED 15 Sep: 3 000 IS MET ON THE ROUTE YOU MANDATED,
+      and the lever was that route rather than a choice you had to make.** [3203, 3278] tracked
+      img/s extrapolated to sixteen GPUs from three runs at the design load, host [4.9, 5.2] of
+      48 cores. The question this line carried -- **OPERATOR: WHICH LEVER?** -- is closed by
+      measurement: none of the three it offered. Not (a) the host budget, whose two merged
+      levers act on 4-19% of host CPU; not (b) more devices, since sixteen is the deployment's
+      own number; not (c) fewer models, which was never needed for 3 000. What moved it was
+      `--source nvdec` against `--source gstreamer`, [9.7, 10.2] ms of host CPU an image
+      against [61.8, 75.7] -- and V156 had already mandated that route.
+      **AND THE FIGURE ABOVE IS UNDERSTATED, because it too was taken at 1 000 offered -- below
+      this chain's own ceiling (15 Sep, same mistake as `C1`'s).** So:
+        at the design load (1 000 offered, GPUs 1,2,4,6)   tracked [800.8, 819.6]   16 GPUs [3203, 3278]
+        at its CEILING     (2 000 offered, GPUs 1,3,4,6)   tracked [848.1, 939.2]   16 GPUs [3392, 3757]
+      Against the 3 000 target that is **[1.13, 1.25]x rather than 1.07-1.09x**.
+      THE DEVICE SETS DIFFER AND THE ROWS NOW SAY SO (#287 r4): GPU 2 against GPU 3, so the
+      offer is not the only variable between these two lines. It was "the same four cards"
+      until the ceiling row became the new sweep's, whose quad this page knows.
+      IT STAYS CORRECT AT THAT CEILING, AND THESE COUNTERS ARE THE RETAINED EIGHT'S OWN --
+      not the withdrawn run's, which is what this line said for one round: `events_complete`
+      35 374-38 840, `events_incomplete` **[0, 13]** (four of the eight exactly 0),
+      `collector_timeouts` equal to it every time, mtmc admitting **[70.0, 76.0]%** with
+      138-211 global ids.
+      THE CEILING ROW IS A RANGE AND WAS BRIEFLY A POINT: it read "tracked 952, 16 GPUs 3809,
+      1.27x" from ONE run. **That run is the EXCLUDED ninth, not the best of the eight** --
+      the eight top out at 939.2 and never reach 952.4 -- so the headline rested entirely on a
+      box state this item now calls non-comparable. That is a retraction of PROVENANCE rather
+      than of sampling, and it is the stronger of the two. The conclusion is unchanged because
+      the retained FLOOR clears the target -- 3 392 against 3 000. Both readings are
+      real and they answer different questions: the first is what 50 cameras x 20 fps costs on
+      FOUR cards (12.5 cameras a card, where it refuses 13%); the second is what the chain can
+      do. The target question -- can sixteen GPUs carry 3 000 -- is a capacity question, so the
+      ceiling is the right number and the answer has headroom rather than none.
+      WORTH SAYING ABOUT THE 13%: the deployment is 50 cameras over SIXTEEN cards, 3.1 a card
+      against this run's 12.5, so the refusals here are a four-times-density artefact --
+      `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` makes the same point about its own table.
+      CAVEAT ON THE CLOSURE, stated rather than buried: sixteen GPUs is a LINEAR extrapolation
+      from four, which this file has always flagged as an assumption, and the box was contended
+      (load 44-47), which makes these lower bounds rather than upper ones. A run on more than
+      four devices is what would turn the extrapolation into a measurement, and nothing here
+      blocks on it.
+      **4 500 IS A DIFFERENT ANSWER AND LIVES IN `V165-WHOLE-PIPELINE-4500`**, which this run
+      also settled: short by 27-29%, and that one still needs you.
+      ORIGINAL: **OPERATOR: WHICH LEVER?** RE-MEASURED 11 Sep AT THE DESIGN
+      **MEASURED 15 Sep AND THE TARGET IS MET ON THIS ROUTE, three runs, read as ranges.**
+      50 cameras x 20 fps x 40 s, `--source nvdec`, four A5000s (1,2,4,6), `workers 92`, the
+      full chain, on a box at load 44-47:
+        TRACKED   [800.8, 819.6] img/s      accepted [821.4, 836.5]
+        host      [4.9, 5.2] of 48 cores    [6.8, 7.5] ms an image
+        mtmc      admitted [80.9%, 81.9%]   145-230 global identities
+        frames    38 110-38 289 READ of 40 000 offered (96%); incomplete events 0/2/0
+      Linearly on 16 GPUs: **[3203, 3278] tracked img/s against the 3 000 target**, host ~22
+      of 48 cores. So the answer to this item is YES on the route you mandated, and the thing
+      that moved it was the DECODE ROUTE rather than either merged lever -- 21 ms of host CPU
+      an image became ~7 ms when `avdec_h264` and `videoconvert` left the host
+      (`HOST-DECODE-IS-THE-HOST-BUDGET`).
+      CORRECTION, SAME DAY: I first wrote that identity newly survived here. It did not --
+      `gate_design_load` (12 Sep, the same nvdec route) already admitted 84.2% with 167 global
+      ids, against today's 80.9-81.9% and 145-230. The `0.30% admitted, zero ids` line this
+      item quoted came from a HOST-DECODE run with `workers 4`, so it was never the design
+      load's number on this route. Identity has survived the design load since 12 Sep.
+      AND WHAT ACTUALLY CHANGED SINCE THEN IS HOST CPU, WHICH IS #214's: 19.9-20.0 ms an image
+      at 16.19-16.32 cores on 12 Sep against 6.8-7.5 at 4.9-5.2 today, SAME route, same chain.
+      That is the -40% the blocking-sync PR claimed at the design load, now confirmed on it.
+      Throughput did not improve (885.4 img/s then against 821-836 now, on a box at load
+      44-47), so these runs re-establish the design load after #214 rather than beat it.
+      WHAT IS STILL HONESTLY OPEN: 16 GPUs is a LINEAR extrapolation from four and this file
+      has always flagged that as an assumption; the box was contended, which makes these lower
+      bounds rather than upper ones; 13% of read frames are still refused at the queue, which
+      is where `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY` and a worker sweep would go next; and
+      the 4 GPU -> 16 GPU claim wants a run on more than four devices before anyone spends
+      money on it.
+      LOAD ON FOOTAGE A TRACKER CAN FOLLOW, and the answer moved: **711.5 tracked img/s on four
+      A5000s**, not ~260. 50 cameras x 20 fps x 40 s, `--source nvdec`, GPUs 0/2/5/6, 92
+      workers, the pan fixture (#228): offered 954.5 img/s, accepted 739.1 (23% refused at the
+      pipeline queue), untracked 3.7%, host 15.5 of 48 cores plus 1.0 for the RTSP servers,
+      frame p50 294 ms / p95 1.12 s. The old 260 was measured at 12 cameras on ten unrelated
+      photographs, where almost nothing tracked at all.
+      SO THE TARGET IS IN REACH ON THE FULL BOX: 711.5 x 4 = ~2 850 on 16 GPUs. What decides it
+      is the HOST budget -- 21 ms of CPU per image is 63 cores at 3 000, and 48 exist.
+      BOTH HOST-BUDGET LEVERS ARE NOW BUILT, 14 Sep, and this paragraph used to say one was "a
+      merge away": the blocking-sync default is #214, MERGED 14 Sep (-40% host CPU and +25% rows
+      at this exact load, nine runs); the mask fold on the device is #232, MERGED 11 Sep, with
+      its wiring #239 MERGED 12 Sep and `ENGINE-COPIES-EVERY-OUTPUT-HOME` closed with it. So
+      lever (a) is no longer "mostly built" -- it is in, and none of it is waiting on anyone.
+      AND A THIRD SHAPE FOR THE KNOB, 14 Sep, measured despite a contended box because an
+      interleaved A/B on ONE box cancels contention between its arms -- which is #214's own
+      method. 12 cameras x 20 fps x 20 s, four GPUs, `workers 24`, the pan fixture, arms run
+      off/on/off/on:
+        blocking_sync=0   accepted 2 005, 2 527    cores 5.14, 6.46
+        blocking_sync=1   accepted 2 697, 2 681    cores 5.72, 5.81
+      READ AS RANGES, not means, which is the rule this ledger already carries: accepted does
+      NOT overlap -- ON [2 681, 2 697] against OFF [2 005, 2 527], so min(ON) > max(OFF) -- and
+      cores DO overlap, ON [5.72, 5.81] sitting inside OFF [5.14, 6.46]. So at this shape the
+      knob buys THROUGHPUT AND STABILITY (the OFF spread is 522 accepted and 1.32 cores; ON is
+      16 and 0.09) and NO measurable host-CPU saving.
+      NOT A CONTRADICTION OF #214, and the shape is why: that PR measured 50x20 (-40% host CPU)
+      and "a fifth of it" as 50 cameras x 4 fps -- same fleet, lower rate. This is 12 cameras at
+      FULL rate: a quarter of the fleet, a quarter of the camera threads and RTSP streams, same
+      per-camera cadence. Three shapes now, and the host-CPU win appears in the two with fifty
+      cameras and not in the one with twelve, which is worth knowing before anyone extrapolates
+      the -40% down the load curve.
+      AND THE OTHER LEVER, A/B'd the same way and at the same shape -- `bench.cpp:400` calls
+      `SHIPINFER_DEVICE_FOLD=0` "the A/B this was measured with", so this is the hatch it was
+      built for. Arms off/on/off/on, the knob confirmed engaged (the "folding `mask_area_px`
+      on the device" line appears in the ON arms and not the OFF ones) and the segmenter busy
+      in all four (700-990 rows a device):
+        fold=0   accepted 2 278, 2 207   host CPU 157.4 s, 175.1 s
+        fold=1   accepted 2 780, 2 451   host CPU 149.0 s, 137.4 s
+      NORMALISED, because the ON arms also did MORE work -- 3 411-3 833 segmenter rows against
+      3 002-3 123 -- so raw seconds understate it. Host CPU per ACCEPTED frame:
+        fold=0   [69.1, 79.4] ms        fold=1   [53.6, 56.0] ms
+      NON-OVERLAPPING, so the difference is real: at the worst pairing the fold is **19% less
+      host CPU per frame**, having segmented more. That is the shape of what #232 priced at
+      1.44 ms/crop of host loop against 10 us of kernel.
+      SO OF THE TWO HOST-BUDGET LEVERS, ONLY ONE SHOWS AT TWELVE CAMERAS. The fold's saving is
+      here and non-overlapping; the blocking sync's is not at this shape (its cores overlap,
+      above) though its throughput gain is. Both raise accepted frames. Worth having before the
+      design-load run: the -40% host CPU #214 measured at 50x20 is not what the knob alone
+      gives a smaller fleet, while the fold's saving looks like it travels.
+      THE 2x2 THAT WAS TO COMBINE THEM IS INCONCLUSIVE, AND THE FOLD'S 19% DID NOT REPRODUCE
+      (15 Sep). Same shape, same plan, same binary -- no C++ source has moved since -- both
+      knobs verified engaged in all eight arms by their own log lines, two replicates, cells
+      interleaved. TOTAL host CPU per accepted frame:
+        s0f0 [80.8, 82.0]   s1f0 [71.4, 74.1]   s0f1 [63.8, 85.3]   s1f1 [69.1, 78.7] ms
+      Every cell overlaps every other and s0f1 alone spans 21.5 ms, which is wider than the
+      whole effect claimed above. So the COMBINED effect V167's 16-GPU arithmetic assumes is
+      NOT resolved at this shape and this many replicates.
+      WHY THE AGGREGATE CANNOT SEE EITHER LEVER: half the host CPU is not theirs to save.
+      Per-thread, one group is 45-50% of `command_cpu_s` in all eight arms against the model
+      threads' 12-19%, and it costs 26.3-30.3 ms per frame READ in every one of the four knob
+      combinations -- an INVARIANCE across both levers that is the evidence neither reaches it.
+      AND THAT GROUP IS NOT WHAT ITS NAME SAYS, which took a second look to see. It reports as
+      `rtpjitterbuffer`, but `gstreamer_pipeline.h:270` puts NO `queue` between `rtspsrc` and
+      `appsink`, so depay -> parse -> SOFTWARE DECODE -> videoconvert to BGR -> appsink all run
+      on the jitter buffer's srcpad task; Linux truncates `comm` at 15 characters and
+      `rtpjitterbuffer` is exactly 15, so the whole chain reports under that one name. The
+      arithmetic settles it: one thread per camera, 12.78 s over 261 frames in `design60`
+      (49 ms/frame) and 6.42 s over 237 at twelve cameras (27 ms/frame). Jitter bookkeeping
+      does not cost that; 1080p software H.264 decode plus an NV12->BGR convert does.
+      ON THE THREADS THEY DO TOUCH, both questions answer cleanly. Model-thread CPU per
+      ACCEPTED frame:
+        blocking_sync  off [12.1, 15.9] ms   on [8.3, 9.8] ms   NON-OVERLAPPING, -19% worst pair
+        fold at sync=1 off [8.4, 9.8] ms     on [8.3, 9.2] ms   OVERLAPPING
+      So (1) "throughput yes, host CPU no" for the knob at twelve cameras was an ARTEFACT of
+      dividing by a total that is half ingest -- on its own threads the knob saves what #214
+      says; and (2) the fold's [53.6, 56.0] does not come back. The fold=0 arms reproduce
+      across the two days (model-thread [8.5, 10.1] then, [8.4, 9.8] now); only fold=1 moved,
+      [6.0, 6.1] -> [8.3, 9.2]. One of the two days is unrepresentative and this box cannot say
+      which, so READ THE 19% AS NOT REPRODUCED rather than as refuted.
+      WHICH REPRICES ROW 7's ARITHMETIC, and that matters more than either knob. Row 7 says the
+      two levers "together are the difference between 63 cores at 3 000 and something under 48".
+      They act on the model threads: 12-19% of host CPU at twelve cameras, and 4% in the one
+      real 50-camera run (`design60`, 2 725 accepted of 13 055 read, ingest 69%). Removing ALL
+      model-thread CPU does not close a 63->48 gap. The dominant term on the route V167 mandates
+      is our own RTSP ingest; it scales with frames READ rather than accepted, so it GROWS as
+      acceptance falls, and both merged levers leave it untouched.
+      SO THE NEXT TARGET UNDER V168's LOOP IS THE DECODE ROUTE, not a third knob on the
+      inference side -- AND IT IS ALREADY THE MANDATED ONE. Every thread-level number here is
+      from `--source gstreamer`, which decodes in software and converts to BGR on the host;
+      `--source nvdec` decodes on the device and V156's `gstreamer rtsp -> nv12 -> all on VRAM`
+      removes the convert too. So the largest host cost measured is exactly the cost those two
+      instructions exist to delete, which is a reason to finish that route rather than to invent
+      a knob. Bounds, stated: `design60` was overloaded (21% acceptance), so its 69% is the
+      overloaded regime; the RTSP servers share the container but are accounted separately and
+      are small (5.3 s against 83.5 s); and the nvdec arm is NOT measured here -- this binary
+      omits that lane, which needs `shipinfer-gst:jammy-nvdec`, so the comparison is owed.
+      WHICH CHANGES THE QUESTION FROM A DECISION TO A MEASUREMENT. "Which lever?" was asked when
+      (a) was unfinished. It is finished, so the next step is to re-run the 11 Sep measurement
+      and see where 711.5 tracked img/s and 15.5 cores have moved -- and only if that still
+      falls short do (b) more devices and (c) fewer models become a choice for the operator.
+      THE MEASUREMENT IS MINE AND IT NEEDS A QUIET BOX, not an answer: same blocker as
+      `EXECUTE-BLOCKS-THE-INSTANCE-THREAD`. Measured 14 Sep, that run gets 7.02 of 48 cores
+      against the 16.19 the 11-12 Sep runs had, because other users hold ~40 cores and five of
+      eight GPUs. This chain is host-bound by its own headline, so a contended box cannot
+      produce a comparable number. Re-run at 50x20x40 s on four free GPUs with `workers 92`.
+      WHAT DOES NOT SURVIVE THAT LOAD IS IDENTITY: 170 of 56 050 observations admitted, zero
+      global ids, because 23% of each camera's frames are refused at the queue and `min_hits`
+      counts CONSECUTIVE instants. That is `PIPELINE-WORKERS-NEED-CAMERA-AFFINITY`'s territory
+      and it is the honest caveat on any "3 000 img/s" claim: frames, yes; identities, not yet.
+      PREVIOUS READING, kept because the numbers in it are real and the conclusion was not: the
+      target is not reachable on four A5000s with this chain -- ~260 img/s of tracked frames
+      against 3 000. Three levers, priced in this item and in `benchmarks/RESULTS.md`: (a) fewer or cheaper models per image, (b) camera affinity or a per-camera sequencer, (c) more devices (16 GPUs is ~4x this, still short). I can build any of them; which one is yours to pick. THE WHOLE CHAIN MEASURED END TO END, 11 Sep, AND THE
+      THROUGHPUT NUMBER THIS LEDGER HAS BEEN QUOTING WAS COUNTING FRAMES THE TRACKER
+      REFUSED.** `decode -> detect -> crop -> segment -> embed x2 -> track -> mtmc`, over
+      gstreamer RTSP from the offline H.264 (`--source nvdec`), 4 GPUs (0/2/5/6), 12 cameras
+      x 200 fps x 40 s, fp16, one variable: `workers`.
+      | workers | accepted img/s | untracked | **TRACKED img/s** | complete/incomplete |
+      |---|---|---|---|---|
+      | 24 | 265.8 | 188 (1.8%) | **261.1** | 10 633 / 0 |
+      | 48 | 331.4 | 2 679 (20.2%) | **264.4** | 13 256 / 0 |
+      | 92 | 442.6 | 7 409 (41.9%) | **257.3** | 17 662 / 40 |
+      **THE TRACKED RATE IS FLAT AT ~260 img/s.** Every extra worker buys accepted frames that
+      carry NO track ids, and a frame with no ids is a frame `mtmc` cannot associate -- so the
+      "throughput scales with workers, sharply diminishing" finding below was measuring the
+      refusals. `track_frames_untracked` is the counter that says so, and it exists because
+      #215's review made a refused frame publish an empty batch rather than fail the stage.
+      WHY: ONE SHARED WORKER POOL REORDERS A CAMERA'S FRAMES, and a per-camera tracker refuses
+      a frame that does not advance its own stream (`stages.cpp:290`, and `track.py` catches
+      the same refusal). More workers, more reordering, more refusals -- 1.8% at 24, 42% at 92.
+      So the chain's real answer on four A5000s is **~260 img/s of tracked frames**, which is
+      **11.5x short of V167's 3 000**, and the per-worker scaling that looked like headroom was
+      not. The fix is placement AFFINITY rather than more threads
+      (`PIPELINE-WORKERS-NEED-CAMERA-AFFINITY`, below): the Python plane already owns a
+      `sequence_affinity` placement policy; the C++ pipeline's worker pool has no such binding.
+      Neither the host nor the engines is the wall at 92 workers: 12.4 of 48 cores (26%), and
+      the four models sum to ~430% of the 800% eight instances could use on each device.
+      ALSO: the 10 Sep entry below reported "484.8 img/s, every frame complete" for the same
+      split on four GPUs and "zero untracked" on three. Today's binary reports 42% untracked at
+      that worker count. I am not asserting the old number was wrong -- it was a different day,
+      a different tenant load and a pre-#220 binary -- but it was read WITHOUT the untracked
+      counter in view, and the tracked rate is the number that matters.
+      PREVIOUS ENTRY (10 Sep) -- THE FIRST NUMBERS ON THE MANDATED ROUTE.
+      Every figure below is `--source nvdec` over **gstreamer RTSP** from an **offline H.264
+      video** (`benchmarks/baseline/data/.rtsp/*.h264`, encoded once by ffmpeg from the 1080p
+      JPEGs -- so the "make the video" half was already built and is what the RTSP server
+      re-packetises). Binary rebuilt inside `shipinfer-gst:jammy-nvdec` with EVERY lane, so
+      `track` runs: the chain line says `6 stage(s), not run here: decode mtmc output`.
+      4 GPUs (2/3/4/6), 50 cameras x 100 fps x 40 s, fp16, 4 instances/device, blocking sync
+      on. `img/s = frames_accepted / 40`:
+      | chain | modules that EXECUTED | RTSP delivered | **img/s** |
+      |---|---|---|---|
+      | detect only | ingest -> detect | 3 661 | **2 696.5** |
+      | detect + segment | ingest -> detect -> crop -> segment | 2 946 | **486.8** |
+      | detect + person embedder | ingest -> detect -> crop -> embed_person | 2 662 | **856.5** |
+      | all four models | + embed_ship | 1 542 | **264.8** |
+      | the deployable chain, with TRACK | + track | 2 571 | **335.5** |
+      **AGAINST V167's 3 000 TARGET: the whole chain is at 335.5, which is 11%.** One model is
+      at 2 696 and is GENERATOR-limited rather than GPU-limited (RTSP delivered 3 661 of the
+      5 000 asked, and 38 634 frames were dropped by our side), so detect-only's own ceiling on
+      this route is not yet known.
+      **THE SEGMENTER IS THE SINGLE BIGGEST COST AND IT IS A CHAIN DECISION.** Adding it to
+      detect takes 2 696 -> 487, a **5.5x** drop, for **1.47 invocations per image** -- because
+      each one is a 640x640 CROP, the same input extent as a whole detect. The Python plane's
+      `PoolSegment` does NOT crop; it segments the whole frame ONCE
+      (`SEGMENT-NO-CLASSES-ASYMMETRY`). So the C++ plane is paying 1.47 detect-sized
+      inferences per image where the other plane pays ~1, and the chain file's
+      `classes: [ship]` is what selects that.
+      The person embedder costs 2 696 -> 857 (3.1x) for 7.80 invocations of 256x128, which is
+      the cheaper trade per invocation by an order of magnitude.
+      NVDEC IS NOT FASTER THAN REPLAY HERE, which is worth stating because it contradicts the
+      premise the route was chosen on: the same four-model chain is 492 img/s over replay and
+      265 over nvdec, and the deployable chain is 335 over nvdec. Both arms shed most of the
+      offer, so this is a comparison of two saturated systems and the nvdec arm carries the
+      RTSP servers' own cost on the same box (`generator_cpu_s` is reported apart, but the
+      cores are shared). It does not follow that the VRAM route is worse in a deployment where
+      nothing else runs on the host -- it follows that on THIS box, at THIS load, the upload
+      was not the wall.
+      **THE CAMERA SPLIT MATTERS AND THE GENERATOR IS THE CAP.** `rtpjitterbuffer` costs per
+      CAMERA, not per frame -- 136 CPU-s at 10 cameras, 170 at 25, 182 at 50 -- so the same
+      offer through fewer cameras leaves more of the box for the plane. Same route, same plan:
+      | cameras x fps | offered | RTSP delivered | accepted |
+      |---|---|---|---|
+      | 10 x 500 | 5 000 | 2 531 | 2 531 (generator-bound) |
+      | 50 x 100 | 5 000 | 3 661 | 2 696 |
+      | 25 x 200 | 5 000 | 3 440 | 3 240 |
+      | 25 x 400 | 10 000 | 3 413 | **3 324** |
+      So the RTSP generator caps at ~3 400 img/s of delivery on this box and DETECT-ONLY TAKES
+      ESSENTIALLY ALL OF IT: **3 324 img/s, which is above V167's 3 000 target, and still
+      generator-limited** -- its own ceiling on this route is not yet known.
+      **AND THE DEPLOYABLE CHAIN AT THE SAME SPLIT: 424.8 img/s.** 25x200, 6 stages including
+      `track`. So the whole pipeline is **7.1x short** of 3 000 while ONE model is already over
+      it.
+      **THE ARITHMETIC THAT SETTLES WHETHER 3 000 IS REACHABLE ON FOUR A5000s.** Normalising
+      the 11.74 invocations to detect-equivalents by input pixels (640x640 = 1, 256x128 =
+      1/12.5): 2.47 + 9.27/12.5 = **3.21 detect-equivalents per image**. At 424.8 img/s that is
+      1 364 equivalents/s against detect-only's 3 324 -- so the chain achieves 41% of the pure
+      rate in equivalent work, and the missing 2.4x is the crop kernels, the scatter,
+      reassembly and seven model instances per device contending. Even with that overhead gone
+      the chain would do 3 324 / 3.21 = **1 036 img/s**. Reaching 3 000 needs the per-image
+      work down to 3 324/3 000 = **1.11 detect-equivalents**, i.e. about ONE detect-sized
+      inference per image and nothing else.
+      **SO: 3 000 img/s for detector + segmenter + two embedders is not reachable on four
+      A5000s, and not by scheduling.** It needs fewer or cheaper models per image, or more
+      devices -- and 16 GPUs at 4x the devices is ~1 700 img/s of THIS chain, still short, so
+      the chain has to get cheaper too. That is a design conversation, and the levers are
+      priced above.
+      **THE PYTHON PLANE IS NOT A VIABLE MEASUREMENT ARM AT LOAD, ON EITHER SOURCE, so the
+      end-to-end target is blocked on the C++ `mtmc` stage.** Measured 10 Sep, 4 GPUs:
+      | plane | source | offered | generator delivered | verdict |
+      |---|---|---|---|---|
+      | Python, `--topology single` | replay | 1 000 | 358.6 (36%) | refused by the offer gate |
+      | Python, `--topology fleet` (4 shards) | replay | 1 000 | 72-76 per shard (28-32%) | refused, then 5 s stage timeouts |
+      | Python, `--topology single` | **rtsp** | 4 800 | **47.5 (1%)** | refused |
+      RTSP is WORSE than replay on that plane, not better: the frames arrive off sockets but
+      the 24 GStreamer camera threads run in the same interpreter as the pipeline workers, and
+      the harness's own refusal says exactly that ("the wall is not decoding -- it is one
+      interpreter running the camera threads and the pipeline workers together", arch.md
+      section 9 '[Decode procs]').
+      SO: the plane that HAS `mtmc` cannot be fed, and the plane that can be fed HAS NO `mtmc`.
+      `CSRC-GRAPH-HAS-NO-TRACKING`'s 3b/3c are the critical path for V165/V167, and nothing
+      else measures the target.
+      CORRECTION TO MY OWN CLAIM, made to the operator and wrong: I said the Python plane
+      segments the WHOLE FRAME and that making C++ match would be a parity fix. `PoolSegment`'s
+      own docstring says the opposite -- "A crop element like the embedders SINCE
+      P6-SEGMENT-CROP, which CLOSES a cross-plane divergence. The C++ plane has always cut a
+      `ship_crops_640` set and run the segmenter on it; this one letterboxed the whole frame,
+      so `mask_area_px` was computed from different pixels". Both planes crop per ship today
+      and the C++ behaviour was the reference. Whole-frame segmentation is still the biggest
+      priced lever (5.5x for 1.47 invocations) but it is REOPENING A DECIDED PRODUCT QUESTION
+      and would change what `mask_area_px` means, not collecting a parity fix.
+      NEXT: (1) `latency_ms` is 200 by default
+      and there is no jitter on loopback -- 276 of our 625 CPU-s are the RTP receive path;
+      (3) the C++ plane still has no `mtmc`, so "decode -> mtmc track" cannot be measured end
+      to end until PR 3 lands (the barrier half is built and green).
+
+- [!] **V165-WHOLE-PIPELINE-4500 · THE RE-RUN HAPPENED AND 4 500 IS NOT MET: [3203, 3278],
+      SHORT BY 27-29% (15 Sep). THIS IS THE ANSWER THIS LINE WAS WAITING FOR.** The line above
+      said "nothing here needs an answer until the re-run says whether the target is met", and
+      it now says. Same measurement as `V167-GSTREAMER-ONLY-3000`: 50x20x40 s, `--source
+      nvdec`, four A5000s, three runs, **TRACKED [800.8, 819.6] img/s** extrapolated linearly
+      to sixteen GPUs.
+      SO THE TWO TARGETS SPLIT HERE, and that is the useful thing this run settled: V167's
+      3 000 is MET on this route, V165's 4 500 is not. 4 500 needs 1 125 tracked img/s a
+      GPU-quad, i.e. **1.37x** what the chain now does.
+      WHAT 1.37x CANNOT COME FROM, because this session measured each: not the host budget --
+      it is [4.9, 5.2] of 48 cores, so the host is no longer the wall; not the two merged
+      host-budget levers, which act on 4-19% of host CPU.
+      **AND NOT MORE WORKERS EITHER, but the reason changed under re-measurement (15 Sep).**
+      This line used to cite "92 -> 140 -> 188 LOWERS tracked img/s"; that ranking was taken at
+      1 000 offered and is withdrawn (`WORKER-PLATEAU-ON-THE-NVDEC-ROUTE`). At 2 000 offered
+      over sixteen interleaved runs, 140 tracks [857.7, 1040.8] against 92's [848.1, 939.2] --
+      a 5.7% higher MEAN whose ranges overlap, bought with 14.4% more accepted frames. So the
+      thread pool is not nothing and it is not a lever either: x4 that is [3431, 4163] against
+      4 500, where even 140's best run is 7.5% short and its floor is below 92's ceiling.
+      A knob whose gain no single run can confirm does not close a 1.37x gap. The devices are the wall now,
+      and this item's own table says where: **11.74 model invocations per image**, of which
+      `person_embedder` is 7.80 and `ship_segmenter` 1.47 at a 640x640 crop.
+      **AND THE CHEAPER-CHAIN LEVER WAS MEASURED RATHER THAN ASSUMED, 15 Sep -- IT IS NOT
+      THERE.** The occupancy table above says `ship_segmenter` is 385.8% of a device, 23.5% of
+      all device time, so removing it should buy ~1.31x. It buys **1.01-1.05x**. Same design
+      load, same shape, `embed_ship` re-pointed `after: detect`, two runs:
+        with segmenter      tracked [800.8, 819.6] img/s     16 GPUs [3203, 3278]
+        WITHOUT segmenter   tracked [828.5, 844.5] img/s     16 GPUs [3314, 3378]
+      Non-overlapping, so the gain is real -- and small. 4 500 is still 25-26% away.
+      WHY THE ARITHMETIC MISLED, and this is the part worth keeping: `per_device_busy_pct`
+      over 100% measures QUEUEING at a model's instances, not a share of a fixed budget that
+      another model can inherit. Freeing 23.5% of device time moved throughput 1-5%, so
+      something else takes up the slack immediately. Occupancy percentages are not a
+      throughput model, and I had been reading them as one.
+      **AND THE STRONGEST FORM OF IT: STRIPPING 91% OF THE MODEL WORK BUYS 1.14x.** Same load,
+      same shape, `topology/detect_only.yaml` -- one model invocation an image against 11.74:
+        full chain    11.74 inv/img   accepted [821.4, 836.5]   detector 164-174% busy
+        no segmenter  10.27           accepted [840.1, 856.3]
+        DETECT ONLY    1.00           accepted **[949.5, 949.6]**  detector **83-89%** busy
+      Detect-only reads 37 929-37 936 of 40 000 offered (95%) with its detector UNDER 100%
+      occupied, so at that shape the devices are not the wall either -- and the whole
+      perception chain, nine models' worth of work, costs 12% of throughput against it.
+      **CORRECTION, SAME HOUR: "THE FRAMEWORK CAPS AT ~950" IS NOT SUPPORTED AND I WITHDRAW
+      IT.** The counters say detect-only `frames_dropped 0`, `queue_rejected 0` -- it refused
+      NOTHING and its detector sat 83-89% busy. The 949.6 was `accepted / 40 s`, i.e. 95% of
+      the 1 000 offered, and the missing 5% is frames never READ during start-up, not frames
+      the chain could not keep up with. Detect-only was OFFER-BOUND WITH HEADROOM, so no
+      ceiling of any kind can be read off it.
+      SO I OFFERED 2 000 INSTEAD OF 1 000, AND THAT CHANGES THE ANSWER AGAIN -- the third time
+      in this thread, and the reason is always the same: a comparison below saturation measures
+      the offer, not the system. 50 cameras x 40 fps, GPUs 1,3,4,6, both at `workers 92` -- which
+      this page now knows is part of the specification, since the ceiling moves with it -- and
+      **the two chains ALTERNATED within one sitting, three runs each**:
+        detect only   accepted **[1 805.2, 1 873.6]**  dropped [0.2, 2.4]% of read   110-124% busy
+        full chain    accepted **[  882.0,   950.5]**  dropped [49.2, 52.9]% of read 112-127% busy
+      **So the 10.74 extra invocations cost [1.90, 2.12]x**, pairing each run with its partner
+      (1.90 / 2.02 / 2.12) -- not the 1.14x the 1 000-offered run showed and not the 12% I wrote
+      from it, BOTH WITHDRAWN.
+      THIS ROW READ "1 845 / 977 / 48% / 1.89x" AND **BOTH ARMS CAME FROM ONE WITHDRAWN SITTING**
+      (#287 r3 found the 977, r4 found that 1 845 was its partner). A ratio whose numerator and
+      denominator come from a box state the page has disowned is not saved by labelling the
+      denominator `n=8`. RE-RUN RATHER THAN CAVEATED, and the answer is reassuring: 1 845 falls
+      INSIDE the new [1 805.2, 1 873.6] and 1.89x just below [1.90, 2.12], so the magnitude was
+      right and only the provenance was wrong. The eight-run ceiling from the wider sweep is
+      [884.5, 971.1]; the [882.0, 950.5] above is this sitting's own three, which is what the
+      ratio is computed from. At 1 000
+      offered neither shape was at its ceiling, so that comparison measured the offer.
+      WHICH ALSO RETIRES THE SEGMENTER NUMBER ABOVE: 1.01-1.05x was taken at 1 000 offered,
+      below both ceilings, so it does not price the segmenter either. What survives from it is
+      the methodological point -- occupancy percentages did not predict it -- and that point is
+      now stronger, because occupancy did not predict THIS either (detect-only at 110-124% busy
+      still had [1 805, 1 874] img/s in it).
+      SO THE MODELS DO COST, AND THE OPERATOR'S LEVER IS REAL AFTER ALL: a chain doing one
+      invocation an image runs [1.90, 2.12]x one doing 11.74. What that buys against 4 500 is a
+      product question I cannot answer -- detect-only is not the product.
+      SO THE ANSWER TO THIS ITEM IS NOT A PRODUCT DECISION AFTER ALL: 4 500 NEEDS DEVICES, and
+      specifically more SHARDS rather than more cards per shard.**
+      Trimming the chain's largest non-detector model gets 1-5%; the remaining 1.31x is not
+      hiding in the model mix. **[19.2, 21.2] GPUs** at this chain's cost is the honest shape --
+      4 500 over tracked [848.1, 939.2] a quad -- and it was "~22" while the arithmetic ran on
+      one run. The sixteen-GPU figure stays an extrapolation from four either way.
+      **AND TWO MORE SCHEDULING KNOBS WERE MEASURED 15-16 Sep, BOTH AIMED AT THE MEASURED
+      BOTTLENECK, NEITHER A LEVER.** #288's new `per_device_batches` says the detector -- the
+      busiest model on every device at 121-125% -- fills only **2.74 of its max_batch 8**, so
+      the two knobs that could change that were worth trying. Saturation, GPUs 1,3,4,6,
+      `workers 92`, alternated within one sitting per knob:
+        `max_queue_delay_us` 5 000 -> 20 000 (n=3)  batch 2.88 -> 4.20 SEPARATED
+                                                    tracked 817.5 -> 845.3 mean, OVERLAP
+        detector instances 2 -> 3 per GPU   (n=8)  batch 2.82 -> 2.04 SEPARATED
+                                                    tracked 877.1 -> 816.1 mean, OVERLAP
+      SO BOTH MOVE THE BATCH CLEANLY AND NEITHER MOVES THROUGHPUT PAST THE NOISE. The batch is
+      fillable -- 46% fuller at a 20 ms window -- and it is worth at most ~3%, so the detector
+      is not batch-starved in a way that matters.
+      THE INSTANCE MECHANISM IS THE NEW COUNTER'S and would have been invisible without it: a
+      third instance splits one request stream across more queues so each fills less, and the
+      achieved batch FALLS 2.82 -> 2.04 while `busy_pct` climbs 135% -> 210%. Read without the
+      batch column that is "more instances, more busy, less throughput" with no cause;
+      `busy_pct` over 100% is the queueing, not the work.
+      **I CLAIMED THE INSTANCE COUNT SEPARATED ON THROUGHPUT AT n=3 AND IT DOES NOT** (#289's
+      review, and it was right): three an arm gave [816.8, 849.5] against [772.7, 782.2], a
+      34.6 gap against a 32.7 spread. Five more an arm turned that into a full overlap -- the
+      same failure `WORKER-PLATEAU-ON-THE-NVDEC-ROUTE` records at n=4, on the same rig, hours
+      later. WHY THE BATCH SURVIVES THE SAME TEST: it is a ratio of two large counters with a
+      tiny within-arm spread, so its gap is 15x the spread for the window knob and 3.4x for the
+      instance count, while tracked img/s on this rig spreads up to 130 and cannot resolve 61.
+      LATENCY WAS NOT THE WINDOW'S COST HERE AND COULD NOT HAVE BEEN: at this offer
+      `frame_us_p50` is ~210 ms of queueing in both arms, so 15 ms of extra window is
+      invisible. That price has to be read at the DESIGN load, not at the ceiling.
+      **AND THE LAST WAY OUT IS CLOSED: WITH THE BATCH NEARLY FULL, THROUGHPUT STILL DOES NOT
+      MOVE.** Both arms above kept the batch well under `max_batch` 8, so "a FULLER batch would
+      pay" was still live. Re-run on `detect_only` -- where the detector is the only consumer of
+      the devices -- offered 4 000 img/s so that arm saturates too, three alternated pairs:
+        window  5 000 us   batch [6.95, 7.00] mean 6.97   accepted mean 1 341.4
+        window 20 000 us   batch [7.57, 7.65] mean 7.62   accepted mean 1 326.2
+      The batch SEPARATES (gap 0.57 against a 0.08 spread, 7x) and accepted OVERLAPS at 0.989x
+      of the mean -- slightly DOWN.
+      THE CLAIM RESTS ON THE HEADROOM, NOT ON THAT OVERLAP (#290 r1 was right to separate them):
+      at 7.62 of 8 under 5% of fill is left, so batching cannot be a large lever THERE whatever
+      the throughput arm says -- and the 20 ms arm's own accepted spread is 231.8 img/s, 17% of
+      its mean, so an n=3 overlap that wide excludes nothing. Treating an n=3 overlap as a zero
+      is the mirror of the n=3 "separation" this session already had to withdraw.
+      AND THE REGIME IS NOT THE DEPLOYMENT'S: this is `detect_only` at 4 000 offered with 40-48%
+      dropped. At 50x20 the fill is 2.74 of 8 -- five sixths unused, the one regime where the
+      headroom argument does NOT apply -- and what is established there is +3.4%, overlapping,
+      n=3: undetermined rather than zero. So the 2.74 fill that started this line is a symptom
+      of arrival rate rather than a proven non-cost.
+      A HYPOTHESIS IT SUGGESTS AND DOES NOT ESTABLISH, because the comparison crosses both
+      sittings and chains: the fill is set by the ARRIVAL RATE at each instance, not by the
+      window -- the same 5 000 us default gives 2.74 in the full chain at 2 000 offered and
+      6.97 here at 4 000. One sitting varying the offer alone would settle it.
+      TWO RUNS OF A PLANNED FOURTH PAIR RETURNED ZERO FRAMES, all 50 cameras abandoned past the
+      stop deadline. The cause is the box rather than the code, and it is **not** the tenant I
+      first blamed: `startup_s` -- which the log calls `engines ready in` -- steps from
+      **0.35-0.54 s across the six good runs to 49.9 / 50.4 s** on the pair that failed, and a
+      later 12-camera run on three UNSHARED GPUs took 41.2 s and read nothing either. So it is
+      neither the camera count nor a contended device.
+      **AND IT IS NOT THE FILESYSTEM EITHER, which this line said until it was measured**: the
+      engine files read at 1.1-1.3 GB/s and all four `.plan`s deserialise in ~0.2 s together.
+      The cost is ONE per-process CUDA init -- first context 9.4-10.1 s -- and the variable is
+      how many devices the container can SEE: 9.96/10.07 s at eight against 0.658/0.665 s at
+      three, four of the eight holding other tenants' allocations. See
+      `THE-BOX-STOPPED-BEING-MEASURABLE`, which carries the numbers and the recipe.
+      THE THREE COMPLETED PAIRS ALL PREDATE THE STEP CHANGE, and the box became measurable again
+      once the visible set was narrowed.
+      **AND THE OVERLOAD QUESTION IS ANSWERED, IN BOTH DIRECTIONS (16 Sep).** On `detect_only`,
+      offering 2 000 -> 4 000 over eight alternated pairs costs **-32.5% of accepted on the
+      mean** and the MECHANISM separates cleanly -- dropped [0.3, 5.2]% against [40.3, 56.7]%,
+      no overlap, with read RISING 1.22x while accepted falls. The accepted ranges themselves
+      just touch at n=8 (one 4 000 run hit 1 687.1 against a 2 000 run's 1 662.5) and the
+      overloaded arm is 4x more variable, sd 251.5 against 64.1 -- which is the finding rather
+      than noise around it.
+      **THE FULL CHAIN DOES NOT DO THIS, AND THAT IS WHAT PROTECTS EVERY CEILING FIGURE HERE.**
+      Offers 1 200 / 1 600 / 2 000, round-robined, in TWO independent sittings on different
+      quads -- eight runs per offer:
+        1 200   A mean 895.1   B mean 854.5   POOLED 869.7 (sd 35.2)
+        1 600   A mean 910.7   B mean 848.0   POOLED 871.5 (sd 52.2)
+        2 000   A mean 883.3   B mean 870.9   POOLED 875.6 (sd 74.7)
+      **The two sittings do not agree on which offer is best** -- A says 1 600, B says 2 000 --
+      which is what a variable that does nothing looks like. Pooled, the three means span
+      **5.9 img/s, 0.7%**, against a 238.6 within-arm spread. So **2 000 offered, where every
+      saturation figure in this file was taken, is not past the chain's best point.** Had it
+      been, the whole day's ceiling was measured downhill of the peak.
+      DRAWN AT n=8 PER POINT DELIBERATELY: an n=3 overlap read as a zero is the mirror of the
+      n=3 separation this session already withdrew, and #292's review was right to say so while
+      the sweep still stood at three. The one thing the pooled table does show is that the
+      2 000 arm's sd is twice the 1 200 arm's -- offering further past saturation buys variance
+      even where it costs no throughput.
+      WHY THEY DIFFER, AND IT IS ADR-005 WORKING: the chain refuses its excess at the QUEUE --
+      `queue_rejected` **7 700 -> 34 800 pooled over all eight runs**, 4.5x -- before it costs
+      device time, while `detect_only` at
+      4 000 pushes INGEST past its own limit, so the extra decode is spent on frames nothing
+      will accept. Backpressure protects the chain; it cannot protect a stage upstream of it.
+      THE TALLY, all three knobs measured at saturation: workers 92->140 +5.7% mean, the batch
+      window +3.4%, a third instance -7.0% -- **all three OVERLAP on throughput**. What
+      separates is never the throughput, it is the mechanism underneath: untracked fraction for
+      the worker count, achieved batch for both detector knobs. **No scheduling knob closes
+      1.37x** -- which is what [19.2, 21.2] GPUs at this chain's cost already says, now with
+      the knob space searched rather than assumed.
+      AND THE BOUND ON ALL OF IT: the CONTROL arm -- `workers 92`, `count: 2`, 5 000 us, same
+      cards, same shape -- reads **[769.3, 947.1] tracked across today's three sittings**, 23%
+      of its own low end, with sitting means 75.7 apart. So an absolute figure from this box is
+      meaningless without its sitting, a cross-sitting comparison is not a comparison, and a
+      within-sitting effect smaller than the within-arm spread is invisible however the runs
+      are ordered.
+      WHAT IS STILL YOURS, and it is smaller than before: whether 4 500 on sixteen GPUs is a
+      target to keep. Nothing I can measure moves the chain there.
+      ORIGINAL: THE QUESTION IT SHARES HAS CHANGED, 14 Sep: both
+      host-budget levers are MERGED (#214 today, #232/#239 on 11-12 Sep), so
+      `V167-GSTREAMER-ONLY-3000` is now a measurement waiting on a quiet box rather than a
+      lever decision waiting on you. This line inherits that: nothing here needs an answer
+      until the re-run says whether the target is met.**
+      ORIGINAL: SAME QUESTION AS `V167-GSTREAMER-ONLY-3000`, which carries the numbers: the chain is measured, the target needs a lever and the lever is a product decision.** THE TARGET IS NOW ABSOLUTE AND IT IS THE WHOLE CHAIN.**
+      4 500 img/s from `decode -> ... -> mtmc track`, not a multiple of anything -- so the
+      offer-bound baseline stops being the denominator. The operator also asked the right
+      question about my numbers, and the answer is a COUNT rather than an excuse.
+      **WHY DETECT-ONLY IS 4 000+ AND THE FULL CHAIN IS 695: THE CHAIN RUNS 11.74 MODEL
+      INVOCATIONS PER IMAGE, NOT 4.** Measured from `full_x1b.log` (fp16, 4 GPUs, 50x20x40 s,
+      27 792 frames), `per_device_rows` summed over devices divided by frames:
+      | model | rows | rows/frame | input | device% | us/row |
+      |---|---|---|---|---|---|
+      | ship_detector | 27 792 | **1.00** | 640x640 | 562.6 | 8 097 |
+      | ship_segmenter | 40 819 | **1.47** | 640x640 CROP | 385.8 | 3 781 |
+      | ship_embedder | 40 819 | 1.47 | 256x128 | 189.8 | 1 860 |
+      | person_embedder | 216 775 | **7.80** | 256x128 | 500.5 | 924 |
+      | TOTAL | 326 205 | **11.74** | | 1 638.7 | |
+      So detect is indeed the heaviest PER INVOCATION and it runs ONCE per image, while the
+      other three run 10.74 times between them. In engine input pixels: detect-only feeds
+      409 600 px per image, the chain feeds 2.47 x 640x640 + 9.27 x 256x128 = 1 315 471 px --
+      **3.2x**. Throughput is 5.8x lower, so ~1.8x is not engine input: the crop kernels, the
+      scatter, reassembly, and SEVEN instances per device against detect-only's four.
+      **AND `us/row` PROVES `per_device_busy_pct` IS NOT AN ADDITIVE SHARE.** The same detector
+      engine costs 2 400 us/row in the detect-only run and 8 097 us/row here -- 3.4x for
+      identical work -- because `compute_us` times the `execute` CALL, which under contention
+      includes waiting for the device. Reading those percentages as a budget overstates
+      every stage.
+      **WHAT `replay` IS, since it was asked:** a video source that reads a folder of JPEGs
+      from disk, decodes them ONCE into pinned host memory (`ReplayLibrary`, at most once per
+      process) and then serves them to the pipeline at `--fps`, looping. So it is a synthetic
+      camera whose frames start in HOST memory and are uploaded per frame -- which is exactly
+      the trip V156's `gstreamer rtsp -> nv12 -> all on VRAM` route removes. Every number in
+      this session is `--source replay`, so the operator's instinct is right: it is not the
+      deployment's path, and the resolution sweep above (3x throughput swing with engine time
+      flat) is that upload showing up.
+      **THE ONE CONSISTENT STATEMENT, because I gave the operator two that read as
+      contradictory (V166) -- every number in this session is the `replay` route and NOTHING
+      measured used gstreamer/nvdec:**
+      | run | input route | modules that EXECUTED | img/s |
+      |---|---|---|---|
+      | the highest number I have | replay | ingest(replay) -> detect | **4 716** |
+      | the four-model chain | replay | ingest -> detect -> crop -> segment -> embed_person -> embed_ship | **695** |
+      | whole pipeline incl. track + mtmc | -- | **never measured** | -- |
+      `replay` IS: JPEGs on disk, decoded ONCE on the host CPU into pinned host RAM, then
+      copied host->VRAM EVERY FRAME, then the letterbox kernel, then TensorRT. The nv12 route
+      is the opposite -- NVDEC decodes into VRAM and there is no upload -- and it is the one
+      that removes that copy. Saying "replay ... that is exactly the trip nv12 removes" read as
+      "replay is the nv12 route", which is the reverse; the sentence was mine and it was wrong.
+      **AND THERE IS NO END-TO-END NUMBER FOR TWO INDEPENDENT REASONS, both measured today:**
+        1. C++ plane: `mtmc` does not exist there. The 695 run says so itself -- "not run here:
+           decode track mtmc output". `track` landed as #215; `mtmc` is PR 3, and its pure half
+           (the instant barrier, 83 checks, ASan clean) is built on
+           `feat/the-cpp-plane-syncs-instants`.
+        2. Python plane: it HAS every module including track and mtmc, and the harness cannot
+           feed it. `--topology single`: the generator delivered **358.6 img/s against a 1000
+           target (36%)**. `--topology fleet`, 4 shards: **72-76 img/s per shard against
+           240-260 (28-32%)**, then 5 s stage timeouts. The harness's own refusal names the
+           cause: "the wall is not decoding -- it is one interpreter running the camera threads
+           and the pipeline workers together", and arch.md section 9 puts ingest in separate
+           processes for exactly that.
+      SO THE OFFER GATE IS THE FIRST THING IN THE WAY of answering V165 at all, on the only
+      plane that has every module. Fixing it is not a scheduling change: it is ingest in its
+      own processes, or the C++ plane finished to `mtmc`.
+      NEXT, in order: (1) the same chain on `--source nvdec` at the peak instance count with
+      blocking sync on, which is the only arm that tests the VRAM premise; (2) a stage
+      ablation, because 11.74 invocations is a CHAIN design number and not a hardware one --
+      the segmenter's 1.47 crops at 640x640 is the Python plane's whole-frame segmentation
+      done per row (`SEGMENT-NO-CLASSES-ASYMMETRY`), and 4 500 img/s at 11.74 invocations is
+      52 700 invocations/s, which four A5000s do not do.
+
+- [x] **FPS-ON-FOUR-GPUS · DONE 15 Sep: both arms re-taken on four GPUs as img/s, which is
+      exactly what V164 asked for.** baseline 938.6, ours accepted [821.4, 836.5] / tracked
+      [800.8, 819.6], matched fp16, same cards, same afternoon. The interpretation -- which
+      ratio the 5x means -- is `C1`'s question and stays there; this line's own job was the
+      measurement and it is taken.
+      AND ONE CLAIM IN THIS ITEM IS CONTRADICTED BY ITS OWN NEW NUMBERS, so it is corrected
+      rather than left: the text below says the baseline is "OFFER-BOUND and does no inference
+      (0-8% GPU, 9 815 img/s on ONE gpu against 9 953 on four)". At fp16 with 1 000 img/s
+      offered it reports **SATURATED**, sustaining 470.8 of 500 on detect and 467.9 of 500 on
+      segment. That is a real ceiling in this regime, not an offer artefact -- which matters to
+      `C1`, because a frame ratio against a SATURATED baseline means something a ratio against
+      an offer-bound one does not. The earlier reading was taken at a different load and
+      precision and is not wrong there; it is simply not this run.
+      ORIGINAL: WAITING ON A BOX, NOT ON YOU, 14 Sep. Its blocker was the same
+      **OUR ARM IS MEASURED, 15 Sep, AND IT MOVED A LOT: [821.4, 836.5] accepted img/s on
+      four A5000s** ([800.8, 819.6] TRACKED), three runs at the design load over the mandated
+      gstreamer-RTSP route with `--source nvdec`, at [4.9, 5.2] of 48 host cores. The 544.4
+      in the table below is the `--source replay` arm of 10 Sep; what changed is the decode
+      route (`HOST-DECODE-IS-THE-HOST-BUDGET`), not the models.
+      **THE RATIO IS TAKEN, 15 Sep, AND THE GATE NEEDED NO REBUILD.** baseline **938.6 img/s
+      SATURATED** against ours accepted [821.4, 836.5] / tracked [800.8, 819.6], matched fp16,
+      same four cards, same afternoon: **0.85-0.89x by frames, 5.14-5.23x by model work** (the
+      baseline runs 2 invocations an image, this chain 11.74). `C1` carries the reading.
+      **BOTH OF THOSE ARE SUPERSEDED THE SAME DAY and the pair above is kept only to show what
+      it was:** ours was a run offered 1 000 img/s, which this chain does not saturate at, while
+      the baseline's 938.6 is a saturated figure. At OUR ceiling it is **[0.94, 1.03]x by frames
+      -- parity -- and [5.53, 6.07]x by model work** over eight interleaved runs. The deficit
+      never existed; `C1` carries the corrected reading too.
+      WHAT THE GATE ACTUALLY WANTED, since the message says "rebuild both from one ONNX" and
+      that would have restated every number in this file: the mismatch was PRECISION, not a
+      missing build. The repository's plan is byte-identical to `models/yolo26n_fp16.engine`
+      and the baseline defaults to the fp32 engine, so `--precision fp16` matches them from
+      files already on disk. Nothing was rebuilt, nothing installed, no earlier number stranded.
+      PREVIOUS READING, kept because it was right about the block and wrong about the cost: `bench.sh
+      --systems baseline` refuses: "the baseline loads `yolo26n_fp32.engine` and the server
+      loads `model_repository/ship_detector/1/model.plan`, and they are different files. A
+      comparison across two engines measures the engines." So the 934.8 below and the 821-836
+      above are NOT a ratio -- different engines, different days, different GPU sets.
+      WHY I DID NOT JUST RUN THE FIX. `scripts/build_engines.py --force` rebuilds BOTH sides
+      from one ONNX, which is the correct repair, but it replaces the engines every number in
+      this file was taken against -- including the design-load runs above, an hour old. That is
+      a decision about the benchmark's whole history rather than a step in one measurement, so
+      it is named here and not taken silently mid-session. THE RATIO QUESTION IS ALSO THE ONE
+      THIS ITEM ALREADY DISPUTES: the baseline is offer-bound and does no inference (0-8% GPU),
+      so what a 5x against it MEANS is `C1-WHAT-IS-THE-5x-AGAINST?`'s question, not arithmetic.
+      WHAT IS NO LONGER WAITING: the throughput question. `V167-GSTREAMER-ONLY-3000` is
+      answered on this route -- [3203, 3278] tracked img/s extrapolated to 16 GPUs against the
+      3 000 target -- so this item's blocker is now the COMPARAND, not the box.
+      lever question as `V167-GSTREAMER-ONLY-3000`, and both host-budget levers have merged
+      (#214 today, #232/#239 on 11-12 Sep). What it needs is the re-run: four free GPUs and
+      enough idle cores, which this box has not had today -- 10-14 of 48 free against the
+      ~16 the 11 Sep run used.**
+      ORIGINAL: RE-MEASURED 11 Sep on the full chain (see `V167-GSTREAMER-ONLY-3000`): four GPUs retire ~260 img/s TRACKED, and four buy nothing over three. Waiting on the same lever question.** MEASURED 10 Sep. The absolute numbers hold; every RATIO in this
+      item was wrong because the baseline is OFFER-BOUND and does no inference (0-8% GPU,
+      9 815 img/s on ONE gpu against 9 953 on four). Instrument open as #216; the page's
+      false 'capacity, not a floor' claim and the comparand question are what remain.**
+      GPUs 2/3/4/6 (1 and 5 have tenants), 50 x 20 x 40 s, `--seconds 40` so the divisor is
+      exactly 40 (`frames_read` 39 998 confirms 1000/s offered):
+      | arm | images/s | vs baseline |
+      |---|---|---|
+      | baseline `sim_pipeline_v2` | **934.8** SATURATED (det 468.0 + seg 466.8) | 1.00x |
+      | ours, `--source replay` | **544.4** (21 775 accepted) | **0.58x** |
+      | ours, `--source nvdec` | **473.6** (18 946 accepted) | **0.51x** |
+      BOTH ARMS SHED 46-49% of a 1000 img/s offer, so this is CAPACITY and not an offer
+      shortfall: the plane retires ~500 img/s on four GPUs. 5x is 4 674 img/s, so the gap is
+      **8.6x**. Reported to the operator as measured, without arguing the metric -- V164 ruled
+      and events/rows/CPU-seconds are out.
+      **THE LARGEST UNEXPLOITED LEVER IS PRECISION, AND IT IS A REBUILD RATHER THAN A
+      REDESIGN.** Every engine in the chain is FP32: `yolo26n_fp32.engine`,
+      `yolo26n-seg_fp32.engine`, `reid_r50_fp32.engine`. FP16 on an A5000 is typically 2-3x and
+      INT8 more. Two more are untouched in this number: `ldd csrc/build/bench` links NO
+      shipvision library, so the fused kernels are not in it, and the chain runs ~2.65 models
+      per frame (detect -> conditional segment -> two embedders) against the baseline's ONE.
+      So 0.58x is what an FP32, unfused, four-model chain does against a one-model FP32
+      baseline.
+      **FP16 BUILT AND MEASURED (10 Sep). It helps, and it is not the answer alone.** Both arms
+      on the SAME fp16 engine -- `--precision fp16`, added because the harness could not
+      express that comparison and `require_same_engines` would rightly have refused an fp16
+      plan against an fp32 baseline ("roughly a 2x architecture win that nothing in the harness
+      could detect"):
+      | prec | baseline | ours replay | ratio | ours nvdec | ratio |
+      |---|---|---|---|---|---|
+      | fp32 | 934.8 | 544.4 | 0.58x | 473.6 | 0.51x |
+      | fp16 | 959.6 | 669.1 | **0.70x** | 451.1 | 0.47x |
+      FP16 lifted our replay arm 1.23x and the baseline only 1.03x -- precision matters more on
+      the side running 2.65 models per frame. THE NVDEC ARM GOT WORSE (473.6 -> 451.1), which
+      says its ceiling is not the engines: that path is host-bound.
+      **AND THEN THE DECISIVE EXPERIMENT, which reframes the whole number without arguing the
+      metric.** The baseline runs ONE model per image (`det` and `seg` are two disjoint
+      one-model pipelines). So: the same chain with only `detect`, same four GPUs, same fp16
+      engine, offered 5 000 img/s until it shed 34%:
+      | chain | models/frame | img/s | vs baseline |
+      |---|---|---|---|
+      | full (detect + segment + 2 embedders) | ~2.65 | 669.1 | 0.70x |
+      | detect only -- THE BASELINE'S OWN SHAPE | 1 | **3 315.7** | **3.46x** |
+      ON COMPARABLE WORK THIS PLANE IS ALREADY AT 3.46x AND 1.45x SHORT OF THE TARGET. The
+      four-model chain costs 4.96x of throughput (3 315.7 / 669.1), which is the 2.65 models
+      plus the crops and the scatter. So 0.70x is not a scheduling result; it is the price of
+      computing four models per image against a baseline that computes one.
+      **THE DETECT-ONLY RUN'S ACCOUNTING, AND A CORRECTION TO MY FIRST READING OF IT.**
+      Measured: `per_device_busy_pct ship_detector 2:131.5 3:131.1 4:130.3 6:117.8`,
+      `command_cores_busy 9.05` of 48 cores, `pipe` threads 58.1% of 402.6 host CPU-s,
+      `accounted_pct 99.0`. I first wrote that as "the GPUs are saturated". IT IS NOT: the
+      counter is `compute_us / (seconds * 1e6)` summed over a device's INSTANCES, and there
+      are TWO per device, so the ceiling is 200% and 131.5% means each instance was executing
+      its engine ~66% of the run. A third of each instance's life is elsewhere -- the
+      preprocessing kernels on the same device (not counted in `compute_us`), stream
+      serialisation, or waiting for input. The host at ~19% of cores does rule out a HOST
+      bottleneck, and that much stands.
+      **AND THE FUSED-KERNEL LEVER IS SMALLER THAN I RECORDED, for a reason I should have
+      checked before writing it down.** I wrote "every letterbox and crop in these numbers is
+      torch/CPU" from `ldd csrc/build/bench` linking no shipvision library. WRONG for this
+      plane: `csrc/shipinfer/runtime/ops.cu` is 357 lines of the C++ plane's OWN CUDA kernels,
+      `stages.cpp` includes `runtime/ops.h`, and they already do resize + pad + colour convert
+      + NCHW in one launch per frame (and one launch for a frame's whole crop set), plus the
+      NV12 twins. What shipvision's `imgproc/image_ops.cu` adds over them is mean/std
+      normalisation and BATCHING ACROSS FRAMES -- one launch for B frames instead of B. So
+      linking it is a swap of one GPU kernel for a better-batched GPU kernel, not a CPU->GPU
+      move, and its upside is launch overhead rather than the memory traffic I implied.
+      **AND THE MEASUREMENT THAT SETTLED IT: INSTANCES PER DEVICE IS WORTH ~1.25x AND THE
+      REPOSITORY IS SET TWO BELOW THE PEAK.** Detect-only, fp16, GPUs 2/3/4/6, 50x100x40 s,
+      50 000 frames offered, only the plan's `instances` line changed (the flag does not win
+      when `--repository` is given -- `bench_models.cpp`: "only reached when no repository was
+      given"), img/s = accepted/40:
+      | instances/device | runs | img/s (mean) | spread | device engine-time |
+      |---|---|---|---|---|
+      | 2 (today's config) | 2 | **3 189** | 3 063-3 316 | ~131-140% of 200% |
+      | 3 | 3 | **3 635** | 3 324-3 867 | ~170-179% of 300% |
+      | 4 | 3 | **3 992** | 3 527-4 236 | ~240% of 400% |
+      | 5 | 1 | 3 493 | -- | ~330% of 500% |
+      | 6 | 1 | 2 871 | -- | ~424% of 600% |
+      | 8 | 1 | 2 174 | -- | ~617% of 800% |
+      The peak is 3-4 and the collapse past 5 is steep; `nvidia-smi` sampled during the
+      4-instance run reads **87-100% on all four devices**, so at the peak the device really is
+      the limit. Note what the counter does NOT say: engine-time per device rises with every
+      instance while throughput does not, because concurrent `execute` calls on one device
+      interleave and each takes longer -- which is why the 131% figure never meant saturation.
+      SO 4.0-4.2k img/s DETECT-ONLY on four GPUs = **4.2-4.4x** the fp16 baseline's 959.6,
+      from a config value. Spread is +/-9% within a setting (the page's noise floor is ~15%),
+      so 2-vs-4 at 25% is larger than the spread but the individual runs are quoted above.
+      **THE FULL CHAIN GOES THE OTHER WAY, AND THAT IS THE ANSWER TO THE 5x QUESTION.** Same
+      GPUs, fp16, 50x20x40 s, all four models' instance counts scaled together (2/2/2/1 ->
+      4/4/4/2 -> 6/6/6/3):
+      | instances | img/s | ship_detector | ship_segmenter | person_embedder | ship_embedder |
+      |---|---|---|---|---|---|
+      | x1 (the repository's) | **669.8, 694.8** | 142% | 100% | 132% | 47% |
+      | x2 | 479.0 | 327% | 240% | 199% | 111% |
+      | x3 | 428.9 | 468% | 295% | 197% | 159% |
+      MORE INSTANCES MAKES THE FULL CHAIN WORSE, because x1 is ALREADY past the concurrency
+      peak: four models at 2/2/2/1 is SEVEN instances per device, where detect-only peaked at
+      four. And `nvidia-smi` sampled through an x1 run reads **74-99%, mostly ~90%, on all
+      four devices**, so the four-model chain at the design load is device-bound with ~10%
+      headroom -- not 7x of it.
+      **SO THE TWO READINGS ARE NOW BOTH MEASURED AND THEY DIVERGE HARD.** One model per image
+      (the baseline's own shape): 4.0-4.2k img/s = 4.2-4.4x, and 5x is a knob or two away.
+      Four models per image: ~700 img/s = 0.72x, devices ~90% busy, so 5x (4 798 img/s) is
+      ~7x less compute per image than this hardware does -- INT8 is worth maybe 1.5-2x of
+      that, not 7x. On four A5000s, 5x on the four-model chain is not a scheduling result and
+      not a precision result; it is either fewer models per image or ~28 GPUs.
+      **AND THEN THE DENOMINATOR TURNED OUT TO BE WRONG, WHICH INVALIDATES EVERY RATIO
+      ABOVE.** `RESULTS.md` says of the baseline: "at saturation it is bound by its engines.
+      So it is a CAPACITY, not a floor." IT IS NOT. Measured 10 Sep, `--systems baseline
+      --precision fp16`, 40 s each:
+      | offered | GPUs | baseline sustained | retired |
+      |---|---|---|---|
+      | 1 000 | 5 | 960.2 (the page's number) | 96% |
+      | 5 000 | 4 | 4 936.6 | 99% |
+      | 10 000 | 4 | 9 952.9 | 99.5% |
+      | 10 000 | **1** | **9 815.5** | 98% |
+      It retires ~99% of WHATEVER IT IS OFFERED, and one GPU serves 98.6% of what four do.
+      `nvidia-smi` sampled through a run reporting 9 931.7 img/s reads **0-8% utilization and
+      861 MiB** on all four devices -- the engines are loaded (which is what
+      `require_same_engines` checks) and essentially nothing runs on them. Our detect-only arm
+      at 4 038-4 716 img/s runs those same devices at 87-100%.
+      SO "960 img/s" WAS THE BASELINE'S OFFER, NOT ITS CAPACITY, and the page's own evidence
+      for the opposite -- "insensitive to which five GPUs it gets, 959.8 against 960.2" -- is
+      the SIGNATURE of an offer-bound system rather than proof of an engine-bound one. Every
+      ratio in this item (0.58x, 0.70x, 3.46x, 4.4x, 4.9x) divides by that offer.
+      **WHAT IS STILL TRUE, AND IT IS ALL OF THE ABSOLUTE NUMBERS.** Four GPUs, 50x100x40 s,
+      detect-only, 5 000 img/s offered, images/s = accepted/40, one variable at a time:
+      | arm | img/s | vs the arm above |
+      |---|---|---|
+      | fp16, 2 instances, spin sync (the shipped config) | 3 189 | -- |
+      | fp16, 4 instances, spin sync | 3 992 | **1.25x** (instances) |
+      | fp16, 4 instances, BLOCKING sync | 4 038 | 1.01x here, 1.19x on the int8 pair |
+      | int8, 4 instances, blocking sync | **4 716** | **1.17x** (precision) |
+      The knob's own pair, same engine and load: **4 632 / 3 897 = 1.19x**, with host CPU
+      189 -> 605 CPU-s and the `pipe` threads 26 -> 413 -- 94% of that thread group's CPU was
+      SPIN. That is #214's case restated on a second workload.
+      **AND THE SOURCE RESOLUTION MATTERS MORE THAN EITHER**, same engine and instances:
+      1 300x865 -> 4 934 img/s, 1 920x1 080 -> 4 166, 3 840x2 160 -> 1 617, with engine busy
+      FLAT at ~222-234% throughout. So the per-frame cost that moves is proportional to SOURCE
+      pixels while engine time is not -- the frame's trip to the device, which is exactly what
+      V156's `nv12 -> all on VRAM` route removes and what `runtime/ops.h` already says ("at
+      1000 frames a second a 1080p BGR temporary is 6 MB of pure waste per frame").
+      INT8 ENGINES: the detector builds (5.6 MB against fp16's 8.3 and fp32's 12) and the
+      SEGMENTER DOES NOT -- "Error Code 10: Could not find any implementation for node
+      /model.23/proto/cv3/conv/Conv + PWN(...)" with INT8+FP16 both set. Calibration is
+      through the pipeline's own numpy letterbox (`IMAGE_OPS.create("numpy")`,
+      `NormalizeParams()`, pad 114, value_range (0,1)) so the scales match the served
+      transform -- but the whole corpus on this box is **15 frames**, which is enough to
+      measure speed and NOT enough to claim the accuracy cost is small.
+      CAVEAT ON EVERY NUMBER HERE: the box had another tenant throughout (load 32-56 over 48
+      cores, GPUs 1 and 7 held by someone else's training job), and the harness printed its own
+      "BUSY ... treat the ratio as indicative only" warning.
+      **OPEN AS #216** (`--precision {fp32,fp16,int8}` + `--int8` on the engine builder +
+      `topology/detect_only.yaml`), which is the instrument all of the above was measured
+      with. What is still OWED on this item, in order:
+        1. `RESULTS.md` says the baseline "is a CAPACITY, not a floor". That is false and the
+           page is what a reader trusts -- its own PR, after #216.
+        2. The operator's question is no longer "which chain shape" but "what is the
+           comparand", because a multiple of an offer-bound counter is a statement about the
+           harness. Asked in the report, not decided here.
+        3. The instance count: the repository ships 2/device and 4 is worth 1.25x on one
+           model, while the four-model chain is already PAST its peak at 2/2/2/1 (7 per
+           device). That is a `config.yaml` change with a measurement behind it, per model.
+      **THE QUESTION THIS PUTS TO THE OPERATOR, and it is theirs rather than mine:** 5x on the
+      FOUR-MODEL chain, or 5x on work comparable to the baseline's one model? The metric is
+      settled (V164, images/s) -- what is not settled is what the chain must compute while
+      hitting it, and the two readings are 0.70x and 3.46x of the same runs.
+      ORIGINAL:
+      METRIC: images processed per second. NOT events/s, NOT rows, NOT rows per host CPU-second
+      -- the operator ruled those out by name. FOUR GPUs. TARGET 5x the baseline.
+      WHAT HAS TO BE RE-TAKEN: every C1 figure is five-GPU and most are event-based. Both arms
+      on four GPUs, interleaved pairs, img/s each side:
+        - baseline: `bench.sh --systems baseline --gpus <four>` already reports img/s (960.2
+          SATURATED on five, so expect ~770 on four).
+        - ours: the C++ plane's own img/s. `frames_accepted / steady_s` is the honest reading --
+          `events_emitted` is what the operator refused, and one event is one frame here so the
+          two are numerically close, but the NAME matters and the figure must be built from
+          frames rather than events.
+      THE BAR, stated before measuring: 5 x ~770 = ~3 850 img/s on four GPUs, against a design
+      load of 1 000 img/s total. So it is not "serve the fleet" but "retire ~4x the fleet's rate
+      on 80% of the GPUs". Measure and report; the argument is not mine to re-make (V156 already
+      overruled it once).
+      AND `RESULTS.md` HAS TO MOVE WITH IT: its four-ratio table, its verdict and its "what is
+      not in any number" section are all built on the ratios V164 rules out. The page keeps them
+      as what they are -- resource ratios -- and states img/s on four GPUs as THE answer.
+- [x] **C1-WHAT-IS-THE-5x-AGAINST? · ANSWERED BY THE OPERATOR 10 Sep (V164): FPS,
+      5x, four GPUs. Everything below is the chronology of a question that is now
+      settled, and its ratios are NOT the answer.** ORIGINAL: one question with three measured
+      answers. THE CURRENT NUMBERS ARE HERE; everything below this block is the chronology of
+      how they were arrived at, and its early figures are SUPERSEDED by these.**
+      Both arms on the SAME five GPUs (0/1/3/4/6), 50x20x70 s, 8 Sep, box busy with two other
+      tenants throughout (the harness prints its own caveat):
+        baseline `sim_pipeline_v2`  960.2 img/s SATURATED (det 485.8 + seg 474.4) -- a capacity
+        C++ plane `--source nvdec`  573 events/s complete (40 131 in 70 s), 0 failed
+      THE FOUR RATIOS, and they are four different claims rather than four estimates of one:
+        frames end to end      0.60x   -- the softest: a CPU-bound stage moves it, and the box
+                                          was loaded 25/48 on both runs
+        pixels into a model     1.87x   -- an AREA proxy, not work: it treats a 640x640
+                                          detector row and a 256x128 crop as 12.5:1 and ignores
+                                          that their FLOPs per pixel differ too
+        rows into a model       7.22x   -- counts a crop and a frame alike, and 12.7 of our rows
+                                          per request ARE crops
+        rows per host CPU-s    ~3.4x DEFAULT / 7.17x WITH THE KNOB -- see
+                                          `DOES-THE-KNOB-MOVE-C1?`: nine runs on 10 Sep, three
+                                          passes, the flag-off control reproducing the 3.94x
+                                          below, so THE ANSWER TO YOUR QUESTION MOVED. 7.17x
+                                          clears >=5x on this ratio; the knob is off by
+                                          default and flipping it waits on a latency figure
+                                          the bench does not print
+                                 ~3.94x   -- ADDED 9 Sep by #190/#191 and the only one with a
+                                          LIKE-FOR-LIKE denominator: the same kernel counter
+                                          on both arms. Mean of THREE INTERLEAVED pairs
+                                          (4.11/3.36/4.36), and a FLOOR -- the baseline's
+                                          throughput is asserted from its configuration while
+                                          its CPU-seconds are measured, so starving it of CPU
+                                          flatters it. Details in `THE-BASELINE-HAD-NO-
+                                          DENOMINATOR` above; it inherits the rows weighting.
+      CORROBORATED on a second five-GPU set (2/3/6 earlier gave 7.7x / 2.03x), and the baseline
+      is GPU-set insensitive at saturation (959.8 on 2-6 against 960.2 here, 0.04% apart), so
+      the SPREAD between the weightings is a property of the workload, not of one run.
+      GPU-SECONDS IS STILL THE MEASURE NOBODY CAN TAKE, and that is now the only gap:
+      `InstanceStats::ewma_latency_us` holds ours and the bench does not print it, but
+      `sim_pipeline_v2` reports no counterpart, so there is nothing to divide by. HOST
+      CPU-seconds turned out to be the reachable substitute -- the kernel reports it for any
+      process, so the unmodified binary needs no cooperation -- which is where the fourth
+      ratio came from. The chronology below still says "no better ratio is on offer"; that
+      sentence was true when written and #190 falsified it.
+      ALL THREE ARE MEASURED ON A CHAIN WITHOUT `track`/`mtmc` (see
+      `CSRC-GRAPH-HAS-NO-TRACKING`), so adding that seam moves them in our favour.
+      CANDIDATE (b) IS OUT on evidence -- not runnable here, details below; it needs artefacts
+      from you rather than a decision.
+      -- the chronology follows --
+      THE FIRST PAIR I RAN, kept because the asymmetries it names still stand: baseline 959.8
+      SATURATED against 539 img/s complete (37 758 events) on GPUs 2-6, i.e. 56%.
+      TWO ASYMMETRIES, and they point OPPOSITE WAYS:
+        * IN OUR FAVOUR, and the harness says so in its own docstring: "one baseline image
+          passes through ONE model, while one ShipInfer frame passes through detect, then
+          conditional segmentation, then one or two embedders. Equal frames-per-second therefore
+          represents strictly more work on our side." The baseline is two disjoint one-model
+          pipelines (`BASELINE_ENTRY_MODULES = ("det", "seg")`); ours is a four-model chain with
+          per-object crops, reassembly and JSON events.
+        * AGAINST US: the baseline reads JPEGs from a folder and decodes each one on the host
+          (`cv::imread` per frame, then `cv::resize` + `copyMakeBorder` + `bgrToBlobCHW`). That
+          IS the host per-frame cost V156 says stays on its side -- and it still retired 959.8.
+      AND V156's OWN FAIRNESS CONDITION CANNOT BE MET BY THIS BASELINE. "cach bench cua ca
+      baseline va shipinfer phai giong nhau. dau vao la video dau ra la target" -- the baseline's
+      input is a folder of JPEGs. It has no decoder, no RTSP, and `benchmarks/harness/baseline.py`
+      says the submodule is READ-ONLY ("Nothing here edits it"). So it cannot be given video.
+      THE QUESTION, and I am not asking you to do work -- I am asking which comparison the >=5x
+      is against, because the candidates give opposite answers:
+        (a) THE COUNTING SIMULATION AS IT IS. Then >=5x means 4800 img/s on five GPUs against
+            its 959.8, our chain does 4x the model work per image, and I do not believe that is
+            reachable -- which is the argument V156 already overruled once, so I am not
+            re-making it; I am saying the number is 539 today and asking whether this is the
+            comparison.
+        (b) THE PREVIOUS SYSTEM in `references/` (subfaceid -> motservice -> mtmcservice), which
+            DOES read RTSP and does the whole chain. That is the system this project replaces,
+            and it is the only candidate that can be given video.
+            **NOT RUNNABLE ON THIS BOX -- settled 8 Sep by trying, so it is no longer a question
+            for you.** Three independent blockers, each reproduced rather than inferred:
+              1. NO IMAGE. All three composes carry `build:` plus a private-registry tag
+                 (`phucnp.dev/motservice:v1`, `test_substface_ins_1:latest`,
+                 `mtmcservice:v1.0.1`) and none is on this host.
+              2. THE IMAGE CANNOT BE BUILT HERE, and this is the hard one -- it is the same
+                 KERNEL LIMIT `deploy/rootless/setup.sh` documents, with no `--pid=host`
+                 equivalent for `docker build`:
+                     unshare --user --map-root-user --mount --pid --fork \
+                         sh -c 'mount -t proc proc /proc'
+                     mount: /proc: permission denied.
+              3. NO WEIGHTS. Zero `.engine`/`.plan`/`.onnx`/`.trt`/`.pt`/`.weights` files under
+                 any of the three, and the registry does not resolve
+                 (`lookup phucnp.dev: no such host`).
+            So (b) needs either a machine that can `docker build`, or the images and weights
+            from wherever that system was actually deployed. It is a request to you for
+            ARTEFACTS, not a measurement I can take.
+        (c) A SUB-METRIC WHERE THE COMPARISON IS LIKE-FOR-LIKE -- e.g. detect-only throughput on
+            whole frames, or the per-frame preprocessing cost -- with the >=5x stated against
+            that rather than against end-to-end events.
+            **PART OF (c) IS NOW MEASURED, 8 Sep, from the #164 run's own per-stage counters --
+            no new benchmark, just arithmetic I had not done.** Five GPUs, 70 s, `--source
+            nvdec`, the same run that gives 47 109 events:
+              ship_detector     47 117 invocations   673.1/s   134.6 per GPU
+              person_embedder   29 968               428.1/s    85.6
+              ship_embedder     24 049               343.6/s    68.7
+              ship_segmenter    24 049               343.6/s    68.7
+              TOTAL            125 183              1788.3/s   357.7
+            Against the baseline's 959.8 img/s SATURATED on the same five GPUs:
+              end-to-end events   673.0/s  ->  **0.70x**
+              stage invocations  1788.3/s  ->  **1.86x**
+            2.66 model executions per frame on our side, 1 per image on theirs.
+            AND 1.86x IS A LOWER BOUND, which is the honest caveat: `ship_detector` equals
+            `frames_accepted` exactly, so these are per-frame INVOCATIONS, and one embedder
+            invocation batches ~15 crops while one baseline image is one model pass. The
+            crop-level ratio is the number (c) actually wants.
+            **MEASURED 8 Sep, and I was wrong twice about how hard it was.** I wrote that
+            "nothing sums it": FALSE -- `ModelInstance` has summed `stats().rows` all along
+            (`engine/instance.cpp:257`), and the C++ bench simply never PRINTED it. And I wrote
+            that adding it would be "a metric invented to make a target look met", which
+            conflated two things: CHOOSING the comparison is yours, making the plane's work
+            rate observable is mine. So it is emitted now (`per_device_rows`), and the Python
+            plane got the same counter because it did not even sum it (the sync rule).
+            30 cameras x 20 fps x 70 s on GPUs 2/3/6, rows into each model:
+              ship_detector     25 963 rows    371/s    640x640 each
+              ship_segmenter    35 951 rows    514/s    640x640
+              person_embedder  213 223 rows   3046/s    256x128   (12.7 crops per request)
+              ship_embedder     35 951 rows    514/s    256x128   (2.8 per request)
+              TOTAL            311 088 rows   4444/s
+            A SELF-CHECK FELL OUT OF IT: `ship_detector`'s rows EQUAL its requests exactly
+            (6168/10210/9585 both ways), because one frame is one row -- so the counter is
+            demonstrably counting rows and not re-reporting requests.
+            THE LOPSIDED SPLIT IS NOT A BALANCING BUG: GPU 2 carried another user's 22 GB job
+            for part of the run (`tts26`), so it took 6168 detections against 10210 and 9585 on
+            the free devices and the policy correctly shifted work off it. It also makes the
+            per-GPU ratios below CONSERVATIVE -- they divide by three whole GPUs when one was
+            only partly available, so contention understates our side rather than flattering it.
+            AND (c) IS NOT ONE NUMBER, which is the finding that matters. Per GPU, against the
+            baseline's 959.8 img/s on five GPUs = 192 rows/s/GPU through one model:
+              model ROWS per second     1 481  vs 192      -> **7.7x**
+              model PIXELS per second   1.60e8 vs 7.86e7   -> **2.03x**
+            The spread is the whole point: 7.7x counts a 256x128 crop as equal to a 640x640
+            frame, and 12.7 of our rows per request are crops. Weighting by input pixels is the
+            more defensible of the two and it does NOT reach 5x. End-to-end events are 0.70x.
+            SO THE CHOICE IS YOURS AND IT IS NOW A CHOICE WITH NUMBERS: 0.70x (events), 2.03x
+            (pixels through a model), 7.7x (rows through a model). I am not picking the one
+            that clears the target.
+            **CORROBORATED 8 Sep on a DIFFERENT five-GPU set, with the counter merged rather
+            than on a branch** -- GPUs 0/1/3/4/6 (2 and 5 were another tenant's), 50x20x70 s,
+            40 131 events, 0 failed:
+              stage             reqs      rows   rows/req   per-device spread
+              ship_detector    40 148    40 148      1.0      3.1%
+              ship_segmenter   19 805    54 375      2.7     13.6%
+              person_embedder  26 536   336 569     12.7      9.0%
+              ship_embedder    19 805    54 375      2.7     14.0%
+              TOTAL           106 294   485 467
+            RATIOS HOLD ACROSS THE TWO RUNS, which is the point of repeating it on other
+            silicon: **7.2x rows** (was 7.7x) and **1.87x pixels** (was 2.03x). Same ordering,
+            same conclusion -- rows clears 5x and pixels does not -- so the spread between the
+            two weightings is a property of the workload and not of one run's GPUs.
+            THE DETECTOR'S SELF-CHECK HELD EXACTLY AGAIN: 40 148 requests and 40 148 rows, all
+            five devices, so the counter is still counting rows and not echoing requests.
+            AND ONE NUMBER MOVED THAT IS NOT A REGRESSION, stated because it looks like one:
+            events are 114.7/GPU here against 127 on GPUs 2-6 and 141 on an idle 2/3/6. This is
+            a MORE CONTENDED set -- two other users were resident throughout, and the segmenter
+            and embedder spreads are 13-14% against the detector's 3.1%, with GPU 6 lowest --
+            so it measures the box, not the code.
+            **I THEN OVERCLAIMED AND CORRECTED IT, which is worth keeping because it is the
+            session's own recurring mistake.** I wrote that "the rows ratios survive contention
+            because both sides of them come from the same run". FALSE: only our side did. The
+            baseline's 959.8 was measured on GPUs 2-6 on a different day, so all three ratios
+            crossed GPU sets -- exactly the apples-to-oranges I had been objecting to elsewhere.
+            SO I MEASURED THE BASELINE ON THE SAME FIVE GPUs, and the fix confirms the numbers
+            rather than changing them: **960.2 img/s SATURATED** on 0/1/3/4/6 (det 485.8 + seg
+            474.4) against 959.8 on 2-6 -- **0.04% apart**. The baseline is insensitive to which
+            five GPUs it gets, because at saturation it is bound by the engines and not the
+            scheduling, which is also why it is a capacity and not a floor.
+            LIKE-FOR-LIKE NOW, both arms on 0/1/3/4/6 on the same busy box:
+              baseline   960.2 img/s SATURATED  =  192.0 rows/s/GPU (one model per image)
+              ours       573 events/s (114.7/GPU), 6 935 rows/s (1 387/GPU)
+              -> events 0.60x   rows 7.22x   pixels 1.87x
+            The harness printed its own caveat on both runs ("host: load 25/48 cpus <- BUSY ...
+            treat the ratio as indicative only"), which is the right warning and is why the
+            EVENTS figure is the softest of the three: it is the one a CPU-bound stage moves.
+            **AND PIXELS IS NOT A WORK MEASURE, which matters if you pick it.** It weights a
+            row by input AREA, so it treats a 640x640 detector row and a 256x128 embedder row
+            as 12.5:1 -- but a detector backbone and an embedding CNN differ in FLOPs per pixel
+            too, by a factor nothing here measures. So 1.87x is "pixels into a model", not
+            "work done", and it is only the MORE DEFENSIBLE of the two available weightings
+            rather than a defensible one outright.
+            WHY THERE IS NO BETTER RATIO ON OFFER, checked rather than assumed: the honest
+            measure would be GPU-seconds per arm. `InstanceStats::ewma_latency_us` holds
+            exactly that on our side and `cli/bench.cpp` does not emit it -- fixable in an
+            afternoon -- but `sim_pipeline_v2` reports no GPU-time counterpart at all, so there
+            would be nothing to divide by. A ratio needs both halves, and only one exists.
+            SO THE NUMBERS ARE THE ONES THAT CAN BE HAD: 0.60x (frames end to end), 1.87x
+            (pixels through a model, an area proxy), 7.22x (rows through a model, which counts
+            a crop and a frame alike), and since 9 Sep ~3.94x (rows per host CPU-second, the
+            one like-for-like denominator). Pick the one that matches what the >=5x is meant
+            to promise; none of them is the same claim.
+            **AND A CAVEAT THAT QUALIFIES EVERY NUMBER IN THIS ITEM, which I have been getting
+            wrong in my own reports all day.** I have been calling this "the whole chain" and
+            "the perception graph end to end". IT IS NOT. `cli/bench.cpp` stamps every run with
+            its own disclaimer -- `"note": "C++ data plane; tracking and fused kernels are NOT
+            in this measurement"` -- and `graph/from_plan.cpp` and `graph/plan.cpp` contain ZERO
+            occurrences of `track` or `mtmc`, so those two plan nodes are simply not built into
+            the C++ graph. `ldd csrc/build/bench` links no shipvision library either.
+            WHAT IS ACTUALLY MEASURED: decode -> detect -> segment -> embed_person ->
+            embed_ship -> reassembly -> JSON events. That is genuinely "video in, targets out"
+            per V156, and the four models are the GPU work -- but "hand tracklets downstream",
+            which is a third of what this project is for, is not in any number above.
+            WHICH WAY IT CUTS, stated rather than glossed: adding track/mtmc would ADD work on
+            our side of the ratio and add latency, so 0.70x/2.03x/7.7x are all measured on a
+            chain SHORTER than the deployed one. If the >=5x is meant to cover the whole system
+            then none of these three numbers is yet the answer, and the missing piece is a
+            measurement rather than a decision.
+      WHAT IS NOT IN DOUBT, whichever you pick: the route V156 named works and is measured
+      (`PHASE-D-NV12`), the host-decode arm of OUR OWN plane completes ZERO events at this load
+      where the NVDEC arm completes 37 758, and the one-line `output_stream` fix took us from
+      368 to 539, and the event-edge fix that round took it to **637 events/s -- 127/s per GPU
+      against the replay route's 135, so 94%** (`NV12-ROUTE-SATURATES-AT-78-PER-GPU`, on #164).
+      So the arithmetic on (a) has moved: 637 against the baseline's 959.8 is 66%, not 56%.
+      AND THE CHOICE IS NOW BETWEEN TWO, not three: (b) is eliminated on evidence above. If you
+      want (b) anyway, what I need from you is the images or the weights, not a decision.
+      **MY DEFAULT, so this is a decision you can make by saying nothing (V154).** Absent an
+      answer I will report the >=5x against **rows per host CPU-second**, and therefore report
+      the target as **NOT MET: ~4x against 5x**. Reasons, in order: it is the only ratio whose
+      denominator is measured the same way on both arms; it is a resource, so "5x" means "a
+      fifth of the machine for the same work" rather than a proxy; and it is a floor that errs
+      in the baseline's favour. I am deliberately NOT defaulting to 7.22x, which clears the
+      target -- rows count a 256x128 crop as one 640x640 frame, and picking the measure because
+      it passes is the failure this item has refused twice. What would close the ~4x -> 5x gap
+      is our own arm's host cost, which is where the headroom is (3.19 ms CPU/row against the
+      baseline's 12.12 ms/image, and our arm was host-bound while theirs was saturated). The
+      accounting for that is `NOT-GPU-BOUND-AT-FIVE-GPUS`, which is CLOSED -- 38.4 ms of bench
+      CPU per event is ours and external RTSP would not move it -- so there is currently NO
+      open item aimed at the ~4x -> 5x gap. Opening one is a decision about the target, which
+      is why it waits on this question rather than the other way round.
+
+- [x] CSRC-TRACKER-OPTIONS · carry the tracker's params on the plan. A DECIDED divergence,
+      registered as `tracker_options` in `benchmarks/parity/known.py` and reproduced by
+      `test_the_cpp_plane_has_one_tracker_and_no_attribution_step` (renamed with the narrowing),
+      found by #215's third review round. The
+      Python element reads `algorithm`, `options`, `regression_reset` and `attribution_iou`
+      from a chain's `params:` and `TrackerShard` refuses an unknown option key at `open()`;
+      `PlanNode` carries none of them, so `bytetrack.cpp` runs `ByteTrackTracker::Options{}`
+      and `kRegressionReset` however the chain is written. A chain stating `options:
+      {max_age: 90}` and `regression_reset: 0` therefore loads on both planes, reports
+      `track` as having run on both, and emits different ids -- and the C++ side recovers
+      from a stream restart the operator asked it never to recover from. THE FIX: new plan
+      lines (`regression_reset N`, `tracker_option <key> <value>`) plus a key table on the
+      lane side, which is a feature and not a review fix -- and the version gate is part of
+      it, since a reader that ignores an unknown line is how this got silent in the first
+      place.
+      DONE 12 Sep, #259: both knobs cross. The plan gained `regression_reset N` and
+      `tracker_option <key> <value>`; `TrackerOptions` carries them to `create_associator`,
+      which now REFUSES a second caller that disagrees about one (impl, slot) rather than
+      handing it the first caller's tracker; and `bytetrack.cpp` owns the key table, refusing
+      a key ByteTrack does not have the way `TrackerShard` does at `open()`. Six red probes,
+      each restored: the plan dropping both lines (3 checks red), a duplicate `tracker_option`
+      taken last-wins, a negative frame count accepted, a bare `stoll` that aborted the run
+      after 10 checks with `unexpected exception: stoll`, a default-constructed shard (3 red),
+      and an unknown key ignored. EVIDENCE the knob arrives rather than merely being carried:
+      the same frame-100 -> frame-0 restart is REFUSED under `regression_reset 0` and
+      RECOVERED under the default 64, in one test with both halves.
+      NOT CARRIED, and each is a decision: `attribution_iou` maps a tracker's answers back
+      onto detection rows and this plane has no such step (`TrackerShard::update` returns an
+      id per detection already), and `algorithm` needs trackers the lane does not have. Both
+      stay registered as `tracker_options` in `known.py`, narrowed from four knobs to two,
+      and `CSRC-TRACKER-ALGORITHM` below is the open line the register now cites.
+      SUPERSEDED 13 Sep on one point, left as written because it is the record of what was
+      believed then: "this plane has no such step" is FALSE. `shard.cpp` maps tracks onto rows
+      by `Track::last_match`, exactly. See CSRC-TRACKER-ATTRIBUTION's ruling.
+
 - [ ] SHIPVISION-TRACK-LAST-MATCH · **PINNED OPEN BY DESIGN -- this one cannot be closed, and
       that is the register working.** `benchmarks/parity/known.py`'s `tracker_options` entry
       cites this line, and `test_every_entry_has_an_open_ledger_line_and_a_reproducing_case`
