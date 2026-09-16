@@ -244,6 +244,23 @@ sittings**, 23% of its own low end, sitting means 75.7 apart. An absolute figure
 meaningless without its sitting, and a within-sitting effect smaller than the within-arm
 spread is invisible however the runs are ordered.
 
+**The last way out, closed.** Every arm so far kept the batch well under `max_batch` 8, so "a
+*fuller* batch would pay" was still a live reading. On `detect_only` at 4 000 offered — the
+detector alone on the devices, and saturated — the 5 ms default already achieves **6.97 of 8**
+and 20 ms gets **7.62**. The batch separates by 7× its own spread; accepted throughput overlaps
+at 0.989× of the mean, slightly *down*. At 7.6 of 8 there is nothing left to argue: the
+batch separates by 7× its own spread and the throughput does not follow. **The claim rests on
+the headroom, not on that overlap** — at 7.62 of 8 under 5% of fill is left, while the 20 ms
+arm's own spread is 17% of its mean, so an n=3 overlap excludes nothing. Treating an n=3 overlap
+as a zero is the exact mirror of the n=3 "separation" I had to withdraw an hour earlier, and the
+review caught that too. And the regime is not the deployment's: at 50 × 20 the fill is 2.74 of 8,
+where the headroom argument does not apply at all. (Two runs of a fourth pair returned zero
+frames, all cameras abandoned. I blamed a tenant on one of my GPUs and that was wrong: `engines
+ready in` steps from 0.35–0.54 s across the six good runs to 49.9 / 50.4 s on the failures, and a
+12-camera run on three *unshared* cards then took 41.2 s and read nothing either. `/home` is 99%
+full at load ~55 — a plan deserialising against a thrashing filesystem. The box stopped being
+measurable, and the honest move was to stop measuring rather than to keep collecting zeros.)
+
 **And the review loop earned its keep.** #287 took seven rounds and every block was real: the
 correction kept quoting the run it was excluding — in the arm, then in the prose, then in the
 *numerator* of the chain-cost ratio (1 845 was the excluded run's partner, so I re-ran the

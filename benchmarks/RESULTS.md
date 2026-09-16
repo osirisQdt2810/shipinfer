@@ -281,6 +281,71 @@ the worker count, achieved batch for both detector knobs. Nothing closes the 1.3
 which is what `[19.2, 21.2] GPUs at this chain's cost` already said; the difference is that the
 knob space has now been searched rather than assumed.
 
+### And with the batch nearly full, throughput still does not move
+
+The two A/Bs above leave one reading open: the batch went 46% fuller and bought ~3%, but it
+never got *near* `max_batch` 8, so "a fuller batch would pay" was still live. This settles it.
+
+`detect_only.yaml` — where the detector is the only consumer of the devices — offered **4 000
+img/s** so that arm saturates too (at 2 000 it drops only 0.2–2.4%, from the chain-cost sitting
+above; that is a *cross-sitting* reading and this page's own noise floor is 170 img/s, so it is
+cited to show 2 000 is not saturating and for nothing else). Same window A/B, alternated, three
+pairs:
+
+| window | achieved batch | accepted img/s | dropped (of read) |
+|---|---|---|---|
+| 5 000 µs | **[6.95, 7.00]** mean 6.97 | [1 312.7, 1 357.2] mean 1 341.4 | [40.5, 47.5] % |
+| 20 000 µs | **[7.57, 7.65]** mean 7.62 | [1 215.4, 1 447.2] mean 1 326.2 | [40.0, 47.6] % |
+
+**The batch separates — gap 0.57 against a widest-arm spread of 0.08, 7× — and the throughput
+does not follow.** The means are 0.989×, slightly *down*, and the ranges overlap.
+
+**The claim rests on the headroom, not on that overlap.** At 7.62 of a `max_batch` of 8 there is
+under 5% of fill left, so batching cannot be a large lever *in this regime* whatever the
+throughput arm says — which is just as well, because the 20 ms arm's own accepted spread is
+231.8 img/s (17% of its mean) against the 5 ms arm's 44.5, and an n=3 overlap that wide cannot
+exclude a 5–10% effect. This page records the same rig turning an n=3 "separation" into a full
+overlap two sections up; the symmetric error is treating an n=3 *overlap* as a zero.
+
+**And the regime is not the deployment's.** This is `detect_only` at 4 000 offered with 40–48%
+of read frames dropped. At 50 × 20 — the load `ship_detector/config.yaml`'s own header names —
+the measured fill is **2.74 of 8**, five sixths unused, which is the one regime where the
+headroom argument does not apply. What is established there is +3.4%, overlapping, n=3:
+undetermined, not zero.
+
+A hypothesis this suggests but does not establish, because the comparison crosses both sittings
+and chains: the fill is set by the **arrival rate at each instance**, not by the window. The
+same 5 000 µs default achieves 2.74 in the full chain at 2 000 offered and 6.97 here at 4 000.
+Testing that properly needs one sitting that varies the offer alone.
+
+**Two runs of a planned fourth pair returned zero frames** — all 50 cameras abandoned past the
+stop deadline — and the cause is on the box rather than in the code, though not the one I first
+wrote down. The measurable fact is a step change in **engine load time**:
+
+```
+db_5000_1 … db_20000_3   engines ready in 0.35 – 0.54 s   (the six runs above)
+db_5000_4, db_20000_4    engines ready in 49.9 s, 50.4 s  frames_read 0
+```
+
+and it did not recover: a later 12-camera run on three *unshared* GPUs took **41.2 s** and also
+read nothing. So it is neither the camera count nor a contended device. What the box does show is
+`/home` at **99% full** and four other tenants' jobs running at load ~55, which is the shape of
+TensorRT deserialising a plan against a thrashing filesystem instead of a warm page cache.
+
+I first attributed it to a tenant taking GPU 3. That was wrong — the 12-camera run on free cards
+rules it out — and it is corrected here rather than quietly. **The three completed pairs all
+predate the step change**, and no further measurement on this box is trustworthy until engine
+load returns to sub-second.
+
+**And one question this sweep raises stays open, because the box failed before it could be
+answered.** Against the chain-cost sitting's `detect_only` row — same chain, same `workers 92` —
+accepted falls from [1 805.2, 1 873.6] at 2 000 offered to [1 312.7, 1 447.2] here at 4 000: about
+**27 % of goodput for doubling the offer**, a 358 img/s gap against a 170 img/s cross-sitting
+floor. If it is real it is an overload-collapse signature and an ADR-005 backpressure result
+rather than a batching one — read climbs while accepted falls, so the box spends more decode on
+frames it then drops. The experiment that settles it is one sitting alternating 2 000 and 4 000
+on `detect_only`; it was started and returned zero frames on both arms, for the reason above.
+
 ### One unchanged configuration, three sittings, 170 img/s apart
 
 Worth its own heading because it bounds what any of these A/Bs can claim. `workers 92`,
