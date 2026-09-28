@@ -8,7 +8,7 @@
 #   benchmarks/link/run.sh --pairs 3-4     # link probe only, on chosen pairs
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-IMAGE="${SHIPINFER_TEST_IMAGE:-pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime}"
+IMAGE="${SHIPINFER_TEST_IMAGE:-shipinfer-gst:jammy}"
 OUT="${SHIPINFER_LINK_OUT:-$REPO/benchmarks/link/results/$(date -u +%Y-%m-%d)}"  # committed evidence, not .artifacts/
 export DOCKER_HOST="${DOCKER_HOST:-unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock}"
 mkdir -p "$OUT"

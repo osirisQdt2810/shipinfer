@@ -92,7 +92,7 @@ src/shipinfer/
 3rdparty/shipvision/         algorithms and fused CUDA/HIP kernels — its own repository, as a submodule
 model_repository/  the real DAG, on real TensorRT engines (built by scripts/build_engines.py)
 benchmarks/        the head-to-head against the counting-simulation architecture
-deploy/            Dockerfile and compose; everything runs in a container
+deploy/            the container runners; everything runs in ONE image, shipinfer-gst:jammy
 ```
 
 Every extensible family is a package plus a registry: adding a placement policy, a queue, a

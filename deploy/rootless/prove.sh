@@ -59,7 +59,7 @@ docker run --rm --pid=host "${GPU_DEVICES[@]}" \
   -e HOLD_S="$HOLD_S" \
   -v "$REPO:/work:ro" \
   -v "$OUT:/out" \
-  -w /work pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime \
+  -w /work "${SHIPINFER_TEST_IMAGE:-shipinfer-gst:jammy}" \
   python /work/deploy/rootless/_attest.py "/out/attestation_$STAMP.txt" \
   | tee -a "$REPORT"
 

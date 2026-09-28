@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Bake the GStreamer/PyGObject test image on top of the pytorch base, WITHOUT `docker build`.
+# Bake THE development image on top of the pytorch base, WITHOUT `docker build`. Every runner
+# in this directory starts it (V185), so this recipe is the environment, not an extra.
 #
 # WHY THIS EXISTS
 #
@@ -39,6 +40,8 @@
 #                      only ANNOUNCE to a server, never serve a PLAY.
 #   ffmpeg             encodes the real 1920x1080 JPEGs into the H.264 fixture the server
 #                      loops, so the bitstream under test is x264's and not GStreamer's.
+#   libopencv-dev      the replay source's JPEG decode, and what the full C++ build links.
+#   libffmpeg-nvenc-dev  nv-codec-headers, which the `nvdec` ingest lane compiles against.
 #
 # `nvvideoconvert` and `memory:NVMM` are DeepStream elements and are NOT here; upstream
 # nvcodec's device memory is `memory:CUDAMemory`. `ingest/sources/gstreamer.py` probes for
