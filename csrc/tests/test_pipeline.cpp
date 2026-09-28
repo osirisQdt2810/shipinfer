@@ -767,6 +767,136 @@ namespace {
               "the other branch continued");
     }
 
+    // A two-phase stage: `begin` and `finish` write to one log the test shares, so the order
+    // the graph walks them in is what gets asserted.
+    class OverlapStage : public Stage {
+      public:
+        OverlapStage(std::string name, std::vector<std::string> consumes, std::string produces,
+                     std::vector<std::string>& log, size_t rows = 1, bool fail_begin = false)
+            : Stage(name, consumes, consumes, {produces}),
+              produces_(std::move(produces)),
+              log_(log),
+              rows_(rows),
+              fail_begin_(fail_begin) {}
+        bool overlaps() const override { return true; }
+
+      protected:
+        size_t do_run(FrameState& state) override {
+            do_begin(state);
+            return do_finish(state);
+        }
+        void do_begin(FrameState&) override {
+            log_.push_back("begin:" + name());
+            if (fail_begin_) throw BackendError("refused at submit");
+        }
+        size_t do_finish(FrameState& state) override {
+            log_.push_back("finish:" + name());
+            DevicePayload payload;
+            payload.name = produces_;
+            payload.rows = rows_;
+            payload.object_indices = std::vector<int>(rows_);
+            state.attach_payload(std::move(payload));
+            return rows_;
+        }
+
+      private:
+        std::string produces_;
+        std::vector<std::string>& log_;
+        size_t rows_;
+        bool fail_begin_;
+    };
+
+    // detect -> crop(ship, person) -> the three object models, as `from_plan.cpp` orders them.
+    Dag objects_after_crop(std::vector<std::string>& log, size_t ships,
+                           bool fail_first = false) {
+        Dag dag;
+        dag.add(std::make_unique<FakeStage>("detect", std::vector<std::string>{FRAME_INPUT},
+                                            std::vector<std::string>{FRAME_INPUT}, DETECTIONS,
+                                            2));
+        dag.add(std::make_unique<FakeStage>(
+            "crop", std::vector<std::string>{DETECTIONS, FRAME_INPUT},
+            std::vector<std::string>{DETECTIONS}, "ship_crops", ships));
+        dag.add(std::make_unique<FakeStage>(
+            "crop_people", std::vector<std::string>{DETECTIONS, FRAME_INPUT},
+            std::vector<std::string>{DETECTIONS}, "person_crops", 2));
+        dag.add(std::make_unique<OverlapStage>(
+            "segment", std::vector<std::string>{"ship_crops"}, "masks", log, 1, fail_first));
+        dag.add(std::make_unique<OverlapStage>(
+            "embed_person", std::vector<std::string>{"person_crops"}, "person_vectors", log));
+        dag.add(std::make_unique<OverlapStage>(
+            "embed_ship", std::vector<std::string>{"ship_crops"}, "ship_vectors", log));
+        return dag;
+    }
+
+    void test_a_frames_object_models_are_all_in_flight_before_any_is_awaited() {
+        std::vector<std::string> log;
+        Dag dag = objects_after_crop(log, 1);
+        auto state = a_frame();
+        RecordingObserver observer;
+        const auto outcomes = dag.execute(*state, observer);
+        const std::vector<std::string> want = {"begin:segment",       "begin:embed_person",
+                                               "begin:embed_ship",    "finish:segment",
+                                               "finish:embed_person", "finish:embed_ship"};
+        check(log == want, "every object model is submitted before the first is awaited");
+        check(outcomes.size() == 6 && outcomes[3].stage == "segment" &&
+                  outcomes[5].stage == "embed_ship",
+              "and outcomes still come back in declared order");
+        bool all_ran = true;
+        for (const auto& outcome : outcomes) all_ran = all_ran && outcome.ran();
+        check(all_ran, "all six ran");
+    }
+
+    void test_a_skipped_object_model_keeps_its_place_and_is_not_announced() {
+        std::vector<std::string> log;
+        Dag dag = objects_after_crop(log, /*ships=*/0);
+        auto state = a_frame();
+        RecordingObserver observer;
+        const auto outcomes = dag.execute(*state, observer);
+        check(log == std::vector<std::string>{"begin:embed_person", "finish:embed_person"},
+              "no ship crops: only the person embedder is submitted");
+        check(outcomes[3].status == StageStatus::Skipped &&
+                  outcomes[5].status == StageStatus::Skipped && outcomes[4].ran(),
+              "the two ship stages are skipped at their own positions");
+        bool announced = false;
+        for (const auto& call : observer.planned_calls) {
+            for (const auto& name : call) announced = announced || name == "segment";
+        }
+        check(!announced, "and reassembly is never told to wait for them");
+    }
+
+    void test_an_object_model_refused_at_submit_does_not_stop_its_siblings() {
+        std::vector<std::string> log;
+        Dag dag = objects_after_crop(log, 1, /*fail_first=*/true);
+        auto state = a_frame();
+        RecordingObserver observer;
+        const auto outcomes = dag.execute(*state, observer);
+        check(outcomes[3].status == StageStatus::Failed &&
+                  outcomes[3].error == "refused at submit",
+              "the segmenter failed at submit, and says why");
+        check(outcomes[4].ran() && outcomes[5].ran(), "its siblings still ran");
+        check(std::find(log.begin(), log.end(), "finish:segment") == log.end(),
+              "and a stage that never began is never awaited");
+    }
+
+    void test_a_model_reading_a_siblings_output_waits_for_it() {
+        std::vector<std::string> log;
+        Dag dag;
+        dag.add(std::make_unique<FakeStage>("detect", std::vector<std::string>{FRAME_INPUT},
+                                            std::vector<std::string>{FRAME_INPUT}, DETECTIONS,
+                                            1));
+        dag.add(std::make_unique<OverlapStage>("first", std::vector<std::string>{DETECTIONS},
+                                               "handed_on", log));
+        dag.add(std::make_unique<OverlapStage>("second", std::vector<std::string>{"handed_on"},
+                                               "result", log));
+        auto state = a_frame();
+        RecordingObserver observer;
+        const auto outcomes = dag.execute(*state, observer);
+        const std::vector<std::string> want = {"begin:first", "finish:first", "begin:second",
+                                               "finish:second"};
+        check(log == want, "a dependency cuts the run: the reader is begun after its producer");
+        check(outcomes[2].ran(), "and it ran, rather than being skipped for a missing input");
+    }
+
     void test_the_collector_sees_planned_delivered_and_missing() {
         std::vector<FrameResult> results;
         FrameCollector collector([&](FrameResult&& r) { results.push_back(std::move(r)); }, 16,
@@ -915,6 +1045,10 @@ int main() {
     test_a_stage_whose_input_is_empty_is_skipped_not_failed();
     test_a_failing_stage_does_not_end_the_frame();
     test_the_collector_sees_planned_delivered_and_missing();
+    test_a_frames_object_models_are_all_in_flight_before_any_is_awaited();
+    test_a_skipped_object_model_keeps_its_place_and_is_not_announced();
+    test_an_object_model_refused_at_submit_does_not_stop_its_siblings();
+    test_a_model_reading_a_siblings_output_waits_for_it();
     test_a_skipped_branch_is_a_complete_frame();
     test_a_frame_with_no_detections_is_complete();
     test_a_frame_carrying_only_a_surface_still_has_pixels();

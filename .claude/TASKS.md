@@ -5367,6 +5367,18 @@ C1's half of the old line is answered by V182: the metric is FRAMES and the mult
       [1 165, 1 171] against the broken roster's 1 116 (n=1, overlapping), but cut `late`
       frames 11 277 -> ~1 800 and raised global ids 43 -> 145-167 -- an identity fix more
       than a throughput one; the barrier's cost is the WAIT itself, which is step (4).
+      28 SEP, PLAN STEP (5) DONE ON THE C++ PLANE -- a frame's object models in flight
+      together: tracked [1 274.8, 1 341.3] -> [1 347.4, 1 406.9], +5.9 %, narrowly separated.
+      The new `stage_us_*` percentiles say where a frame's ~56 ms goes: detect 12, the three
+      object models ~18.5 (the segmenter's 8 ms window the slowest), mtmc barrier ~26 (p95
+      80). So step (4) is now the largest lever, and the batch windows (step 6) the cheapest.
+- [ ] OBJECT-MODELS-IN-FLIGHT-PYTHON-TWIN · **The Python plane still walks a frame's object
+      models one at a time** (`pipeline/graph/graph.py` `execute`, `runners/walk.py`
+      `ChainWalk.run`). The C++ plane submits segment, embed_person and embed_ship before
+      awaiting any (`Dag::execute`, two-phase `Stage`). The two-plane rule makes this owed:
+      the same seam there, with its paired tests. The Python pool elements crop for
+      themselves and `embed_ship` really follows `segment`, so there the overlap is
+      `embed_person` against the `segment -> embed_ship` pair.
 - [-] **V165-WHOLE-PIPELINE-4500 · DROPPED BY THE OPERATOR: 4 500 was lowered to 3 000 by V167
       and restated as >= 3x the baseline by V182.** Its scope -- decode -> ... -> mtmc track --
       carries over to `THREE-X-BASELINE-ON-FOUR-GPUS`, and so does everything measured below.

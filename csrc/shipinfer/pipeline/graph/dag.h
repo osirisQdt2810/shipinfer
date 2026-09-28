@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -75,27 +76,64 @@ namespace shipinfer {
             return ready;
         }
 
+        // In declared order, one stage at a time -- except a run of `overlaps()` stages none of
+        // which reads another's output: all of them are begun before any is finished, so the
+        // frame waits for the slowest of their models rather than for their sum.
         std::vector<StageOutcome> execute(FrameState& state, StageObserver& observer) {
             std::vector<StageOutcome> outcomes;
             std::vector<std::string> done;
-            for (const auto& stage : stages_) {
+            for (size_t i = 0; i < stages_.size();) {
                 const std::vector<std::string> ready = runnable(state, done);
                 if (!ready.empty()) observer.planned(ready);
-                StageOutcome outcome;
-                if (std::find(ready.begin(), ready.end(), stage->name()) != ready.end()) {
-                    outcome = stage->run(state);
-                } else {
-                    outcome.stage = stage->name();
-                    outcome.status = StageStatus::Skipped;
+                const size_t end = wave_end(i);
+                std::vector<std::optional<StageOutcome>> begun(end - i);
+                for (size_t k = i; k < end && end - i > 1; ++k) {
+                    if (is_in(ready, stages_[k]->name()))
+                        begun[k - i] = stages_[k]->begin(state);
                 }
-                done.push_back(stage->name());
-                observer.finished(outcome);
-                outcomes.push_back(std::move(outcome));
+                for (size_t k = i; k < end; ++k) {
+                    const Stage& stage = *stages_[k];
+                    StageOutcome outcome;
+                    if (!is_in(ready, stage.name())) {
+                        outcome.stage = stage.name();
+                        outcome.status = StageStatus::Skipped;
+                    } else if (end - i == 1) {
+                        outcome = stages_[k]->run(state);
+                    } else if (!begun[k - i]->ran()) {
+                        outcome = *begun[k - i];  // failed to begin: nothing to finish
+                    } else {
+                        outcome = stages_[k]->finish(state);
+                    }
+                    done.push_back(stage.name());
+                    observer.finished(outcome);
+                    outcomes.push_back(std::move(outcome));
+                }
+                i = end;
             }
             return outcomes;
         }
 
       private:
+        static bool is_in(const std::vector<std::string>& names, const std::string& name) {
+            return std::find(names.begin(), names.end(), name) != names.end();
+        }
+
+        // One past the last stage that may overlap `stages_[first]`: consecutive `overlaps()`
+        // stages, cut before the first that consumes what an earlier one in the run produces.
+        size_t wave_end(size_t first) const {
+            size_t end = first + 1;
+            if (!stages_[first]->overlaps()) return end;
+            std::vector<std::string> produced = stages_[first]->produces();
+            for (; end < stages_.size() && stages_[end]->overlaps(); ++end) {
+                for (const std::string& name : stages_[end]->consumes()) {
+                    if (is_in(produced, name)) return end;
+                }
+                const auto& more = stages_[end]->produces();
+                produced.insert(produced.end(), more.begin(), more.end());
+            }
+            return end;
+        }
+
         std::vector<std::unique_ptr<Stage>> stages_;
     };
 
