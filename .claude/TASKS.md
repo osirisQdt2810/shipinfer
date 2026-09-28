@@ -5280,6 +5280,20 @@ C1's half of the old line is answered by V182: the metric is FRAMES and the mult
       (3) the C++ plane still has no `mtmc`, so "decode -> mtmc track" cannot be measured end
       to end until PR 3 lands (the barrier half is built and green).
 
+- [!] SIBLING-REPOS-RETIRED · **OPERATOR: run `! gh auth refresh -h github.com -s delete_repo`;
+      the deletion is then mine (V184).** `shipinfer-mot`, `shipinfer-imgproc` (the "improc"),
+      `shipinfer-reid`, `shipinfer-mtmc` -- all four, on the operator's answer. Checked first: no
+      PRs, issues or forks; `reid` and `mtmc` are empty; `mot` (1 commit, 11b3b56) and `imgproc`
+      (4, 4ec12b9) are bundled and verified in `.artifacts/archive/`; their code lives on in
+      shipvision (ADR-012). The token carries `repo, read:org, gist, admin:public_key` only.
+- [x] ONE-DEVELOPMENT-IMAGE · **`shipinfer-gst:jammy` is every runner's image (V185).** It holds
+      `jammy-nvdec`'s content -- nvcc 12.6, GStreamer 1.20.3 + RTSP server, ffnvcodec 11.1,
+      OpenCV 4.5.4, torch 2.7.1 -- and `jammy-nvdec`/`jammy-pre-opencv` are gone. EVIDENCE, in
+      it: GPU tier 73 passed / 1 skipped; offline tier 0 failed (4 199 passed from a worktree);
+      a nvdec bench smoke with no `SHIPINFER_BENCH_IMAGE`. Five tests were red in the
+      container on main in BOTH images -- they build a git worktree where there is no git --
+      and now skip there, as `test_container_door.py` does. The pytorch and nvidia/cuda
+      bases are untagged once `main` no longer names them.
 - [~] MERGED-BRANCHES-ARE-NOT-DELETED · **The workflow's merge does not fire `delete_branch_on_merge`,
       so the merge step deletes the head branch itself (V183).** The setting is on and works for a
       merge a person makes; `pr-pipeline.yml` merges with `GITHUB_TOKEN`, and GitHub does not run
@@ -5319,6 +5333,21 @@ C1's half of the old line is answered by V182: the metric is FRAMES and the mult
       largest single cost), segmenter resolution, instances per model. A lever that changes
       what the pipeline OUTPUTS -- precision, cadence, resolution -- has its output delta
       measured beside its throughput and says so; nothing changes quality silently.
+      28 SEP, LOOP STEP (1) DONE -- stage ablation at saturation, GPUs 2,3,5,6, 2 000 offered,
+      ABBA n=2, tracked img/s: full [1 061, 1 120] | no mtmc [1 351, 1 355] | no track+mtmc
+      [1 375, 1 420] | no segment [1 400, 1 429] | detect only [1 909, 1 922] (= all read).
+      SM 86-96 % in every chain arm, NVDEC 39-50 %; worker-holding p50 77 ms full, 57 no mtmc.
+      WHAT IT SAYS: (a) every plan is static-batch and padded -- fill det 2.7/8, seg 4.3/8,
+      person 11.2/16, ship 7.5/16 -- ~40 % of GPU time; (b) throughput = workers / holding
+      time, and the bench's mtmc roster (`cam-01..04`, fleet `cam00..49`) can never close an
+      instant `complete`; (c) at FULL batch the chain costs 1.43-1.49 GPU-ms a frame, so four
+      GPUs top out at 2 680-2 790 with zero waste: output-changing levers are REQUIRED (V186).
+      THE PLAN, approved 28 Sep: (1) ingest ceiling at 3 200/4 000 offered, the generator
+      scaled if it is the wall; (2) an mtmc roster the fleet can complete, groups of 4;
+      (3) dynamic-batch plans, one profile per concurrent context; (4) the mtmc wait off the
+      worker, only if (2) leaves it large; (5) a frame's object models in flight together;
+      (6) re-sweep workers and windows; (7) CUDA graphs per batch size; (8) output-changing
+      levers, largest first -- segmenter work, INT8 detector, INT8 ReID or embed cadence.
 - [-] **V165-WHOLE-PIPELINE-4500 · DROPPED BY THE OPERATOR: 4 500 was lowered to 3 000 by V167
       and restated as >= 3x the baseline by V182.** Its scope -- decode -> ... -> mtmc track --
       carries over to `THREE-X-BASELINE-ON-FOUR-GPUS`, and so does everything measured below.
@@ -6085,7 +6114,10 @@ C1's half of the old line is answered by V182: the metric is FRAMES and the mult
       believed then: "this plane has no such step" is FALSE. `shard.cpp` maps tracks onto rows
       by `Track::last_match`, exactly. See CSRC-TRACKER-ATTRIBUTION's ruling.
 
-- [!] **GPU 7 IS INVISIBLE TO CUDA AND HAS BEEN SINCE AT LEAST 1 Sep -- ONE OF YOUR EIGHT
+- [x] **GPU 7 · CUDA OPENS IT AGAIN (28 Sep).** A vLLM engine of another project held
+      13 264 MiB on bus D2:00.0 -- GPU 7 -- at 05:02 and again at 06:30, which takes a CUDA
+      context; it was in use, so this project did not probe it further. PREVIOUS:
+      **GPU 7 IS INVISIBLE TO CUDA AND HAS BEEN SINCE AT LEAST 1 Sep -- ONE OF YOUR EIGHT
       A5000s IS NOT BEING USED BY ANYTHING.** The driver enumerates it and `nvidia-smi` lists
       it; the CUDA runtime cannot open it. On the HOST, not just in a container:
         `cudaGetDeviceCount` -> **7**      `nvidia-smi` -> **8**   `torch.cuda.device_count()` -> **8**

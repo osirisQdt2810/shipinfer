@@ -2697,7 +2697,7 @@ namespace {
         if (!SOURCES().contains("nvdec")) {
             skip(
                 "no device surface without the nvdec source: this binary does not link it "
-                "(build with `--with-external nvdec` inside shipinfer-gst:jammy-nvdec)");
+                "(build with `--with-external nvdec` inside shipinfer-gst:jammy)");
             return;
         }
         const int width = 320;

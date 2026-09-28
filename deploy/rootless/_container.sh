@@ -23,7 +23,10 @@ REPO="$(cd "$_here/../.." && pwd)"
 # Which GPUs this container may see, and why one degraded card is not a dead tier.
 source "$_here/_gpus.sh"
 
-IMAGE="${SHIPINFER_TEST_IMAGE:-pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime}"
+# ONE image for every runner (V185). `gst-image.sh` bakes it on the pytorch base, so a test, a
+# build and a benchmark see one userland: GStreamer, nvcodec, ffnvcodec, OpenCV, nvcc and a
+# loadable libcudart -- which the bare base lacks (`runtime/device.py` says what that skipped).
+IMAGE="${SHIPINFER_TEST_IMAGE:-shipinfer-gst:jammy}"
 WHEELS="${SHIPINFER_WHEELS:-/tmp/wheels-py311}"
 
 # The ROOTLESS socket, exported here and never left to a shell profile. `setup.sh` tells the

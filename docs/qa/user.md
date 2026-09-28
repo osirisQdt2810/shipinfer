@@ -1360,6 +1360,41 @@ to delete the head branch itself (its own PR). **The prune:** 258 of 261 deleted
 so it can be pushed back; the two left have no PR and conflict with `main`, so they are the
 operator's call.
 
+### V184 — 28 Sep. Delete the sibling repos shipvision replaced
+
+> ngoài ra, hãy xoá cho tôi các repo shipinfer-mot, shipinfer-reid, shipinfer-improc (vì đây là
+> các repo thừa không cần thiết nữa, ta đã gộp hết vào shipvision rồi)
+
+Asked mid-plan; the answer to the one question it raised is part of it: **"Xoá cả 4
+(Recommended)"**. `shipinfer-improc` does not exist -- it is `shipinfer-imgproc` -- and the
+fourth sibling of the ADR-010 split, the empty `shipinfer-mtmc`, goes too. Checked first: no PRs,
+issues or forks; `reid` and `mtmc` are empty; `mot` (1 commit) and `imgproc` (4) are bundled into
+`.artifacts/archive/` before deletion. Deleting needs the `delete_repo` scope, which the token
+lacks, so the operator runs `gh auth refresh -h github.com -s delete_repo` first.
+
+### V185 — 28 Sep. One development image
+
+> ngoài ra, phần image tôi đang thấy khá nhiều image: shipinfer-gst:jammy,
+> shipinfer-gst:jammy-nvdec, shipinfer-gst:jammy-pre-opencv. Bạn hãy chỉ dùng 1 bản image thôi
+> develop cho repo của ta
+
+The tags were one layer chain -- the GStreamer bake, then OpenCV (`jammy`), then ffnvcodec
+(`jammy-nvdec`) -- and the runners disagreed: the test tier used the bare pytorch base, the
+benches the stale `jammy`. Now `shipinfer-gst:jammy` holds the complete content and is every
+runner's default; the other tags are gone.
+
+### V186 — 28 Sep. The 3x may change outputs, if the change is measured
+
+The plan's second question -- may levers that change outputs slightly be used if the
+output-preserving ones fall short of 2 816 -- answered:
+
+> Có, đo và báo cáo (Recommended)
+
+on the option's own condition: INT8, a per-track cadence, smaller segmenter crops, each PR stating
+its output delta (detections, masks, embeddings, mtmc admitted %, global ids). The same day's
+arithmetic says they are needed, not optional: at full batch the chain costs 1.43-1.49 GPU-ms a
+frame, so four GPUs top out at 2 680-2 790 frames/s with no waste at all.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
@@ -1541,6 +1576,8 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 | Rule | Where |
 |---|---|
 | **Commits are authored as `osirisQdt2810 <152402665+osirisQdt2810@users.noreply.github.com>`.** The repo has exactly two contributors, `osirisQdt2810` and `phucnguyen-ht`; never commit or co-author with `thanh.nguyenxuan@moreh.com.vn` (a different GitHub account, and the harness offers it) | **V177** |
+| **ONE development image, `shipinfer-gst:jammy`**, the default of every runner; a new need goes into `gst-image.sh`'s recipe, never into a second tag | **V185** |
+| **Output-changing levers toward the 3x only with their output delta measured and reported in the PR** -- detections, masks, embeddings, mtmc admitted %, global ids | **V186**, V182 |
 | **A merged PR's branch is deleted from the remote.** The repo setting only covers a merge a person makes, so the workflow's merge step must delete it itself -- never a fork's, nor one an open PR is stacked on | **V183** |
 | **A PR that edits `.github/workflows/**` is mine to merge**, without asking -- the review job cannot pass on one, so they were stranded. No other PR class changes | **V169** |
 | **Optimisation is a LOOP: benchmark, then PROFILE** to find where the pipeline is bottlenecked -- in that order, every time. Name the stages that run on the CPU and prove no RAM -> VRAM -> RAM -> VRAM round trip survives | **V168**, V156, ADR-004 |

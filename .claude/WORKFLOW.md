@@ -22,6 +22,9 @@ pre-commit install
 shipinfer doctor          # confirm devices, provider and native status
 ```
 
+Everything that touches a GPU runs in ONE image, `shipinfer-gst:jammy` (V185), baked by
+`deploy/rootless/gst-image.sh` and the default of every runner under `deploy/rootless/`.
+
 Optional extras: `.[tensorrt]` for the production backend, `.[server]` for the HTTP API,
 `.[onnx]`, `.[video]`, `.[kafka]`.
 
