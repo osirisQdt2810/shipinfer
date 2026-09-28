@@ -123,6 +123,44 @@ The larger change is that the devices are **no longer the wall**: about 25 point
 free. The chain is now held by how long a frame keeps its worker, which is what steps 4–6
 address. mtmc admission is unchanged at [81.8, 82.7] % against [79.8, 81.3] %.
 
+### A frame's object models in flight together (step 5)
+
+The worker used to walk segment → embed_person → embed_ship, blocking on each model in turn,
+even though in this plane all three read only the crop stage's payloads. Now it submits all
+three and then waits, still on its one thread.
+
+A/B, dynamic plans, 92 workers, 2 000 offered, GPUs 3,4,5,6, ABBA n=3. The `seq` arm is
+`main`'s binary; the `ovl` arm is this branch's:
+
+| walk | tracked img/s | worker-holding p50 | SM % | mtmc admitted |
+|---|---|---|---|---|
+| sequential | [1 274.8, 1 341.3], mean 1 305 | 59.8–63.5 ms | 64–68 | 82.3–83.5 % |
+| **in flight together** | **[1 347.4, 1 406.9], mean 1 382** | 56.0–59.4 ms | 69–71 | 83.0–83.6 % |
+
+**+5.9 %, but only narrowly separated.** The gap is 6.1 img/s against arm spreads of about 60.
+Holding time moves by about 4 ms, and so does the counter the change acts on. Outputs are
+unchanged: `events_incomplete` is 0 in every run and untracked is 1.0–1.4 %.
+
+**Where a frame's time goes now.** The bench reports each stage's wall time as
+`stage_us_<stage>_p50` and so on. For the overlapped stages that is begin to finish, and the
+finishes happen in declared order.
+
+| stage | p50 | p95 |
+|---|---|---|
+| detect | 11.8–11.9 ms | 20.8–21.3 ms |
+| crop | 0.14 ms | 0.4 ms |
+| segment | 18.3–18.6 ms | 36.8–40.0 ms |
+| embed_person | 6.9–7.1 ms | 19.7–19.9 ms |
+| embed_ship (finishes after segment) | 18.4–18.6 ms | 36.9–40.0 ms |
+| track | 0.03 ms | 0.14 ms |
+| **mtmc (the barrier wait)** | **25.6–28.3 ms** | **80.2–81.9 ms** |
+
+The sum, about 12 + 18.5 + 26 ≈ 56 ms, is the worker-holding time measured.
+
+**The barrier is now the largest single wait, about half of a frame's hold.** That makes step 4
+the lever. The segmenter, at 18 ms with an 8 ms batch window, is the slowest model. With dynamic
+plans a small batch is cheap, so a shorter window is the next thing to measure.
+
 ### How to re-run these
 
 ```bash

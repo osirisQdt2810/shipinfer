@@ -79,15 +79,52 @@ namespace shipinfer {
             return outcome;
         }
 
+        // THE TWO-PHASE FORM, so a graph can keep several stages' model calls in flight at
+        // once: `begin` submits and returns, `finish` waits and attaches. Only a stage that
+        // `overlaps()` is walked this way, on the one worker thread -- nothing here is shared.
+        virtual bool overlaps() const { return false; }
+        StageOutcome begin(FrameState& state) {
+            begun_ = std::chrono::steady_clock::now();
+            return attempt(state, [this](FrameState& s) {
+                do_begin(s);
+                return size_t{0};
+            });
+        }
+        StageOutcome finish(FrameState& state) {
+            return attempt(state, [this](FrameState& s) { return do_finish(s); });
+        }
+
       protected:
         // Do the work and mutate `state`. Returns the number of rows produced.
         virtual size_t do_run(FrameState& state) = 0;
+        // Submit without waiting; `do_finish` then waits and attaches. The defaults make an
+        // overlapping stage that does not split its work behave exactly like `run`.
+        virtual void do_begin(FrameState&) {}
+        virtual size_t do_finish(FrameState& state) { return do_run(state); }
 
       private:
+        template <typename Work>
+        StageOutcome attempt(FrameState& state, Work work) {
+            StageOutcome outcome;
+            outcome.stage = name_;
+            try {
+                outcome.rows = work(state);
+                outcome.status = StageStatus::Ran;
+            } catch (const std::exception& error) {
+                outcome.status = StageStatus::Failed;
+                outcome.error = error.what();
+            }
+            outcome.elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::steady_clock::now() - begun_)
+                                     .count();
+            return outcome;
+        }
+
         std::string name_;
         std::vector<std::string> consumes_;
         std::vector<std::string> requires_;
         std::vector<std::string> produces_;
+        std::chrono::steady_clock::time_point begun_;
     };
 
 }  // namespace shipinfer

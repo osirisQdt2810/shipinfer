@@ -14,7 +14,8 @@ The operator's target (V182): **≥ 3× the baseline, ~3 000 img/s**, for the wh
 |---|---|---|
 | baseline `sim_pipeline_v2` (fp16, saturated) | 938.6 | 1.0× |
 | full chain, 28 Sep, static plans (tracked, ABBA n=2) | [1 061, 1 120] | 1.13–1.19× |
-| **full chain, dynamic plans** (tracked, ABBA n=3) | **[1 213.8, 1 299.3]** | **1.29–1.38×** |
+| full chain, dynamic plans (tracked, ABBA n=3) | [1 213.8, 1 299.3] | 1.29–1.38× |
+| **+ object models in flight together** (tracked, ABBA n=3) | **[1 347.4, 1 406.9]** | **1.44–1.50×** |
 | detect only, 28 Sep (offer-bound) | [1 909, 1 922] | ≥ 2.0× |
 | **target** | **≥ 2 816** | **3.0×** |
 
@@ -50,6 +51,9 @@ Each step-8 lever reports its output delta; the operator allowed them on that co
 
 > V167's "3 000 is met" was a four-GPU reading multiplied by four. V182 pins the target to four
 > GPUs, so that claim is withdrawn.
+
+**`OBJECT-MODELS-IN-FLIGHT-PYTHON-TWIN`** — the Python plane still walks a frame's object
+models one at a time; the C++ plane now overlaps them. The two-plane rule makes this owed.
 
 ## 2. Needs the operator
 

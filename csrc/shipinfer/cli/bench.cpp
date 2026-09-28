@@ -564,6 +564,11 @@ int main(int argc, char** argv) {
         std::mutex latency_lock;
         std::vector<uint32_t> latency_us;
         latency_us.reserve(1 << 20);
+        //: Each stage's own wall time a frame, begin to finish for overlapped ones, so a
+        //: lever's claim about WHICH wait it removed is read off the run (V168: benchmark, then
+        //: profile).
+        std::mutex stage_lock;
+        std::map<std::string, std::vector<uint32_t>> stage_us;
         //: CAPTURE TO EMISSION -- what the Python plane calls "the number the deployment is
         //: judged on" (`pipeline/metrics.py`). `core/events/schema.cpp` already computes it on
         //: every event from `FrameTag::captured_ns`; nothing summarised it. Under the SAME
@@ -838,8 +843,17 @@ int main(int argc, char** argv) {
                                     item.state->set_image(pixels, device);
                                 }
                                 CollectorObserver observer(collector, item.tag);
-                                for (const StageOutcome& outcome :
-                                     dag.execute(*item.state, observer)) {
+                                const std::vector<StageOutcome> outcomes =
+                                    dag.execute(*item.state, observer);
+                                {
+                                    const std::lock_guard<std::mutex> held(stage_lock);
+                                    for (const StageOutcome& outcome : outcomes) {
+                                        if (outcome.ran())
+                                            stage_us[outcome.stage].push_back(
+                                                microseconds_clamped(outcome.elapsed_us));
+                                    }
+                                }
+                                for (const StageOutcome& outcome : outcomes) {
                                     if (outcome.status == StageStatus::Failed &&
                                         failures_shouted.fetch_add(1) < 5) {
                                         std::cerr << "frame " << item.tag.key() << " stage "
@@ -1208,6 +1222,9 @@ int main(int argc, char** argv) {
         // at capture, so it is the one a deployment is judged on.
         report_window("reassembly_us", latency_lock, latency_us);
         report_window("frame_us", latency_lock, frame_us);
+        for (auto& [stage, samples] : stage_us) {
+            report_window(("stage_us_" + stage).c_str(), stage_lock, samples);
+        }
         // IN THE OUTPUT, not only in a comment: a frame window with fewer samples than the
         // reassembly one means the second describes a SUBSET, and a reader comparing the two
         // has to know. Two causes, not one: a source that stopped stamping `captured_ns`, or

@@ -5,6 +5,19 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-28 — a frame's object models are in flight together (C++ perception graph)
+
+`Dag::execute` walked every stage in turn, and each `ObjectStage` blocked on its model: a frame
+waited for segment + embed_person + embed_ship although all three read only the crop payloads.
+`Stage` gains a two-phase form (`overlaps()`, `begin`, `finish`); the walk begins every stage of
+a run of overlapping ones before finishing any, cut before a stage that reads a sibling's
+output, outcomes still in declared order. `ModelStage` splits into `submit` and `await` with the
+deadline from submission. One thread throughout, so ADR-002 holds. ABBA n=3: tracked
+[1 274.8, 1 341.3] -> [1 347.4, 1 406.9]. The bench now reports `stage_us_<stage>` percentiles,
+which put the mtmc barrier at ~26 of ~56 ms held. The Python twin is a ledger item.
+
+---
+
 ## 2026-09-28 — dynamic-batch plans: a partial batch costs only its rows (TensorRT seam)
 
 Every plan was static and `adapter.cpp` padded each partial batch to it: at the full chain's

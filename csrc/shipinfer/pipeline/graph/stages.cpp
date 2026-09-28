@@ -77,9 +77,9 @@ namespace shipinfer {
             throw ConfigError("stage " + this->name() + ": timeout must be > 0");
     }
 
-    InferenceResponse ModelStage::infer(const FrameState& state, const float* data, size_t rows,
-                                        size_t row_elems, Device device,
-                                        std::shared_ptr<const void> keepalive) {
+    ModelStage::Submitted ModelStage::submit(const FrameState& state, const float* data,
+                                             size_t rows, size_t row_elems, Device device,
+                                             std::shared_ptr<const void> keepalive) {
         // The request carries the frame's tag **unchanged** (ADR-002): batching, spillover to
         // another GPU and out-of-order completion are all fine because reassembly keys on the
         // tag rather than on arrival order.
@@ -94,15 +94,28 @@ namespace shipinfer {
         request.row_elems = row_elems;
         request.payload_device = device;
         request.keepalive = std::move(keepalive);
-        std::future<InferenceResponse> future = model_.infer(std::move(request));
-        if (future.wait_for(timeout_) != std::future_status::ready) {
-            // Bounded so a wedged instance costs one frame and one worker for this long rather
-            // than forever; the stage fails and the event names it as missing.
+        const auto deadline = std::chrono::steady_clock::now() + timeout_;
+        return Submitted{model_.infer(std::move(request)), deadline};
+    }
+
+    InferenceResponse ModelStage::await(Submitted& submitted, const FrameState& state) {
+        // Bounded from SUBMISSION, so a request that waited behind a sibling's is not given a
+        // second budget: a wedged instance costs one frame and one worker for this long rather
+        // than forever, and the stage fails with the event naming it as missing.
+        if (submitted.future.wait_until(submitted.deadline) != std::future_status::ready) {
             throw RequestTimeoutError(
                 "stage " + name() + ": model " + model_.name() + " did not answer within " +
                 std::to_string(timeout_.count()) + " ms for " + state.tag().key());
         }
-        return future.get();
+        return submitted.future.get();
+    }
+
+    InferenceResponse ModelStage::infer(const FrameState& state, const float* data, size_t rows,
+                                        size_t row_elems, Device device,
+                                        std::shared_ptr<const void> keepalive) {
+        Submitted submitted =
+            submit(state, data, rows, row_elems, device, std::move(keepalive));
+        return await(submitted, state);
     }
 
     // -- DetectStage
@@ -557,20 +570,34 @@ namespace shipinfer {
     }
 
     size_t ObjectStage::do_run(FrameState& state) {
-        const DevicePayload* payload = state.payload(source_);
-        if (payload == nullptr)
+        do_begin(state);
+        return do_finish(state);
+    }
+
+    void ObjectStage::do_begin(FrameState& state) {
+        chunks_.clear();
+        payload_ = state.payload(source_);
+        if (payload_ == nullptr)
             throw ConfigError("stage " + name() + ": no payload named " + source_);
         // Chunked to the engine's own batch, static or a dynamic plan's profile max: submitting
         // a whole frame's crops as one request is what lost every crop in a 25-person frame
-        // against a plan built at 16. One ObjectBatch, grown per chunk, attached once.
+        // against a plan built at 16. Every chunk is submitted before any is awaited.
+        const size_t limit = static_cast<size_t>(std::max(1, model().max_batch()));
+        for (size_t start = 0; start < payload_->rows; start += limit) {
+            const size_t count = std::min(limit, payload_->rows - start);
+            chunks_.emplace_back(
+                start, submit(state, payload_->data + start * payload_->row_elems, count,
+                              payload_->row_elems, payload_->device, payload_->owner));
+        }
+    }
+
+    size_t ObjectStage::do_finish(FrameState& state) {
         const size_t limit = static_cast<size_t>(std::max(1, model().max_batch()));
         ObjectBatch out;
         out.name = output_;
-        for (size_t start = 0; start < payload->rows; start += limit) {
-            const size_t count = std::min(limit, payload->rows - start);
-            const InferenceResponse response =
-                infer(state, payload->data + start * payload->row_elems, count,
-                      payload->row_elems, payload->device, payload->owner);
+        for (auto& [start, submitted] : chunks_) {
+            const size_t count = std::min(limit, payload_->rows - start);
+            const InferenceResponse response = await(submitted, state);
             if (response.rows != count) {
                 throw BackendError("stage " + name() + ": model " + model().name() +
                                    " returned " + std::to_string(response.rows) +
@@ -589,10 +616,11 @@ namespace shipinfer {
                                    "one row per crop");
             }
             out.append(rows_out.data.data(), static_cast<int>(count),
-                       static_cast<int>(rows_out.row_elems), payload->object_indices, start);
+                       static_cast<int>(rows_out.row_elems), payload_->object_indices, start);
         }
+        chunks_.clear();
         state.attach(std::move(out));
-        return payload->rows;
+        return payload_->rows;
     }
 
 }  // namespace shipinfer
