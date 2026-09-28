@@ -314,12 +314,11 @@ def prefer_blocking_sync(devices: Iterable[int]) -> tuple[int, ...]:
     # doc: long the three names, and which images each one is there for
     # `find_library` first, then the SONAME, then the dev symlink -- the same shape
     # `core/thread_name.py` uses for libc, for the same reason: the name on the developer's
-    # box is not the name where the measurement is taken. MEASURED in the three images this
-    # repository runs: `shipinfer-gst:jammy` and `:jammy-nvdec` (where every benchmark runs)
-    # resolve `cudart` to `libcudart.so.12` and load all three names, while
-    # `pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime` (the offline TEST image) has none of
-    # them on the loader path -- torch keeps its own under `torch/lib/`. That image runs no
-    # GPU benchmark, so the warning below is the right outcome there rather than a failure.
+    # box is not the name where the measurement is taken. MEASURED 28 Sep: the one image
+    # every runner uses (V185), `shipinfer-gst:jammy`, resolves `cudart` to `libcudart.so.12`
+    # and loads all three names under any LD_LIBRARY_PATH; the bare pytorch base -- the test
+    # image until V185 -- has none on the loader path (torch keeps its own under `torch/lib/`),
+    # so there the warning below is the right outcome rather than a failure.
     candidates = [ctypes.util.find_library("cudart"), "libcudart.so.12", "libcudart.so"]
     libcudart = None
     for candidate in candidates:

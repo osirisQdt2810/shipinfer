@@ -18,6 +18,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "run_tests.sh"
 
@@ -38,6 +40,10 @@ def _stub(path: Path, body: str) -> Path:
 
 def _worktree(tmp_path: Path) -> tuple[Path, Path, Path]:
     """A real repository with a `.venv` stub, plus a linked worktree that has none."""
+    # No `git` in the container image, then or now (V185), so every test building a worktree
+    # was red in the offline tier there on main. Same guard as `test_container_door.py`.
+    if shutil.which("git") is None:
+        pytest.skip("git is not on PATH (the container image has none); runs on the host")
     main, linked = tmp_path / "main", tmp_path / "wt"
     git = ("git", "-c", "user.email=t@t", "-c", "user.name=t")
     subprocess.run(["git", "init", "-q", str(main)], check=True)

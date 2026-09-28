@@ -11,9 +11,10 @@ Why the binary is compiled on the host and run in the container
 The project rule is that measurements run in a container. This box cannot build container
 images — rootless Docker here cannot mount ``/proc`` from an unprivileged user namespace, so
 buildkit fails (``deploy/rootless/setup.sh``) — and containers have no outbound network, so
-``apt install g++ libopencv-dev`` is not available either. The only image that can be used is
-``pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime``, which has neither a C++ compiler nor
-OpenCV.
+``apt install g++ libopencv-dev`` is not available either. The image this was written against,
+``pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime``, has neither a C++ compiler nor OpenCV; the
+one development image since V185 (``shipinfer-gst:jammy``) has both, but every recorded
+baseline number was measured with the host build below, so the host build stays.
 
 So the split is: **compile on the host** (a compiler is not a measurement) and **run in the
 container**. To make the host-built binary runnable there, :func:`stage_runtime_libs` copies

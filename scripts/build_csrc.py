@@ -31,11 +31,10 @@ alone on a machine with nothing installed, and ``pkg-config`` refusing on a bare
 exactly the undeclared prerequisite it exists to prevent.
 
 ``--with-external <lane>`` opts one named lane back into the offline build. That is not a
-loophole, it is the only way the GStreamer source gets compiled and tested anywhere: the one
-image with both the GStreamer headers and the GStreamer plugins (``shipinfer-gst:jammy``) has no
-nvcc and no TensorRT, so the full build cannot run there and the offline build is what has to
-stretch. A lane whose units reach ``core/platform.h`` is refused rather than stretched to — see
-:func:`main`.
+loophole, it is how the GStreamer source gets compiled and tested on a machine with no nvcc and
+no TensorRT -- CI. The headers and plugins live in ``shipinfer-gst:jammy``, the one development
+image (V185), where the full build also runs with TensorRT mounted by ``cpp.sh``. A lane whose
+units reach ``core/platform.h`` is refused rather than stretched to — see :func:`main`.
 
 A full build (no ``--offline``) compiles every unit and therefore wants every lane's packages.
 A lane it cannot resolve is left out with a loud warning rather than dropped quietly, because a
@@ -132,7 +131,7 @@ EXTERNAL: dict[str, ExternalLane] = {
         packages=("ffnvcodec", "gstreamer-1.0", "gstreamer-app-1.0"),
         hint=(
             "install libffmpeg-nvenc-dev (nv-codec-headers) plus libgstreamer1.0-dev and "
-            "libgstreamer-plugins-base1.0-dev, or build inside shipinfer-gst:jammy-nvdec, "
+            "libgstreamer-plugins-base1.0-dev, or build inside shipinfer-gst:jammy (cpp.sh), "
             "which has all three. The GStreamer half is there because this source takes its "
             "bitstream off RTSP through the same appsink the BGR path uses; only the decode "
             "is NVDEC's."
