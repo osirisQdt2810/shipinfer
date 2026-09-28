@@ -5294,7 +5294,10 @@ C1's half of the old line is answered by V182: the metric is FRAMES and the mult
       container on main in BOTH images -- they build a git worktree where there is no git --
       and now skip there, as `test_container_door.py` does. The pytorch and nvidia/cuda
       bases are untagged once `main` no longer names them.
-- [~] MERGED-BRANCHES-ARE-NOT-DELETED · **The workflow's merge does not fire `delete_branch_on_merge`,
+- [x] MERGED-BRANCHES-ARE-NOT-DELETED · **SEEN WORKING LIVE, 28 Sep: #298 was merged by
+      `app/github-actions` at 06:54:59Z and the new step logged `Deleted branch
+      chore/one-development-image.` (run 36388396835).** The remote holds `main` and the two
+      operator branches, nothing else. WAS: **The workflow's merge does not fire `delete_branch_on_merge`,
       so the merge step deletes the head branch itself (V183).** The setting is on and works for a
       merge a person makes; `pr-pipeline.yml` merges with `GITHUB_TOKEN`, and GitHub does not run
       the setting for that token -- 257 of 275 workflow-merged branches were still on the remote.
@@ -5348,6 +5351,13 @@ C1's half of the old line is answered by V182: the metric is FRAMES and the mult
       worker, only if (2) leaves it large; (5) a frame's object models in flight together;
       (6) re-sweep workers and windows; (7) CUDA graphs per batch size; (8) output-changing
       levers, largest first -- segmenter work, INT8 detector, INT8 ReID or embed cadence.
+      28 SEP, PLAN STEP (1) DONE -- INGEST IS NOT THE WALL, AND NEITHER IS THE GENERATOR.
+      detect only, 2 vs 4 RTSP servers, ABBA: READ [3 063.7, 3 066.7]/s of 3 200 offered and
+      [3 799.8, 3 818.9]/s of 4 000 -- ~95 % of the offer at both, server count irrelevant,
+      generator 1.3-2.1 cores, NVDEC 79-83 % at ~950 a card. Detection alone ACCEPTS
+      ~3 810/s. So the "ingest reads ~2 200 / detect clears ~1 850" above is WITHDRAWN for
+      the current binary, and the 3x lives wholly in the chain after the detector and in
+      how a worker waits. `benchmarks/RESULTS.md` "28 Sep" carries the tables.
 - [-] **V165-WHOLE-PIPELINE-4500 · DROPPED BY THE OPERATOR: 4 500 was lowered to 3 000 by V167
       and restated as >= 3x the baseline by V182.** Its scope -- decode -> ... -> mtmc track --
       carries over to `THREE-X-BASELINE-ON-FOUR-GPUS`, and so does everything measured below.

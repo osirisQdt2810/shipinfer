@@ -8,6 +8,105 @@ says which. `README.md` says how to reproduce them; this file says what came bac
 **Supersedes nothing outside itself.** When a run disagrees with a number here, replace the
 number and date it.
 
+## 28 Sep 2026 — where the chain's time goes, and why ingest is not the wall
+
+Four A5000s (host ids 2,3,5,6, idle at the start of each run), `--source nvdec`, and the pan fixture
+pinned for EVERY arm (`SHIPINFER_RTSP_{PERSON,SHIP}_DATA`; without the pin, a chain with no
+`track` silently gets the slideshow). Workers 92, 40 s a run, arms in ABBA order in one sitting,
+read as ranges. The binary was rebuilt from `main` the same morning, in the one image. Every
+figure is 50 cameras.
+
+### The stage ablation at saturation (2 000 offered)
+
+| chain | tracked img/s | SM % | NVDEC % | worker-holding p50 |
+|---|---|---|---|---|
+| full | **[1 061, 1 120]** | 86–90 | 44–46 | 77 ms |
+| no `mtmc` | [1 351, 1 355] | 93–96 | 46–50 | 57 ms |
+| no `track`, no `mtmc` | [1 375, 1 420] | 94–95 | 47–49 | 59 ms |
+| no `segment` | [1 400, 1 429] | 69–73 | 42–43 | 56 ms |
+| detect only | [1 909, 1 922], i.e. everything read | 56–58 | 39–40 | 10.5 ms |
+
+- **Worker-holding** is `reassembly_us`, the time from a frame's open to its seal.
+- **Throughput is workers ÷ holding time.** 92 workers over 77 ms is ~1 195/s against a measured
+  1 081–1 135 accepted.
+- **The barrier is a quarter of the throughput.**
+  - The bench chain's roster is `cam-01..cam-04`; the fleet is `cam00..cam49`.
+  - Its instants therefore close only by `advanced` (1 629) or `window` (1 301), never
+    `complete`. So every associated frame parks for a camera's next frame or the 60 ms window.
+- **The segmenter costs about the same as the barrier**, and ~20 points of SM.
+
+### What each engine costs, alone on an idle card
+
+`trtexec` with no data transfers, the installed plans, run ABAB on GPU 5:
+
+| plan (static batch) | with a CUDA graph | without | host enqueue a batch |
+|---|---|---|---|
+| detector, b8 | 2.98–3.05 ms | 3.19–3.25 ms | 1.5 ms |
+| segmenter, b8 | 3.85–3.92 ms | 4.08–4.18 ms | 2.0 ms |
+| ReID, b16 | 1.65–1.68 ms | 1.74–1.76 ms | 0.44 ms |
+
+- **Every plan is static-batch, and a partial batch is padded to it** (`adapter.cpp`).
+  - At the full chain's saturation the achieved fill is: detector 2.7/8, segmenter 4.3/8,
+    person embedder 11.2/16, ship embedder 7.5/16.
+  - So roughly 40 % of the GPU time goes to padding rows. Detect-only spends 56 % SM on ~480
+    frames a card.
+- **Even at FULL batch the chain costs 1.43–1.49 GPU-ms a frame** on this footage. Per frame
+  that is 1.00 detector, 1.07–1.09 segmenter, 4.28–4.46 person-embedder and 1.07–1.09
+  ship-embedder rows.
+  - So four cards top out at **2 680–2 790 frames/s** even with zero waste.
+  - That is under the 2 816 target, which makes output-changing levers necessary, not optional
+    (V186 allows them with their delta measured).
+  - The rows per frame are this fixture's. The ledger's older "7.80 person rows a frame" came
+    from a different run: the 15 Sep saturation run at 40 fps also shows 4.33.
+
+### The ingest ceiling, and the generator ruled out
+
+`detect_only`, with 2 against 4 RTSP server processes (`SHIPINFER_RTSP_SERVERS` 1 and 2 a half):
+
+| offered | servers | frames read /s | accepted /s | generator cores | SM % | NVDEC % |
+|---|---|---|---|---|---|---|
+| 3 200 | 2 | 3 065.7, 3 066.7 | 3 063.3, 3 066.4 | 1.30–1.34 | 55 | 60–62 |
+| 3 200 | 4 | 3 063.7, 3 066.4 | 3 064.9, 3 066.2 | 1.34 | 55–56 | 61 |
+| 4 000 | 2 | 3 818.9, 3 803.3 | 3 820.2, 3 803.5 | 1.94–1.99 | 64–65 | 81–83 |
+| 4 000 | 4 | 3 799.8, 3 815.3 | 3 799.3, 3 815.5 | 1.74–2.08 | 62–65 | 79–83 |
+
+- **Ingest is not the wall, to 4 000 offered.** It reads ~95 % of what is offered at both
+  rates.
+- **The server count changes nothing**, so the generator is not the wall either.
+- **NVDEC reaches ~80 % at ~950 frames a card**, which puts its ceiling near 1 150–1 200 a card
+  on this footage.
+- **Detection alone keeps up with 3 800 frames/s.** The detector fills 5.6–5.8/8 at that
+  arrival rate, against 2.6 at 1 900.
+
+This corrects the ledger's 15–16 Sep reading ("ingest reads ~2 200", "detect clears ~1 850").
+Those runs predate #294 and #295 and used the binary built before them.
+
+The 3× therefore sits entirely in the rest of the chain and in how a worker waits. Nothing is
+missing upstream of the detector.
+
+### How to re-run these
+
+```bash
+# the ablation: one chain per arm, ABBA. Each variant deletes slots from ship_person_cpu.yaml:
+#   no mtmc     -- drop `mtmc`
+#   no track    -- drop `track` and `mtmc`; `output` gets `after: [embed_ship, embed_person]`
+#   no segment  -- drop `segment`; `embed_ship` gets `after: detect`
+SHIPINFER_BENCH_GPUS=2,3,5,6 SHIPINFER_BENCH_CAMERAS=50 SHIPINFER_BENCH_FPS=40 \
+SHIPINFER_BENCH_SECONDS=40 SHIPINFER_BENCH_SOURCE=nvdec SHIPINFER_BENCH_WORKERS=92 \
+SHIPINFER_RTSP_PERSON_DATA=/work/.artifacts/pan/person \
+SHIPINFER_RTSP_SHIP_DATA=/work/.artifacts/pan/ship \
+SHIPINFER_BENCH_CHAIN=$PWD/topology/ship_person_cpu.yaml scripts/run_cpp_bench.sh abl_full_1
+
+# the ingest ceiling: detect only, FPS 64 or 80, SHIPINFER_RTSP_SERVERS 1 or 2
+SHIPINFER_BENCH_CHAIN=$PWD/topology/detect_only.yaml SHIPINFER_BENCH_FPS=64 \
+SHIPINFER_RTSP_SERVERS=2 ...same as above... scripts/run_cpp_bench.sh ing_f64_s2_1
+
+# an engine alone: inside the one image, with TensorRT mounted
+SHIPINFER_GPUS=5 deploy/rootless/run.sh /tensorrt/bin/trtexec \
+  --loadEngine=/work/model_repository/ship_detector/1/model.plan \
+  --shapes=images:8x3x640x640 --noDataTransfers --useCudaGraph --duration=5
+```
+
 ## 15 Sep 2026 — the decode route, and the design load on four GPUs
 
 Everything below this section is the 8–9 Sep measurement on **five** GPUs and stands as it was
