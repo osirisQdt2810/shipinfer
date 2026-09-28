@@ -5286,6 +5286,11 @@ C1's half of the old line is answered by V182: the metric is FRAMES and the mult
       the setting for that token -- 257 of 275 workflow-merged branches were still on the remote.
       Done when the step deletes the branch, skips a fork's and one an open PR is stacked on, never
       fails the job over it, and a test runs the step's own script against a stub `gh`.
+      BUILT on `fix/the-merge-step-deletes-the-merged-branch`: a `delete-branch` step after the
+      merge, and `tests/test_merge_deletes_its_branch.py` runs both steps' scripts against a stub
+      `gh` (17 cases; twelve mutations of the workflow each caught). Reproduced live the same
+      morning: #296, merged by `app/github-actions` at 04:52Z, kept its branch. Stays `[~]` until
+      the first `automerge` merge after the fix lands shows the step deleting its own branch.
 - [!] TWO-UNMERGED-BRANCHES-WITH-NO-PR · **OPERATOR: keep or delete `feat/device-lanes-v2` and
       `refactor/one-logger`?** Found 28 Sep while clearing the remote on request (V183): 258 of
       261 branches were stale -- 256 with a merged PR, `feat/cpp-data-plane` (PR #8 closed, so
