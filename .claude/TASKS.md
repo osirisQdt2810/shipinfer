@@ -7,7 +7,7 @@ line names the ledger item that holds the detail, and the exact action.
 
 | # | Action | Item |
 |---|---|---|
-| 1 | **ANSWERED 10 Sep (V164): the metric is FPS — images processed per second — the target is 5x the baseline, and it runs on FOUR GPUs, not five.** Events/rows/CPU-second are ruled out ("tuyệt đối không"). Both arms need re-taking on four GPUs as img/s; every figure so far is five-GPU and event-based. **AND `C1` KEPT WAITING ON IT ANYWAY** until 14 Sep -- it read "waiting on the operator's one question" for four days after you answered. Corrected: `C1`, `FPS-ON-FOUR-GPUS`, `V165` and `V167` all now wait on the same RE-RUN (four GPUs, img/s, both arms), not on you. **THE RE-RUN IS DONE, 15 Sep: both arms, four GPUs, img/s, matched fp16.** baseline 938.6 SATURATED against ours accepted [821.4, 836.5] / tracked [800.8, 819.6] -- **0.85-0.89x by frames, 5.14-5.23x by model work**, because the baseline runs 2 model invocations an image and this chain runs 11.74. **SUPERSEDED LATER THE SAME DAY: that pair compared the baseline's SATURATED figure with ours from a run offered 1 000 img/s, below our own ceiling. At our ceiling, eight interleaved runs: [0.94, 1.03]x by frames -- parity -- and [5.53, 6.07]x by model work.** `FPS-ON-FOUR-GPUS` and `V167-GSTREAMER-ONLY-3000` are closed by it. WHAT IS LEFT FOR YOU is one sentence: which of those two the 5x means. Frames would need 4 693 img/s on four GPUs; model work is already met. | `C1-WHAT-IS-THE-5x-AGAINST?`, `FPS-ON-FOUR-GPUS`, `C1` |
+| 1 | **RE-ANSWERED 28 Sep (V182): >= 3x the baseline, ~3 000 img/s, on the SAME FOUR GPUs -- so the target is NOT met, and it is `THREE-X-BASELINE-ON-FOUR-GPUS`.** ANSWERED 10 Sep (V164): the metric is FPS — images processed per second — the target is 5x the baseline, and it runs on FOUR GPUs, not five.** Events/rows/CPU-second are ruled out ("tuyệt đối không"). Both arms need re-taking on four GPUs as img/s; every figure so far is five-GPU and event-based. **AND `C1` KEPT WAITING ON IT ANYWAY** until 14 Sep -- it read "waiting on the operator's one question" for four days after you answered. Corrected: `C1`, `FPS-ON-FOUR-GPUS`, `V165` and `V167` all now wait on the same RE-RUN (four GPUs, img/s, both arms), not on you. **THE RE-RUN IS DONE, 15 Sep: both arms, four GPUs, img/s, matched fp16.** baseline 938.6 SATURATED against ours accepted [821.4, 836.5] / tracked [800.8, 819.6] -- **0.85-0.89x by frames, 5.14-5.23x by model work**, because the baseline runs 2 model invocations an image and this chain runs 11.74. **SUPERSEDED LATER THE SAME DAY: that pair compared the baseline's SATURATED figure with ours from a run offered 1 000 img/s, below our own ceiling. At our ceiling, eight interleaved runs: [0.94, 1.03]x by frames -- parity -- and [5.53, 6.07]x by model work.** `FPS-ON-FOUR-GPUS` and `V167-GSTREAMER-ONLY-3000` are closed by it. WHAT IS LEFT FOR YOU is one sentence: which of those two the 5x means. Frames would need 4 693 img/s on four GPUs; model work is already met. | `C1-WHAT-IS-THE-5x-AGAINST?`, `FPS-ON-FOUR-GPUS`, `C1` |
 | 0 | **Nothing — resolved itself.** A vendor apt repo served a bad index for ~30 min on 9 Sep and `main` went red on a repository this project never installs from; it cleared, and #194 and #196 merged on a re-run. #195 hardens against the next one and carries `automerge`. | `CI-A-VENDOR-REPO-BLOCKS-EVERY-MERGE` |
 | 2 | **DONE 10 Sep — you merged it** (`a9867e3`). The C++ tracking chain is mine again. | `CSRC-GRAPH-HAS-NO-TRACKING`, `V146b` |
 | 3 | **DONE 10 Sep — you merged it** (`b645dbd`). `V124a-PHASE3` is unblocked. | `V124b`, `V124a-PHASE3` |
@@ -336,7 +336,10 @@ prose, and inline `[!] OPERATOR:` sub-markers parse as items. An advisory list t
 false positives gets ignored, which is no better than the reminder it replaces. Done by hand it
 is twenty minutes and it found four.
 
-AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is this repo's `pipeline/deepstream/run.py` deployed anywhere outside this box? It has never run HERE (no deepstream image; T4 still asks you to pull it), so if the answer is no I will make `missing_stages` per-frame everywhere and keep schema v5. Row 1's remaining half is the other one: which of the two measured ratios the 5x means -- **frames [0.94, 1.03]x (parity) and model work [5.53, 6.07]x**, both re-measured at saturation on 15 Sep; this line carried the superseded 0.85-0.89x / 5.14-5.23x pair, which were taken below our own ceiling. Everything else is `[x]`/`[!]`/`[-]`; the one `[ ]` is `SHIPVISION-TRACK-LAST-MATCH`, which the parity register PINS open by test.
+OPERATOR QUESTIONS, deliberately NOT a stand-down line (28 Sep): the throughput target is open
+work again (`THREE-X-BASELINE-ON-FOUR-GPUS`, `[~]`), so this ledger must not let a session stop
+over it. What still needs you lives on its `[!]` lines, and the root `TASKS.md` lists them.
+C1's half of the old line is answered by V182: the metric is FRAMES and the multiple is 3x.
 
 > ## Z · The final gate — never remove this line (V61)
 >
@@ -4966,7 +4969,13 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       (The 188 arm was not re-run at saturation: it lost on BOTH accepted and tracked at
       1 000 offered, and its stated cause -- ingest threads and workers competing for cores --
       gets worse, not better, when the offer doubles.)
-- [x] **V167-GSTREAMER-ONLY-3000 · ANSWERED 15 Sep: 3 000 IS MET ON THE ROUTE YOU MANDATED,
+- [x] **V167-GSTREAMER-ONLY-3000 · THE ROUTE RULE IS DONE; THE "3 000 IS MET" CLAIM IS
+      WITHDRAWN (28 Sep, V182).** Every figure below that "meets" 3 000 is a four-GPU reading
+      MULTIPLIED BY FOUR. V164 put the target on four GPUs and V182 pins it there: 3 x 938.6 =
+      2 816. On four GPUs the chain tracks [848.1, 939.2] -- about 1.0x, not 3x. The target
+      moves to `THREE-X-BASELINE-ON-FOUR-GPUS`; the route rule (gstreamer RTSP from an offline
+      video, `--source nvdec`) is what stays done here.
+      PREVIOUS: **ANSWERED 15 Sep: 3 000 IS MET ON THE ROUTE YOU MANDATED,
       and the lever was that route rather than a choice you had to make.** [3203, 3278] tracked
       img/s extrapolated to sixteen GPUs from three runs at the design load, host [4.9, 5.2] of
       48 cores. The question this line carried -- **OPERATOR: WHICH LEVER?** -- is closed by
@@ -5271,7 +5280,44 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       (3) the C++ plane still has no `mtmc`, so "decode -> mtmc track" cannot be measured end
       to end until PR 3 lands (the barrier half is built and green).
 
-- [!] **V165-WHOLE-PIPELINE-4500 · THE RE-RUN HAPPENED AND 4 500 IS NOT MET: [3203, 3278],
+- [~] MERGED-BRANCHES-ARE-NOT-DELETED · **The workflow's merge does not fire `delete_branch_on_merge`,
+      so the merge step deletes the head branch itself (V183).** The setting is on and works for a
+      merge a person makes; `pr-pipeline.yml` merges with `GITHUB_TOKEN`, and GitHub does not run
+      the setting for that token -- 257 of 275 workflow-merged branches were still on the remote.
+      Done when the step deletes the branch, skips a fork's and one an open PR is stacked on, never
+      fails the job over it, and a test runs the step's own script against a stub `gh`.
+- [!] TWO-UNMERGED-BRANCHES-WITH-NO-PR · **OPERATOR: keep or delete `feat/device-lanes-v2` and
+      `refactor/one-logger`?** Found 28 Sep while clearing the remote on request (V183): 258 of
+      261 branches were stale -- 256 with a merged PR, `feat/cpp-data-plane` (PR #8 closed, so
+      GitHub keeps its commits) and a superseded submodule bump -- and are deleted, with a
+      name -> sha map kept so any of them can be pushed back. These two are the exception: both
+      CONFLICT with `main` (8 and 13 files on a trial merge) and have NO PR, so deleting them
+      loses the commits for good. That is the owner's call, not a tidy-up.
+- [~] THREE-X-BASELINE-ON-FOUR-GPUS · **THE TARGET, AND IT IS NOT MET: >= 2 816 img/s (~3 000)
+      of the whole pipeline on FOUR GPUs; today [848.1, 939.2] tracked, about 1.0x (V182).**
+      Scope and route are the operator's standing rules: decode -> ... -> mtmc track (V165),
+      gstreamer RTSP from an offline video (V167), benchmark then profile (V168). Baseline:
+      `sim_pipeline_v2` 938.6 img/s SATURATED at matched fp16 on the same four cards.
+      WHERE IT STANDS, all measured 15-16 Sep, four A5000s, `--source nvdec`, 50 cameras:
+        full chain     accepted [884.5, 971.1]  tracked [848.1, 939.2]   (n=8, 2 000 offered)
+        detect only    accepted [1 805.2, 1 873.6]                      (n=3, 2 000 offered)
+        chain cost     [1.90, 2.12]x detect-only, paired in one sitting
+        rows a frame   11.74: person_embedder 7.80, segmenter 1.47, ship_embedder 1.47, det 1.00
+        ingest         50 cameras READ at most ~1 850-2 900 img/s over RTSP -> NVDEC
+      So the 3x has to come from THREE places at once, and none is optional: ingest must read
+      >= 3 000 (it reads ~2 200); detect alone must clear 3 000 (it clears ~1 850); and the rest
+      of the chain must stop costing 2x. The scheduling knobs are spent -- workers, batch
+      window and detector instances all overlap on throughput at saturation (#287/#289/#290).
+      THE LOOP, in order: (1) stage ablation at saturation, which stage buys what in THROUGHPUT;
+      (2) the ingest ceiling alone, a chain that decodes and drops; (3) the levers by expected
+      size -- detector precision, how often each person is embedded (7.80 rows a frame is the
+      largest single cost), segmenter resolution, instances per model. A lever that changes
+      what the pipeline OUTPUTS -- precision, cadence, resolution -- has its output delta
+      measured beside its throughput and says so; nothing changes quality silently.
+- [-] **V165-WHOLE-PIPELINE-4500 · DROPPED BY THE OPERATOR: 4 500 was lowered to 3 000 by V167
+      and restated as >= 3x the baseline by V182.** Its scope -- decode -> ... -> mtmc track --
+      carries over to `THREE-X-BASELINE-ON-FOUR-GPUS`, and so does everything measured below.
+      PREVIOUS: **THE RE-RUN HAPPENED AND 4 500 IS NOT MET: [3203, 3278],
       SHORT BY 27-29% (15 Sep). THIS IS THE ANSWER THIS LINE WAS WAITING FOR.** The line above
       said "nothing here needs an answer until the re-run says whether the target is met", and
       it now says. Same measurement as `V167-GSTREAMER-ONLY-3000`: 50x20x40 s, `--source
@@ -6634,7 +6680,10 @@ AWAITING-OPERATOR: row 9 above, now a YES/NO rather than a schema debate -- is t
       `C2c`/`C2d` are the shipvision-side and Python-side halves and are both closed; this is
       the C++ half nobody opened.
 
-- [!] **C1 · THE RATIO EXISTS NOW, MEASURED LIKE FOR LIKE (15 Sep), AND IT IS TWO NUMBERS
+- [x] **C1 · ANSWERED 28 Sep BY V182: FRAMES, 3x, ON FOUR GPUS.** "FPS ~ 3000img/s" names the
+      metric -- frames, not model work -- and ">=3x basline" the multiple, down from 5x. The
+      work that answer implies is `THREE-X-BASELINE-ON-FOUR-GPUS`. PREVIOUS: **THE RATIO EXISTS
+      NOW, MEASURED LIKE FOR LIKE (15 Sep), AND IT IS TWO NUMBERS
       RATHER THAN ONE -- WHICH IS THE ANSWER TO "5x AGAINST WHAT?".** Both arms at **matched
       fp16**, the same four cards, the same afternoon:
         baseline `sim_pipeline_v2`   **938.6 img/s SATURATED** (det 470.8 + seg 467.9)

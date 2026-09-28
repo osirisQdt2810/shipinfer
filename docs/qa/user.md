@@ -1310,6 +1310,56 @@ After I stopped a C++ re-probe mid-build. Read as: the probe is not the work -- 
 approved and its two accepted review notes are already fixed and verified in the tree, so
 what remains is to push, not to re-derive evidence I already have.
 
+### V180 — 28 Sep. Resumed: carry on until the task is done
+
+> tiep tuc cho toi khi xong task
+
+> tiếp tục đi
+
+Two nudges on resuming after twelve days. Read as the standing instruction it has always been:
+the ledger decides when to stop, not a feeling at the end of a stretch of work.
+
+### V181 — 28 Sep. Put the unfinished todo list in a TASKS.md file
+
+> cập nhật cho tôi list todo chưa làm vào 1 file TASKS.md
+
+A readable list of what is NOT done. `.claude/TASKS.md` already holds every item, but as an
+11 000-line ledger that a test and the Stop hook both parse -- it cannot be rewritten into a
+list, and it is not one. So the answer is a root `TASKS.md` that lists only the open items, each
+pointing at its ledger ID, and the ledger stays the source of truth.
+
+### V182 — 28 Sep. Then carry on until EVERY request is done: >= 3x baseline, ~3 000 img/s
+
+> sau đó tiếp tục cho tới tới khi xong toàn bộ các yêu cầu từ trước giờ của tôi (>=3x basline
+> throughput: FPS ~ 3000img/s)
+
+**The target, restated, and it re-opens V167.** Two numbers that only agree on one reading:
+the baseline is **938.6 img/s on FOUR GPUs** (V164: "chỉ cần chạy trên 4GPU thôi"), and
+3 x 938.6 = **2 816 ≈ 3 000**. On sixteen GPUs the baseline would be ~3 750 and "3x" would be
+~11 000, which is not what "~3 000" says. So the target is **~3 000 img/s of the whole pipeline
+on the same four GPUs the baseline runs on** -- frames, not model work, which also answers C1.
+
+That makes V167's `[x]` wrong. It was closed on **[3203, 3278]**, later [3392, 3757], which are
+four-GPU readings multiplied by four. On four GPUs the chain tracks **[848.1, 939.2] img/s**:
+about 1.0x the baseline against a target of 3x. The honest status is NOT MET, a ~3x gap.
+
+"Toàn bộ các yêu cầu từ trước giờ" -- every request so far -- keeps V167's route rule (gstreamer
+RTSP from an offline video), V168's loop (benchmark, then profile) and V165's scope (decode ->
+... -> mtmc track) binding while the gap is closed.
+
+### V183 — 28 Sep. Prune the remote branches; why does auto-delete not fire?
+
+> ngoài ra, xoá bớt remote branch trên shipinfer cho tôi. Tôi vẫn chưa hiểu tại sao tôi đã setup
+> settings khi 1 PR branch được merge rồi thì remote branch sẽ xoá, nhưng mà ở đây có vẻ không
+> phải như vậy
+
+**Why:** `delete_branch_on_merge` is on and fires for a merge a person makes, but not for one
+made by the workflow's `GITHUB_TOKEN` -- which is how `pr-pipeline.yml` merges every `automerge`
+PR. Of 275 workflow merges 257 branches were still there; of 19 by hand, 1. So the merge step has
+to delete the head branch itself (its own PR). **The prune:** 258 of 261 deleted, each sha kept
+so it can be pushed back; the two left have no PR and conflict with `main`, so they are the
+operator's call.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
@@ -1491,10 +1541,12 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 | Rule | Where |
 |---|---|
 | **Commits are authored as `osirisQdt2810 <152402665+osirisQdt2810@users.noreply.github.com>`.** The repo has exactly two contributors, `osirisQdt2810` and `phucnguyen-ht`; never commit or co-author with `thanh.nguyenxuan@moreh.com.vn` (a different GitHub account, and the harness offers it) | **V177** |
+| **A merged PR's branch is deleted from the remote.** The repo setting only covers a merge a person makes, so the workflow's merge step must delete it itself -- never a fork's, nor one an open PR is stacked on | **V183** |
 | **A PR that edits `.github/workflows/**` is mine to merge**, without asking -- the review job cannot pass on one, so they were stranded. No other PR class changes | **V169** |
 | **Optimisation is a LOOP: benchmark, then PROFILE** to find where the pipeline is bottlenecked -- in that order, every time. Name the stages that run on the CPU and prove no RAM -> VRAM -> RAM -> VRAM round trip survives | **V168**, V156, ADR-004 |
 | **Benchmark ONLY over gstreamer RTSP from an offline video file** — no camera, no `replay`, no other route; if the video does not exist, create it | **V167** |
-| **The target is 3 000 FPS** for the whole pipeline (lowered from 4 500), and only that counts as achieved | **V167**, V165 |
+| **The target is >= 3x the baseline, ~3 000 img/s, on the SAME FOUR GPUs** the baseline runs on (3 x 938.6 = 2 816) -- frames of the whole pipeline, decode -> ... -> mtmc track. A sixteen-GPU extrapolation does not meet it; that is how V167 was closed wrongly | **V182**, V167, V164 |
+| **The target is 3 000 FPS** for the whole pipeline (lowered from 4 500), and only that counts as achieved -- restated and pinned to four GPUs by V182 | **V167**, V165 |
 | **The target is 4 500 img/s for the WHOLE pipeline**, `decode -> ... -> mtmc track`, absolute rather than a multiple of the baseline | **V165** |
 | **Quote the route and the modules that EXECUTED beside any img/s figure** — `replay` (host decode + an upload per frame) and `nv12` (NVDEC into VRAM, no upload) are opposite routes, and the run prints both (`chain 'x': N stage(s), not run here: ...`) | **V166** |
 | **Decide it yourself** — do not park a design call as an operator question. `[!]` is for genuinely blocked (a dead GPU, an unbuildable image, a credential), not for a judgement you can make and defend; safety confirmations still stand | **V154** |
