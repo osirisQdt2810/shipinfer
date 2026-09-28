@@ -26,6 +26,10 @@ The 28 Sep stage ablation found three things:
 - **Even at full batch the chain costs 1.43–1.49 GPU-ms a frame.** So four GPUs top out at
   2 680–2 790 frames/s with no waste at all.
 
+**Step 1 is done: ingest is not the wall.** Detect-only reads and accepts about 3 810/s of
+4 000 offered, and the RTSP generator is ruled out, since 2 or 4 servers give the same
+numbers. The 3× gap is entirely in the chain after the detector.
+
 The plan, approved 28 Sep:
 
 1. Measure the ingest ceiling at 3 200/4 000 offered.
@@ -41,11 +45,6 @@ Each step-8 lever reports its output delta; the operator allowed them on that co
 
 > V167's "3 000 is met" was a four-GPU reading multiplied by four. V182 pins the target to four
 > GPUs, so that claim is withdrawn.
-
-**`MERGED-BRANCHES-ARE-NOT-DELETED` — the merge step deletes the branch itself (V183).**
-The repo's `delete_branch_on_merge` setting fires for a merge a person makes, not for one made by
-the workflow's `GITHUB_TOKEN`, and that is how every `automerge` PR is merged — 257 of 275 such
-branches were still on the remote. They are pruned now; the fix stops them piling up again.
 
 ## 2. Needs the operator
 
