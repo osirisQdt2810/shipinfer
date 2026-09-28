@@ -161,6 +161,73 @@ The sum, about 12 + 18.5 + 26 ≈ 56 ms, is the worker-holding time measured.
 the lever. The segmenter, at 18 ms with an 8 ms batch window, is the slowest model. With dynamic
 plans a small batch is cheap, so a shorter window is the next thing to measure.
 
+### The barrier on its own threads (step 4): measured, and not merged
+
+The frame left its worker at the mtmc barrier. The worker released the frame's device halves,
+handed it over, and took the next frame. A pool of `workers` threads walked the barrier's own
+DAG.
+
+A/B, 3 200 offered (64 fps), GPUs 3,4,5,6, ABBA n=3. `main` against that branch:
+
+| barrier | tracked img/s | untracked | mtmc admitted | hold p50 |
+|---|---|---|---|---|
+| on the worker (`main`) | [1 398.1, 1 501.1] | 1.4–1.8 % | 74.1 % | 50.7–55.7 ms |
+| its own pool | [990.1, 1 461.9] | 5.9–6.5 % | 65.9–71.1 % | 94.6–122.8 ms |
+
+**No gain, and identity got worse.** The workers were freed, but the time moved into the model
+instances: a detector batch took 15.9 ms of instance time instead of 6.8 ms, at fill 4.0
+instead of 2.9. More frames of one camera were in flight at once, so more of them reached the
+tracker out of order. The branch was not merged.
+
+### Where a batch's time goes, and one CUDA graph per batch size (step 7)
+
+A 5 s Nsight Systems window of `main` at 3 200 offered, read beside the unprofiled runs, found
+the instance threads launch-bound:
+- a detector batch issues ~194 kernel launches;
+- its instance is busy 6.8 ms a batch, against ~1.8 ms of GPU work for 3 rows;
+- the GPUs run a kernel 74 % of the time.
+
+On an idle card, `trtexec` on the dynamic plans:
+
+| plan, rows | GPU ms, graph / plain | host enqueue ms, graph / plain |
+|---|---|---|
+| detector, 1 | 1.10 / 1.42 | 0.006 / 1.39 |
+| detector, 3 | 1.56 / 1.76 | 0.007 / 1.59 |
+| segmenter, 4 | 2.32 / 2.55 | 0.008 / 1.64 |
+| ReID, 11 | 1.34 / 1.41 | 0.012 / 0.62 |
+
+`TrtInstance` now captures a graph for every size the plan can run, at start-up (ADR-024).
+A/B at 3 200 offered, GPUs 3,4,5,6, ABBA n=3, `main` against the branch:
+
+| launch | tracked img/s | hold p50 | detect p50 | detector busy | mtmc admitted |
+|---|---|---|---|---|---|
+| plain enqueue | [1 468.4, 1 531.3], mean 1 498 | 51.2–53.2 ms | 12.3–12.6 ms | 91–96 % | 76.0–77.8 % |
+| **one graph a size** | **[1 590.0, 1 643.8], mean 1 620** | 45.9–48.1 ms | **9.1 ms** | 60–64 % | 76.4–78.8 % |
+
+**+8.1 %, separated.** The gap between the ranges is 58.7 img/s, against arm spreads of 53.8
+and 62.9. The counter the change acts on, host launch time, is now 23–37 µs a batch. Outputs are
+unchanged: untracked is 1.3–1.5 %, `events_incomplete` is 0, and a replay matches the plain
+enqueue to the bit. Start-up grows by 0.6–1.2 s for 80 graphs a device (2.16–2.49 s off,
+3.02–3.68 s on, in the one-binary run below), and VRAM by 100–125 MiB a device.
+
+**Confirmed on the final binary, with the switch as the only variable.** Same sitting, ABBA
+n=3, `SHIPINFER_CUDA_GRAPHS=off` against the default. The bench prints `per_device_launch_us`,
+the host time spent issuing the network:
+
+| graphs | tracked img/s | host launch per batch: det / seg / person / ship | detect p50 |
+|---|---|---|---|
+| off | [1 474.1, 1 538.7] | 5 972–6 180 / 6 703–7 064 / 1 912–2 204 / 2 368–2 505 µs | 12.2–12.7 ms |
+| **on** | **[1 625.6, 1 641.4]** | 22–31 / 24–32 / 31–33 / 36–39 µs | 8.9–9.3 ms |
+
+**Without graphs, launching a detector batch took ~6 ms**, about four times the 1.4–1.6 ms
+`trtexec` needs on an idle card. The difference is the live system: under the profiler, the
+launching threads spent most of an enqueue waiting on a lock inside the driver. The graph
+turns ~194 launches into one.
+
+**What binds now:** the segment stage at 17.3 ms, and the mtmc barrier at 21–22 ms. The
+largest single kernel in the profile is our own `mask_area_kernel`: 653 µs a segmenter batch,
+one block per crop.
+
 ### How to re-run these
 
 ```bash
@@ -177,6 +244,9 @@ SHIPINFER_BENCH_CHAIN=$PWD/topology/ship_person_cpu.yaml scripts/run_cpp_bench.s
 # the ingest ceiling: detect only, FPS 64 or 80, SHIPINFER_RTSP_SERVERS 1 or 2
 SHIPINFER_BENCH_CHAIN=$PWD/topology/detect_only.yaml SHIPINFER_BENCH_FPS=64 \
 SHIPINFER_RTSP_SERVERS=2 ...same as above... scripts/run_cpp_bench.sh ing_f64_s2_1
+
+# CUDA graphs: ONE binary, the switch as the only variable (ADR-024)
+SHIPINFER_CUDA_GRAPHS=off ...same as above, FPS 64... scripts/run_cpp_bench.sh graph_off_1
 
 # an engine alone: inside the one image, with TensorRT mounted
 SHIPINFER_GPUS=5 deploy/rootless/run.sh /tensorrt/bin/trtexec \

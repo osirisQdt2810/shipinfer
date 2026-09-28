@@ -66,6 +66,15 @@ using gpuEvent_t = hipEvent_t;
     #define gpuGetDevice hipGetDevice
     #define gpuGetDeviceCount hipGetDeviceCount
     #define gpuGetLastError hipGetLastError
+using gpuGraph_t = hipGraph_t;
+using gpuGraphExec_t = hipGraphExec_t;
+    #define gpuStreamBeginCapture hipStreamBeginCapture
+    #define gpuStreamEndCapture hipStreamEndCapture
+    #define gpuStreamCaptureModeThreadLocal hipStreamCaptureModeThreadLocal
+    #define gpuGraphInstantiateWithFlags hipGraphInstantiateWithFlags
+    #define gpuGraphLaunch hipGraphLaunch
+    #define gpuGraphDestroy hipGraphDestroy
+    #define gpuGraphExecDestroy hipGraphExecDestroy
 #else
     #include <cuda_runtime.h>
 
@@ -108,6 +117,15 @@ using gpuEvent_t = cudaEvent_t;
     #define gpuGetDevice cudaGetDevice
     #define gpuGetDeviceCount cudaGetDeviceCount
     #define gpuGetLastError cudaGetLastError
+using gpuGraph_t = cudaGraph_t;
+using gpuGraphExec_t = cudaGraphExec_t;
+    #define gpuStreamBeginCapture cudaStreamBeginCapture
+    #define gpuStreamEndCapture cudaStreamEndCapture
+    #define gpuStreamCaptureModeThreadLocal cudaStreamCaptureModeThreadLocal
+    #define gpuGraphInstantiateWithFlags cudaGraphInstantiateWithFlags
+    #define gpuGraphLaunch cudaGraphLaunch
+    #define gpuGraphDestroy cudaGraphDestroy
+    #define gpuGraphExecDestroy cudaGraphExecDestroy
 #endif
 
 namespace shipinfer {

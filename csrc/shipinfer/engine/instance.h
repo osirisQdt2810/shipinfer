@@ -97,6 +97,10 @@ namespace shipinfer {
         PutStatus enqueue(WorkItem&& item);
 
         InstanceStats stats() const;
+        // The engine's own counters (`Engine::counters`), read after the run.
+        std::vector<std::pair<std::string, double>> engine_counters() const {
+            return engine_->counters();
+        }
         int max_batch() const { return engine_->max_batch(); }
 
       private:

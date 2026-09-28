@@ -3,6 +3,7 @@
 #include <NvInferPlugin.h>
 
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <numeric>
@@ -186,7 +187,9 @@ namespace shipinfer {
         // SIGSEGV. The throw that matters is `DeviceBuffer`'s: on a shared box a neighbour's
         // job fills the card, and "device N is full" must stay an error a caller can read.
         try {
-            GPU_CHECK(gpuStreamCreate(&stream_));
+            // NON-BLOCKING, so no legacy-stream call on another thread can join this stream --
+            // which would invalidate a graph capture in progress on it.
+            GPU_CHECK(gpuStreamCreateWithFlags(&stream_, gpuStreamNonBlocking));
             if (!engine_->is_static()) {
                 if (profile < 0 || profile >= engine_->profiles()) {
                     throw BackendError(engine_->path() + " has " +
@@ -241,6 +244,10 @@ namespace shipinfer {
         // is synchronised before anything is freed, because a free racing an in-flight kernel
         // is a crash somewhere else entirely.
         if (stream_ != nullptr) gpuStreamSynchronize(stream_);
+        for (gpuGraphExec_t& graph : graphs_) {
+            if (graph != nullptr) gpuGraphExecDestroy(graph);
+            graph = nullptr;
+        }
         if (context_ != nullptr) delete context_;
         if (stream_ != nullptr) gpuStreamDestroy(stream_);
         // NULLED, not just freed. Not because this can run twice today -- a constructor that
@@ -309,22 +316,16 @@ namespace shipinfer {
         // No `gpuSetDevice`: the caller runs on a thread bound to this instance's device for
         // life (ADR-002) and the pool lease is device-affine; binding again per inference was
         // redundant against both.
-
-        for (const auto& spec : engine_->inputs()) {
-            nvinfer1::Dims dims{};
-            dims.nbDims = static_cast<int>(spec.dims.size()) + 1;
-            dims.d[0] = rows;
-            for (size_t d = 0; d < spec.dims.size(); ++d) {
-                dims.d[d + 1] = static_cast<int>(spec.dims[d]);
-            }
-            if (!context_->setInputShape(spec.name.c_str(), dims)) {
-                throw BackendError("setInputShape failed for " + spec.name + " at " +
-                                   std::to_string(rows) +
-                                   " row(s) — a static plan refuses any "
-                                   "batch but its own");
-            }
+        const auto issued = std::chrono::steady_clock::now();
+        if (!replay(rows)) {
+            set_input_shapes(rows);
+            if (!context_->enqueueV3(stream_)) throw BackendError("enqueueV3 failed");
         }
-        if (!context_->enqueueV3(stream_)) throw BackendError("enqueueV3 failed");
+        launch_ns_.fetch_add(
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                      std::chrono::steady_clock::now() - issued)
+                                      .count()),
+            std::memory_order_relaxed);
 
         // ON THE STREAM, between the network and the copies: the fold reads what the network
         // just wrote, and one float a row comes home in place of the bank it reduced.
@@ -347,6 +348,93 @@ namespace shipinfer {
         GPU_CHECK(gpuStreamSynchronize(stream_));
         ++executed_;
         rows_ += static_cast<uint64_t>(rows);
+    }
+
+    void TrtInstance::set_input_shapes(int rows) {
+        for (const auto& spec : engine_->inputs()) {
+            nvinfer1::Dims dims{};
+            dims.nbDims = static_cast<int>(spec.dims.size()) + 1;
+            dims.d[0] = rows;
+            for (size_t d = 0; d < spec.dims.size(); ++d) {
+                dims.d[d + 1] = static_cast<int>(spec.dims[d]);
+            }
+            if (!context_->setInputShape(spec.name.c_str(), dims)) {
+                throw BackendError("setInputShape failed for " + spec.name + " at " +
+                                   std::to_string(rows) +
+                                   " row(s) — a static plan refuses any "
+                                   "batch but its own");
+            }
+        }
+    }
+
+    void TrtInstance::capture_graphs(const std::vector<int>& sizes) {
+        const auto slots = static_cast<size_t>(engine_->max_batch()) + 1;
+        graphs_.assign(slots, nullptr);
+        graph_wanted_.assign(slots, 0);
+        for (int size : sizes) {
+            if (size < 1 || size > engine_->max_batch()) {
+                throw BackendError("graph batch size " + std::to_string(size) +
+                                   " is outside [1, " + std::to_string(engine_->max_batch()) +
+                                   "] for " + engine_->path());
+            }
+            graph_wanted_[static_cast<size_t>(size)] = 1;
+        }
+    }
+
+    bool TrtInstance::replay(int rows) {
+        const auto size = static_cast<size_t>(rows);
+        if (size >= graphs_.size() || graphs_[size] == nullptr) return false;
+        GPU_CHECK(gpuGraphLaunch(graphs_[size], stream_));
+        graph_replays_.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
+    void TrtInstance::prepare_graphs() {
+        // Three tries a size, then that size runs uncaptured: a plan that cannot be captured
+        // at a size will not start to on the fourth.
+        constexpr int kAttempts = 3;
+        bool zeroed = false;
+        for (size_t size = 1; size < graph_wanted_.size(); ++size) {
+            if (graph_wanted_[size] == 0) continue;
+            if (!zeroed) {
+                // The warm-up runs the network on whatever the binding holds; zeros are an
+                // image, and uninitialised memory can be a NaN that warns on every layer.
+                for (DeviceBuffer& input : input_buffers_)
+                    GPU_CHECK(gpuMemsetAsync(input.get(), 0, input.bytes(), stream_));
+                zeroed = true;
+            }
+            for (int attempt = 0; attempt < kAttempts; ++attempt) {
+                // An enqueue at the shape first: TensorRT settles a new shape on its first
+                // enqueue, and a capture of that call would record the settling too.
+                set_input_shapes(static_cast<int>(size));
+                if (!context_->enqueueV3(stream_)) throw BackendError("enqueueV3 failed");
+                if (capture(static_cast<int>(size))) break;
+            }
+        }
+        if (zeroed) GPU_CHECK(gpuStreamSynchronize(stream_));
+    }
+
+    bool TrtInstance::capture(int rows) {
+        gpuGraph_t graph = nullptr;
+        gpuGraphExec_t exec = nullptr;
+        // THREAD-LOCAL: the global mode refuses other threads' unsafe calls while it records.
+        bool ok = gpuStreamBeginCapture(stream_, gpuStreamCaptureModeThreadLocal) == gpuSuccess;
+        if (ok) {
+            const bool enqueued = context_->enqueueV3(stream_);
+            // Ended whatever the enqueue said: a stream left capturing refuses all later work.
+            ok = gpuStreamEndCapture(stream_, &graph) == gpuSuccess && enqueued &&
+                 graph != nullptr;
+        }
+        if (ok) ok = gpuGraphInstantiateWithFlags(&exec, graph, 0) == gpuSuccess;
+        if (graph != nullptr) gpuGraphDestroy(graph);
+        if (!ok) {
+            (void)gpuGetLastError();  // only this graph failed; the warm-up before it ran
+            graph_failures_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        graphs_[static_cast<size_t>(rows)] = exec;
+        graph_captures_.fetch_add(1, std::memory_order_relaxed);
+        return true;
     }
 
 }  // namespace shipinfer

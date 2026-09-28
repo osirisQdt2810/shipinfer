@@ -5316,7 +5316,7 @@ C1's half of the old line is answered by V182: the metric is FRAMES and the mult
       CONFLICT with `main` (8 and 13 files on a trial merge) and have NO PR, so deleting them
       loses the commits for good. That is the owner's call, not a tidy-up.
 - [~] THREE-X-BASELINE-ON-FOUR-GPUS · **THE TARGET, AND IT IS NOT MET: >= 2 816 img/s (~3 000)
-      of the whole pipeline on FOUR GPUs; today [848.1, 939.2] tracked, about 1.0x (V182).**
+      of the whole pipeline on FOUR GPUs; today [1 590.0, 1 643.8] tracked, ~1.7x (V182).**
       Scope and route are the operator's standing rules: decode -> ... -> mtmc track (V165),
       gstreamer RTSP from an offline video (V167), benchmark then profile (V168). Baseline:
       `sim_pipeline_v2` 938.6 img/s SATURATED at matched fp16 on the same four cards.
@@ -5372,6 +5372,22 @@ C1's half of the old line is answered by V182: the metric is FRAMES and the mult
       The new `stage_us_*` percentiles say where a frame's ~56 ms goes: detect 12, the three
       object models ~18.5 (the segmenter's 8 ms window the slowest), mtmc barrier ~26 (p95
       80). So step (4) is now the largest lever, and the batch windows (step 6) the cheapest.
+      28 SEP, PLAN STEP (4) MEASURED AND NOT MERGED -- the barrier on its own pool of threads,
+      the worker handing the frame over: tracked [990.1, 1 461.9] against main's [1 398.1,
+      1 501.1] at 3 200 offered, untracked 1.5 -> 6 %, admitted 74 -> 66-71 %. The freed
+      workers moved the wait into the model instances (a detector batch 6.8 -> 15.9 ms), so the
+      barrier was not what bound. `benchmarks/RESULTS.md` has the table.
+      28 SEP, PLAN STEP (7) DONE ON THE C++ PLANE -- one CUDA graph per batch size, captured at
+      start-up (ADR-024), after a profile found the instance threads launch-bound (~194
+      launches a detector batch). ABBA n=3, 3 200 offered: tracked [1 468.4, 1 531.3] ->
+      [1 590.0, 1 643.8], +8.1 %, separated; detect p50 12.5 -> 9.1 ms. What binds now: the
+      segment stage at 17.3 ms -- its `mask_area_kernel` is 653 us a batch on one block a crop
+      -- and the barrier at 21-22 ms. Step (6), the windows, is next, at this operating point.
+- [ ] TRT-GRAPHS-PYTHON-TWIN · **The Python plane's TensorRT graphs are still off by default**
+      (ADR-013), while the C++ plane captures every size at start-up (ADR-024). Owed: measure
+      the Python capture now that `_maybe_replay`'s `run` only enqueues. If it captures cleanly,
+      make its capture set every size a dynamic plan can run, as the C++ plane does; the
+      derived `{1, preferred, max}` misses most of what a window assembles. Then default it on.
 - [ ] OBJECT-MODELS-IN-FLIGHT-PYTHON-TWIN · **The Python plane still walks a frame's object
       models one at a time** (`pipeline/graph/graph.py` `execute`, `runners/walk.py`
       `ChainWalk.run`). The C++ plane submits segment, embed_person and embed_ship before

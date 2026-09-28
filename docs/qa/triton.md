@@ -116,6 +116,10 @@ experiment and a config file silently overruling them would make the experiment 
 Unset, every model keeps its own setting. An unparseable value raises rather than falling
 back, so a typo cannot quietly leave graphs on.
 
+The C++ plane reads the same variable with the same spelling (`env_on_off` in
+`csrc/shipinfer/core/env.h`), but its default is on. It captures every size a plan can run
+before the instance reports ready, which is Triton's own load-time capture (ADR-024).
+
 It is read in `engine/model.py`, not in `core/settings`: the layering rule forbids `core`
 from importing `shipinfer.envs`, and rightly — a settings object whose meaning changes with
 the environment cannot be reasoned about from the config file alone. `_graphs_enabled()` is

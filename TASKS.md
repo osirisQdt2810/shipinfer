@@ -15,7 +15,8 @@ The operator's target (V182): **≥ 3× the baseline, ~3 000 img/s**, for the wh
 | baseline `sim_pipeline_v2` (fp16, saturated) | 938.6 | 1.0× |
 | full chain, 28 Sep, static plans (tracked, ABBA n=2) | [1 061, 1 120] | 1.13–1.19× |
 | full chain, dynamic plans (tracked, ABBA n=3) | [1 213.8, 1 299.3] | 1.29–1.38× |
-| **+ object models in flight together** (tracked, ABBA n=3) | **[1 347.4, 1 406.9]** | **1.44–1.50×** |
+| + object models in flight together (tracked, ABBA n=3) | [1 347.4, 1 406.9] | 1.44–1.50× |
+| **+ one CUDA graph per batch size** (tracked, 3 200 offered, ABBA n=3) | **[1 590.0, 1 643.8]** | **1.69–1.75×** |
 | detect only, 28 Sep (offer-bound) | [1 909, 1 922] | ≥ 2.0× |
 | **target** | **≥ 2 816** | **3.0×** |
 
@@ -36,6 +37,15 @@ numbers. The 3× gap is entirely in the chain after the detector.
 static's [1 067.5, 1 116.9], a gain of +14.8 %. GPU SM use fell from 88–91 % to 62–66 %,
 so the GPU is no longer the limit. What binds now is how long each frame holds its worker.
 
+**Steps 5 and 7 are done on the C++ plane, and step 4 was measured and dropped.**
+- Step 5: running the object models together gave +5.9 %.
+- Step 7: one CUDA graph per batch size, captured at start-up, gave +8.1 %. A profile had
+  found the model threads spending their time launching ~194 kernels a batch.
+- Step 4: moving the mtmc barrier onto its own threads gained nothing. The wait moved into the
+  models, and identity got worse (untracked 1.5 → 6 %).
+
+What binds now is the segment stage (17 ms) and the barrier (21–22 ms).
+
 The plan, approved 28 Sep:
 
 1. Measure the ingest ceiling at 3 200/4 000 offered.
@@ -54,6 +64,10 @@ Each step-8 lever reports its output delta; the operator allowed them on that co
 
 **`OBJECT-MODELS-IN-FLIGHT-PYTHON-TWIN`** — the Python plane still walks a frame's object
 models one at a time; the C++ plane now overlaps them. The two-plane rule makes this owed.
+
+**`TRT-GRAPHS-PYTHON-TWIN`** — the Python plane's TensorRT graphs are still off by default
+(ADR-013), while the C++ plane captures every size at start-up (ADR-024). Owed: measure the
+Python capture, widen its capture set to every size, then default it on.
 
 ## 2. Needs the operator
 
