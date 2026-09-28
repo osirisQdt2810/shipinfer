@@ -140,8 +140,8 @@ class TensorRTBackend(ModelBackend):
         capacity with nothing recording the disagreement. The scheduler assembles batches
         against the *config*, so the config is what the engine has to be able to satisfy.
 
-        A dynamic axis is accepted: an optimisation profile decides its extent at run time,
-        and refusing it here would refuse every dynamic-shape engine.
+        A dynamic axis is held to its optimisation profile's max instead, which is the extent
+        the engine will actually accept at run time.
         """
         assert self._loaded is not None
         declared = self.context.config.max_batch_size
@@ -152,7 +152,9 @@ class TensorRTBackend(ModelBackend):
                 continue
             capacity = tensor.shape[0]
             if capacity in (DYNAMIC, -1):
-                continue
+                if tensor.profile_max_batch is None:
+                    continue  # an output: its batch follows the inputs'
+                capacity = tensor.profile_max_batch
             if capacity < declared:
                 raise ConfigurationError(
                     f"{self.context.instance_name}: config promises batches of up to "

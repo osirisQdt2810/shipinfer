@@ -66,6 +66,9 @@ namespace shipinfer {
         // a profile. Read off the plan rather than assumed, so a dynamic plan keeps the batch
         // window's whole point — running the rows it was given — instead of a padded maximum.
         bool is_static() const { return static_batch_; }
+        // TensorRT's rule for a dynamic plan: each context in concurrent use needs its own
+        // optimisation profile, so this is how many instances one engine can carry at once.
+        int profiles() const { return engine_->getNbOptimizationProfiles(); }
         const std::vector<TensorSpec>& inputs() const { return inputs_; }
         const std::vector<TensorSpec>& outputs() const { return outputs_; }
         const std::string& path() const { return path_; }
@@ -90,7 +93,10 @@ namespace shipinfer {
     // binding invalidates anything that captured its address.
     class TrtInstance {
       public:
-        TrtInstance(std::shared_ptr<TrtEngine> engine, int device);
+        // `profile` selects this context's optimisation profile on a dynamic plan -- a
+        // device's instances share one engine, so each must hold a different one. A static
+        // plan has only profile 0, which every context may share.
+        TrtInstance(std::shared_ptr<TrtEngine> engine, int device, int profile = 0);
         ~TrtInstance();
         TrtInstance(const TrtInstance&) = delete;
         TrtInstance& operator=(const TrtInstance&) = delete;

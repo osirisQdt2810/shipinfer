@@ -17,6 +17,7 @@ with the precision printed, is what makes that checkable.
     python scripts/build_engines.py --fp16          # half precision
     python scripts/build_engines.py --int8          # INT8, calibrated on the bench's frames
     python scripts/build_engines.py --only ship_detector
+    python scripts/build_engines.py --fp16 --dynamic   # batch 1..max, from models/*_dyn.onnx
     python scripts/build_engines.py --check         # report, build nothing
 
 An engine is valid only for the GPU architecture and TensorRT version it was built on, so
@@ -108,27 +109,59 @@ TARGETS = (
 PRECISIONS = ("fp32", "fp16", "int8")
 
 
-def _engine_path(target: Target, precision: str) -> Path:
-    """The flat engine path for this precision.
+def _engine_path(target: Target, precision: str, dynamic: bool = False) -> Path:
+    """The flat engine path for this precision, `_dyn` for a dynamic-batch plan.
 
     The default names carry `_fp32` because that is what they are; asking for another
     precision and silently overwriting an fp32 plan of the same name is how two runs end up
-    comparing different engines while claiming to compare architectures.
+    comparing different engines while claiming to compare architectures. A dynamic plan gets
+    its own name for the same reason: the baseline keeps loading the static one.
     """
-    if precision == "fp32":
-        return target.engine
-    return target.engine.with_name(target.engine.name.replace("_fp32", f"_{precision}"))
+    name = target.engine.name.replace("_fp32", f"_{precision}")
+    return target.engine.with_name(name.replace(".engine", "_dyn.engine") if dynamic else name)
 
 
-def report(precision: str) -> int:
+def _onnx_path(target: Target, dynamic: bool) -> Path:
+    """`models/<stem>_dyn.onnx` for a dynamic build: `scripts/export_onnx.py` writes it."""
+    return target.onnx.with_name(f"{target.onnx.stem}_dyn.onnx") if dynamic else target.onnx
+
+
+def _profile_plan(target: Target) -> tuple[int, int]:
+    """`(max_batch, profiles)` for a dynamic plan, read from the configs the scheduler obeys.
+
+    TensorRT requires a separate optimisation profile for each context in concurrent use on a
+    dynamic plan, and a device's instances share one engine -- so the count is the most
+    instances any model this plan serves runs on a device (`instance_groups` counts are per
+    device, as in Triton), and the batch the largest `max_batch_size` among them.
+    """
+    from shipinfer.repository import ModelRepository
+
+    configs = [
+        ModelRepository.load(v.parents[1]).entry(v.parent.name).config
+        for v in target.version_dirs
+    ]
+    max_batch = max(c.max_batch_size for c in configs)
+    return max_batch, max(sum(g.count for g in c.instance_groups) for c in configs)
+
+
+def _profiles(target: Target) -> list[Any]:
+    """One identical profile per instance a device runs, batch 1..`max_batch_size`."""
+    from shipvision.detection.engine_build import OptimisationProfile
+
+    max_batch, count = _profile_plan(target)
+    return [OptimisationProfile.for_batch(input_hw=target.fed, max_batch=max_batch)] * count
+
+
+def report(precision: str, dynamic: bool = False) -> int:
     print(f"{'model':<16} {'onnx':<10} {'engine':<10} path")
     print("-" * 72)
     missing = 0
     for target in TARGETS:
-        engine = _engine_path(target, precision)
-        onnx_state = "present" if target.onnx.is_file() else "MISSING"
+        engine = _engine_path(target, precision, dynamic)
+        onnx = _onnx_path(target, dynamic)
+        onnx_state = "present" if onnx.is_file() else "MISSING"
         engine_state = "present" if engine.is_file() else "absent"
-        missing += not target.onnx.is_file()
+        missing += not onnx.is_file()
         print(f"{target.name:<16} {onnx_state:<10} {engine_state:<10} {engine}")
     if missing:
         print(
@@ -268,7 +301,9 @@ def _feeder(target: Target) -> Any:
     return feeder
 
 
-def build(targets: tuple[Target, ...], *, precision: str, force: bool) -> int:
+def build(
+    targets: tuple[Target, ...], *, precision: str, force: bool, dynamic: bool = False
+) -> int:
     try:
         import tensorrt as trt  # noqa: F401
     except ImportError:
@@ -286,9 +321,11 @@ def build(targets: tuple[Target, ...], *, precision: str, force: bool) -> int:
     timing_cache = MODELS / "timing.cache"
     failures = 0
     for target in targets:
-        engine = _engine_path(target, precision)
-        if not target.onnx.is_file():
-            print(f"{target.name}: no ONNX at {target.onnx}", file=sys.stderr)
+        engine = _engine_path(target, precision, dynamic)
+        onnx = _onnx_path(target, dynamic)
+        if not onnx.is_file():
+            hint = " (run scripts/export_onnx.py first)" if dynamic else ""
+            print(f"{target.name}: no ONNX at {onnx}{hint}", file=sys.stderr)
             failures += 1
             continue
         if engine.is_file() and not force:
@@ -305,8 +342,9 @@ def build(targets: tuple[Target, ...], *, precision: str, force: bool) -> int:
             # `fp16=False` that fallback is fp32 -- a slower engine than the fp16 one it is
             # meant to beat. Both flags is what `trtexec --int8 --fp16` does.
             build_engine(
-                target.onnx,
+                onnx,
                 engine,
+                profiles=_profiles(target) if dynamic else (),
                 fp16=precision in ("fp16", "int8"),
                 int8=precision == "int8",
                 int8_calibration=_feeder(target) if precision == "int8" else None,
@@ -400,6 +438,12 @@ def main(argv: list[str] | None = None) -> int:
         help="build INT8 plans, calibrated on the benchmark's own replay frames through the "
         "pipeline's own letterbox. Implies fp16 for the layers TensorRT declines to quantise.",
     )
+    parser.add_argument(
+        "--dynamic",
+        action="store_true",
+        help="build dynamic-batch plans (batch 1..max_batch_size, one profile per instance a "
+        "device) from models/*_dyn.onnx, so a partial batch costs only its rows",
+    )
     parser.add_argument("--force", action="store_true", help="rebuild even if present")
     parser.add_argument(
         "--check", action="store_true", help="report what exists, build nothing"
@@ -419,12 +463,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     precision = "int8" if args.int8 else ("fp16" if args.fp16 else "fp32")
+    # INT8 on a dynamic network needs a calibration profile, which this build does not set.
+    if args.dynamic and args.int8:
+        print(
+            "--dynamic --int8 is not supported: calibration has no profile here",
+            file=sys.stderr,
+        )
+        return 2
 
     if args.check:
         # Reports what exists and builds nothing, so it is inspection rather than a build --
         # allowed on the host on purpose, the way `shipinfer repo ls` and a `--version` query
         # are. The gate belongs below it, not above.
-        return report(precision)
+        return report(precision, args.dynamic)
 
     selected = TARGETS
     if args.only:
@@ -443,7 +494,7 @@ def main(argv: list[str] | None = None) -> int:
     # a host-built engine is the WRONG artefact rather than a slower one.
     containment.require_container("an engine build")
 
-    return build(selected, precision=precision, force=args.force)
+    return build(selected, precision=precision, force=args.force, dynamic=args.dynamic)
 
 
 if __name__ == "__main__":

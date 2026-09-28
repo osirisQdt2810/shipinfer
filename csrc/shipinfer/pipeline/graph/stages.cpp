@@ -560,9 +560,9 @@ namespace shipinfer {
         const DevicePayload* payload = state.payload(source_);
         if (payload == nullptr)
             throw ConfigError("stage " + name() + ": no payload named " + source_);
-        // Chunked to the engine's own batch — the plans are static, and submitting a whole
-        // frame's crops as one request is what lost every crop in a 25-person frame against a
-        // plan built at 16. One ObjectBatch, grown per chunk, attached once.
+        // Chunked to the engine's own batch, static or a dynamic plan's profile max: submitting
+        // a whole frame's crops as one request is what lost every crop in a 25-person frame
+        // against a plan built at 16. One ObjectBatch, grown per chunk, attached once.
         const size_t limit = static_cast<size_t>(std::max(1, model().max_batch()));
         ObjectBatch out;
         out.name = output_;

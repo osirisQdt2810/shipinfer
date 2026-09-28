@@ -244,6 +244,30 @@ class TestBothSidesLoadTheSameEngine:
         with pytest.raises(RuntimeError, match="measures the engines"):
             config.require_same_engines()
 
+    def test_a_dynamic_twin_is_accepted_and_never_reinstalled_over(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """`--dynamic` plans sit beside the static ones: the server may load the twin, and a
+        named precision must not quietly put the static plan back."""
+        config = replace(
+            self._config(tmp_path, b"PLAN-FP16", b"PLAN-FP16-DYN"), precision="fp16"
+        )
+        (tmp_path / "yolo26n_fp32_dyn.engine").write_bytes(b"PLAN-FP16-DYN")
+        plan = config.model_repository / "ship_detector" / "1" / "model.plan"
+
+        config.require_same_engines("shipinfer")
+
+        assert plan.read_bytes() == b"PLAN-FP16-DYN", "the dynamic plan stayed installed"
+        assert "dynamic-batch twin" in capsys.readouterr().err
+
+    def test_the_baseline_arm_does_not_accept_the_twin(self, tmp_path: Path) -> None:
+        """The baseline loads the static file, so for its pairs the twin is a different engine."""
+        config = self._config(tmp_path, b"PLAN-FP16", b"PLAN-FP16-DYN")
+        (tmp_path / "yolo26n_fp32_dyn.engine").write_bytes(b"PLAN-FP16-DYN")
+
+        with pytest.raises(RuntimeError, match="measures the engines"):
+            config.require_same_engines("baseline")
+
     def test_a_named_precision_installs_the_plan_it_names(self, tmp_path: Path) -> None:
         """`BENCH-PRECISION-SELECTS-NO-PLAN`'s other half: the flag now SELECTS.
 
@@ -553,7 +577,9 @@ class TestBothSidesLoadTheSameEngine:
         quoted = re.search(r"`(scripts/build_engines\.py[^`]*)`", str(raised.value))
         assert quoted, "the refusal has to name a command at all"
         built: list[str] = []
-        monkeypatch.setattr(build_engines, "report", lambda asked: built.append(asked) or 0)
+        monkeypatch.setattr(
+            build_engines, "report", lambda asked, _dynamic=False: built.append(asked) or 0
+        )
 
         assert build_engines.main([*quoted.group(1).split()[1:], "--check"]) == 0
         assert built == [precision], "the remedy builds the precision the message claims"

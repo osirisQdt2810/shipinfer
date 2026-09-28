@@ -84,6 +84,45 @@ Those runs predate #294 and #295 and used the binary built before them.
 The 3× therefore sits entirely in the rest of the chain and in how a worker waits. Nothing is
 missing upstream of the detector.
 
+### Dynamic-batch plans, and what padding cost (step 3)
+
+`build_engines.py --dynamic` builds each plan with batch 1 up to `max_batch_size`, and one
+identical optimisation profile per instance a device runs. TensorRT requires a profile per
+concurrent context, and a device's instances share one engine. The costs below are for one
+batch on an idle card, measured without CUDA graphs, as the plane runs them:
+
+| plan | b=1 | b=2–3 | b=4 | b=8 | b=16 |
+|---|---|---|---|---|---|
+| detector | 1.36 ms | 1.62 / 1.76 ms | 2.05 ms | 3.21 ms (static: 3.19–3.25) | — |
+| segmenter | 1.59 ms | 1.84 ms (b=2) | 2.58 ms | 4.12 ms (static: 4.08–4.18) | — |
+| ReID | 0.89 ms | — | 0.97 ms | 1.19 ms | 1.76 ms (static: 1.74–1.76) |
+
+**A full batch costs the same, and a partial batch now costs its rows.** At the full chain's
+achieved fill that is about 45 % off a detector batch and 34 % off a segmenter batch.
+
+**Parity comes before throughput** (`tests/backends/test_dynamic_plan_parity.py`, GPU tier):
+
+- A dynamic plan's rows at batch N equal its batch-1 rows, max |diff| 0.0000.
+- It keeps the same detections as the static plan, with the same kept counts (73 = 73 on eight
+  frames) and identical boxes. Scores differ by at most 0.041 at fp16.
+- An fp32 control places that gap in tactic choice rather than in the re-export. The static
+  plan from the original ONNX against the dynamic plan from the new one, both at fp32: scores
+  within 2.0e-4, boxes within 0.0015 px, classes equal.
+- ReID cosine ≥ 0.999.
+
+**The full chain, static against dynamic.** Same binary, 2 000 offered, GPUs 3,4,5,6, ABBA n=3:
+
+| plans | tracked img/s | worker-holding p50 | SM % | detector / segmenter busy % |
+|---|---|---|---|---|
+| static | [1 067.5, 1 116.9], mean 1 095 | 75.7–77.7 ms | 88–91 | 104–114 / 94–103 |
+| **dynamic** | **[1 213.8, 1 299.3], mean 1 257** | 63.6–67.6 ms | **62–66** | 77–88 / 68–75 |
+
+**+14.8 %, separated.** The 96.9 img/s gap exceeds the widest arm's 85.5.
+
+The larger change is that the devices are **no longer the wall**: about 25 points of SM came
+free. The chain is now held by how long a frame keeps its worker, which is what steps 4–6
+address. mtmc admission is unchanged at [81.8, 82.7] % against [79.8, 81.3] %.
+
 ### How to re-run these
 
 ```bash

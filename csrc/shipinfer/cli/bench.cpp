@@ -475,9 +475,21 @@ int main(int argc, char** argv) {
                                     spec.name.c_str(), device_fold->name.c_str());
                     }
                 }
+                // A dynamic plan needs a profile per concurrent context, and this device's
+                // instances all share `engine` -- refused at load, not at the first batch.
+                if (!engine->is_static() && spec.per_device > engine->profiles()) {
+                    throw ConfigError(
+                        spec.name + ": the plan has " + std::to_string(engine->profiles()) +
+                        " optimisation profile(s) and this model runs " +
+                        std::to_string(spec.per_device) +
+                        " instances a device; rebuild it with `scripts/build_engines.py "
+                        "--dynamic`, which gives one profile per instance");
+                }
                 for (int i = 0; i < spec.per_device; ++i) {
                     auto adapter = std::make_unique<TrtEngineAdapter>(
-                        std::make_unique<TrtInstance>(engine, device), device_fold);
+                        std::make_unique<TrtInstance>(engine, device,
+                                                      engine->is_static() ? 0 : i),
+                        device_fold);
                     const BatchWindow window(static_cast<size_t>(engine->max_batch()),
                                              spec.queue_delay_us);
                     instances.push_back(std::make_unique<ModelInstance>(

@@ -16,6 +16,12 @@ python -c "from ultralytics import YOLO; YOLO('models/yolo26n.pt').export(format
 deploy/rootless/bench.sh --help    # the image this needs
 python scripts/build_engines.py --check   # what is present
 python scripts/build_engines.py           # build what is not
+
+# 3. Dynamic-batch plans, so a partial batch costs only its rows. The export is CPU-only and
+#    runs on the host; the build, in the container, installs them over the static plans,
+#    which stay in models/ for the baseline:
+python scripts/export_onnx.py                                          # models/*_dyn.onnx
+deploy/rootless/run.sh python scripts/build_engines.py --fp16 --dynamic
 ```
 
 There is no `scripts/fetch_models.py`. This file used to name one, and three other places
@@ -29,6 +35,8 @@ need a network the container does not have.
 | `yolo26n.pt` | detection weights | ultralytics assets v8.4.0 |
 | `yolo26n-seg.pt` | segmentation weights | ultralytics assets v8.4.0 |
 | `yolo26n.onnx` | ONNX export, batch 8, 640x640, static | exported here |
+| `*_dyn.onnx` | the same networks with a symbolic batch | `scripts/export_onnx.py` |
+| `*_fp16_dyn.engine` | dynamic-batch plan, one profile per instance a device runs | built here |
 | `yolo26n_fp32.engine` | TensorRT plan | built here, this GPU only |
 | `yolo26n_fp16.engine` | TensorRT plan, half precision | built here, this GPU only |
 | `timing.cache` | TensorRT tactic timings | reused across builds to cut build time |
