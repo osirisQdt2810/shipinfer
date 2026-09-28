@@ -894,13 +894,18 @@ class TestBothArmsAreActuallyWiredToIt:
     RTSP = ROOT / "scripts" / "cpp_bench_over_rtsp.sh"
     RUNNER = ROOT / "scripts" / "run_cpp_bench.sh"
 
-    def test_the_rtsp_arm_accounts_for_both_of_its_servers(self) -> None:
-        text = self.RTSP.read_text(encoding="utf-8")
+    def test_the_rtsp_arm_accounts_for_every_one_of_its_servers(self, tmp_path: Path) -> None:
+        """EXECUTED since the servers became a count: a spelled `--pid` pair would pass on a
+        wrapper that charged two of six."""
+        from tests.test_rtsp_bench_wrapper import run_wrapper
 
-        assert "scripts/host_cpu.py" in text
-        assert '--pid "$person_pid" --pid "$ship_pid"' in text, (
-            "the RTSP arm must charge BOTH servers; one of them is half the load and half "
-            "the CPU this exists to discount"
+        _, _, log, _ = run_wrapper(tmp_path, cameras=12, servers="2")
+        pids = [line.rsplit(" ", 1)[1] for line in log if line.startswith("serve ")]
+        (host_cpu,) = [line.split(" ") for line in log if line.startswith("host_cpu ")]
+        assert "/work/scripts/host_cpu.py" in host_cpu
+        assert [host_cpu[i + 1] for i, w in enumerate(host_cpu) if w == "--pid"] == pids, (
+            "the RTSP arm must charge EVERY server; each is a share of the load and of the "
+            "CPU this exists to discount"
         )
 
     def test_the_replay_arm_is_wrapped_too(self) -> None:
