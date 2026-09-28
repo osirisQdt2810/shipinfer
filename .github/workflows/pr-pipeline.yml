@@ -343,6 +343,7 @@ jobs:
       actions: write
     steps:
       - name: Merge when the automerge label is present
+        id: merge
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
@@ -356,6 +357,8 @@ jobs:
           if printf '%s\n' "$labels" | grep -qx automerge; then
             gh pr merge "$PR" --repo "$REPO" --squash --match-head-commit "$HEAD_SHA"
             echo "PR #$PR merged at $HEAD_SHA."
+            # Before the dispatch, so a failed dispatch cannot keep the branch alive.
+            echo "merged=true" >> "$GITHUB_OUTPUT"
             # The squash push above is made with GITHUB_TOKEN and therefore creates no
             # workflow run on main — the C++ offline tier, the gst lane and the kernels
             # compile never ran for an auto-merged PR. workflow_dispatch is exempt from that
@@ -365,3 +368,33 @@ jobs:
           else
             echo "No automerge label — review is APPROVE but merging is left to a human."
           fi
+      - name: Delete the merged branch
+        id: delete-branch
+        # The repo's delete_branch_on_merge fires for a merge a person makes, not for one made
+        # with GITHUB_TOKEN: 257 of 275 branches merged above were left on the remote (V183).
+        # Each check keeps the branch unless deleting it is shown safe; a failed step keeps it
+        # too, and continue-on-error keeps the merge job green over it.
+        if: ${{ !cancelled() && steps.merge.outputs.merged == 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          keep() { echo "Kept branch $HEAD_REF: $1."; exit 0; }
+          # The name goes into an API path, where '#', '%' or '..' would name a different ref.
+          case "$HEAD_REF" in
+            "$DEFAULT_BRANCH" | *..* | *[!A-Za-z0-9._/-]*) keep "not a name this step deletes" ;;
+          esac
+          [ "$HEAD_REPO" = "$REPO" ] || keep "it lives in $HEAD_REPO"
+          stacked=$(gh pr list --repo "$REPO" --base "$HEAD_REF" --state open \
+                      --json number --jq '[.[].number | tostring] | join(" ")')
+          [ -z "$stacked" ] || keep "open PR(s) $stacked are based on it"
+          tip=$(gh api "repos/$REPO/git/ref/heads/$HEAD_REF" --jq .object.sha)
+          [ "$tip" = "$HEAD_SHA" ] || keep "it moved to $tip after the merge"
+          gh api -X DELETE "repos/$REPO/git/refs/heads/$HEAD_REF" --silent
+          echo "Deleted branch $HEAD_REF."
