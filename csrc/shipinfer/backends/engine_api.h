@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "shipinfer/backends/tensor_shape.h"
@@ -61,7 +62,13 @@ namespace shipinfer {
                                 Device src_device) = 0;
         // Run `rows` rows. Returns when every `output()` is readable on the host.
         virtual void execute(int rows) = 0;
+        // Once, on the instance's own thread, before it reports ready: work that must finish
+        // before traffic arrives, such as capturing CUDA graphs. Nothing by default.
+        virtual void prepare() {}
         virtual const float* output(size_t index = 0) const = 0;
+        // The backend's own counters as `{name, value}`, for a report to sum per device.
+        // Empty for a backend with nothing of its own to count.
+        virtual std::vector<std::pair<std::string, double>> counters() const { return {}; }
     };
 
     // Every output's width and shape state the same row, checked once where the engine is

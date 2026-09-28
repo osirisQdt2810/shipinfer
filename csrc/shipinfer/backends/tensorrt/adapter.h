@@ -40,7 +40,9 @@ namespace shipinfer {
         void write_rows(size_t row_offset, const float* src, size_t rows,
                         Device src_device) override;
         void execute(int rows) override;
+        void prepare() override { instance_->prepare_graphs(); }
         const float* output(size_t index = 0) const override;
+        std::vector<std::pair<std::string, double>> counters() const override;
 
         // doc: long why keeping an output means hiding it, and what that is not
         // Stop copying one output home, and stop ADVERTISING it. The two go together: a host

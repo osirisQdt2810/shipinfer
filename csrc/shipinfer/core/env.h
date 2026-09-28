@@ -14,6 +14,8 @@
 #include <string>
 #include <string_view>
 
+#include "shipinfer/core/types.h"
+
 namespace shipinfer {
 
     /// Whether ``name`` asks for something: set, non-empty, and not ``0``.
@@ -31,5 +33,20 @@ namespace shipinfer {
     inline bool env_flag_unless_refused(std::string_view name) {
         const char* value = std::getenv(std::string(name).c_str());
         return value == nullptr || *value == '\0' || std::string_view(value) != "0";
+    }
+
+    /// A switch spelled ``on``/``off``, read as ``envs.py`` reads one: trimmed, and unset or
+    /// blank is ``fallback``. Anything else throws ``ConfigError`` naming the variable, so a
+    /// typo cannot pick a side.
+    inline bool env_on_off(std::string_view name, bool fallback) {
+        const char* value = std::getenv(std::string(name).c_str());
+        std::string_view spelled = value == nullptr ? std::string_view() : value;
+        const size_t first = spelled.find_first_not_of(" \t\n\r");
+        if (first == std::string_view::npos) return fallback;
+        spelled = spelled.substr(first, spelled.find_last_not_of(" \t\n\r") - first + 1);
+        if (spelled == "on") return true;
+        if (spelled == "off") return false;
+        throw ConfigError(std::string(name) + " is '" + std::string(spelled) +
+                          "'; it takes on or off");
     }
 }  // namespace shipinfer

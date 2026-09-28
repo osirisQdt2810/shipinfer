@@ -481,6 +481,65 @@ namespace {
         instance.stop();
     }
 
+    // Records where and when `prepare` ran, and can be told to take its time or to throw.
+    class PreparingEngine : public IdentityEngine {
+      public:
+        PreparingEngine(std::chrono::milliseconds takes, bool throws)
+            : IdentityEngine(Device::cuda(0), 4, 1), takes_(takes), throws_(throws) {}
+        void prepare() override {
+            ++prepares;
+            prepared_on = std::this_thread::get_id();
+            executes_before_prepare = executes.load();
+            std::this_thread::sleep_for(takes_);
+            if (throws_) throw BackendError("injected prepare failure");
+        }
+        std::vector<std::pair<std::string, double>> counters() const override {
+            return {{"prepares", static_cast<double>(prepares.load())}};
+        }
+
+        std::atomic<int> prepares{0};
+        std::atomic<int> executes_before_prepare{-1};
+        std::thread::id prepared_on;
+
+      private:
+        std::chrono::milliseconds takes_;
+        bool throws_;
+    };
+
+    void test_prepare_runs_once_on_the_instance_thread_before_it_is_ready() {
+        // What a graph capture needs: its own thread, and no traffic until it is done.
+        auto owned = std::make_unique<PreparingEngine>(200ms, false);
+        PreparingEngine* engine = owned.get();
+        ModelInstance instance("m:0", std::move(owned), BatchWindow(4, 0), 16);
+        instance.start();
+        check(!instance.wait_ready(20ms), "not ready while prepare is still running");
+        check(instance.wait_ready(2s), "and ready once it returns");
+        std::vector<float> payload{5.f};
+        WorkItem item(a_request("cam", 1, payload, 1));
+        auto future = item.future();
+        check(instance.enqueue(std::move(item)) == PutStatus::Accepted, "accepted");
+        check(future.get().first().data == payload, "and served after prepare");
+        instance.stop();
+        check(engine->prepares.load() == 1, "prepare ran exactly once");
+        check(engine->executes_before_prepare.load() == 0, "before any batch ran");
+        check(engine->prepared_on != std::this_thread::get_id(),
+              "on the instance's own thread, not the caller's");
+        const auto counters = instance.engine_counters();
+        check(counters.size() == 1 && counters.front().first == "prepares" &&
+                  counters.front().second == 1.0,
+              "and the engine's own counters reach the instance's reader unchanged");
+    }
+
+    void test_a_prepare_that_throws_is_a_failed_start_not_a_hang() {
+        ModelInstance instance("m:0", std::make_unique<PreparingEngine>(0ms, true),
+                               BatchWindow(4, 0), 16);
+        instance.start();
+        check(!instance.wait_ready(2s), "a failed prepare is reported, not waited out");
+        check(!instance.is_ready() && instance.start_error() != nullptr,
+              "and the error is kept");
+        instance.stop();
+    }
+
     // -- the model
     // -------------------------------------------------------------------------------
 
@@ -608,6 +667,8 @@ int main() {
     test_an_engine_with_a_dynamic_row_dimension_is_refused_by_name();
     test_stop_fails_everything_queued_and_in_flight();
     test_a_bind_that_fails_is_a_failed_start_not_a_hang();
+    test_prepare_runs_once_on_the_instance_thread_before_it_is_ready();
+    test_a_prepare_that_throws_is_a_failed_start_not_a_hang();
     test_the_model_places_by_policy_and_answers();
     test_a_request_nothing_will_take_comes_back_as_a_failed_future();
     test_the_model_spills_when_the_policy_choice_is_full();
