@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <set>
@@ -79,6 +80,15 @@ namespace shipinfer {
         Model& model() const { return model_; }
 
       protected:
+        // A request in flight, with the deadline its own submission set.
+        struct Submitted {
+            std::future<InferenceResponse> future;
+            std::chrono::steady_clock::time_point deadline;
+        };
+        Submitted submit(const FrameState& state, const float* data, size_t rows,
+                         size_t row_elems, Device device,
+                         std::shared_ptr<const void> keepalive = {});
+        InferenceResponse await(Submitted& submitted, const FrameState& state);
         InferenceResponse infer(const FrameState& state, const float* data, size_t rows,
                                 size_t row_elems, Device device,
                                 std::shared_ptr<const void> keepalive = {});
@@ -232,14 +242,22 @@ namespace shipinfer {
         ObjectStage(std::string name, Model& model, std::string source, std::string output,
                     std::chrono::milliseconds timeout = std::chrono::milliseconds(5000),
                     ObjectCombine combine = {});
+        // The object models of one frame read the crop stage's payloads and nothing of each
+        // other's, so the graph submits them all before waiting on any.
+        bool overlaps() const override { return true; }
 
       protected:
         size_t do_run(FrameState& state) override;
+        void do_begin(FrameState& state) override;
+        size_t do_finish(FrameState& state) override;
 
       private:
         std::string source_;
         std::string output_;
         ObjectCombine combine_;
+        // Between `do_begin` and `do_finish`: this Dag's worker handles one frame at a time.
+        const DevicePayload* payload_ = nullptr;
+        std::vector<std::pair<size_t, Submitted>> chunks_;
     };
 
 }  // namespace shipinfer
