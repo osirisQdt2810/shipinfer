@@ -13,8 +13,8 @@
 name: ship_detector
 platform: tensorrt
 
-# The engine is built with a static batch of 8, and the backend fails at load if this
-# disagrees with the plan rather than silently truncating a batch.
+# The plan takes batches up to 8 -- static at 8, or dynamic with a profile max of 8
+# (`build_engines.py --dynamic`) -- and the backend fails at load if this disagrees with it.
 max_batch_size: 8
 
 inputs:

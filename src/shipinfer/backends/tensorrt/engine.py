@@ -45,6 +45,9 @@ class EngineIO:
     #: Full shape *including* the batch dimension, with -1 for dynamic extents.
     shape: tuple[int, ...]
     is_input: bool
+    #: A dynamic input's batch capacity: the SMALLEST optimisation-profile max, since each
+    #: context runs on one profile. None for an output or a static batch axis.
+    profile_max_batch: int | None = None
 
     def to_spec(self, strip_batch: bool) -> TensorSpec:
         """The server-facing spec.
@@ -148,12 +151,21 @@ def _introspect(trt: Any, engine: Any) -> list[EngineIO]:
         out: list[EngineIO] = []
         for i in range(engine.num_io_tensors):
             name = engine.get_tensor_name(i)
+            shape = tuple(int(d) for d in engine.get_tensor_shape(name))
+            is_input = engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT
+            most = None
+            if is_input and shape and shape[0] == DYNAMIC:
+                profiles = range(engine.num_optimization_profiles)
+                most = min(
+                    int(engine.get_tensor_profile_shape(name, p)[2][0]) for p in profiles
+                )
             out.append(
                 EngineIO(
                     name=name,
                     dtype=trt_dtype_to_datatype(engine.get_tensor_dtype(name)),
-                    shape=tuple(int(d) for d in engine.get_tensor_shape(name)),
-                    is_input=engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT,
+                    shape=shape,
+                    is_input=is_input,
+                    profile_max_batch=most,
                 )
             )
         return out

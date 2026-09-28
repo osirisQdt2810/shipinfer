@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-28 — dynamic-batch plans: a partial batch costs only its rows (TensorRT seam)
+
+Every plan was static and `adapter.cpp` padded each partial batch to it: at the full chain's
+saturation the detector filled 2.7 of 8, so ~40 % of GPU time computed padding.
+`scripts/export_onnx.py` re-exports the YOLO heads with the original recipe from their own
+metadata (only `dynamic` changes; their Reshapes baked 8) and re-dims ReID in place;
+`build_engines.py --dynamic` builds one identical profile per instance a device runs, since
+TensorRT needs a profile per concurrent context and a device's instances share one engine.
+`TrtInstance` selects its profile; `bench.cpp` refuses too few at load; the Python backend holds a
+dynamic batch to its profile max; the bench guard accepts the `_dyn` twin and never reinstalls
+over it. Parity: rows independent of batch exactly, fp32 re-export within 2e-4. ABBA n=3: tracked
+[1 067.5, 1 116.9] -> [1 213.8, 1 299.3], SM 88-91 % -> 62-66 %.
+
+---
+
 ## 2026-09-16 — a card CUDA cannot open no longer takes the whole GPU tier
 
 `_gpus.sh` has documented this assert since 1 Sep — `device=7, num_gpus=7`, because

@@ -149,6 +149,9 @@ dev = [
     # Bump it deliberately, regenerate, and commit the new stubs in the same commit.
     "grpcio-tools==1.71.2",
     "protobuf>=5.29,<6",
+    # `tests/test_export_onnx.py` builds the graphs `scripts/export_onnx.py` must refuse. In
+    # `dev` for the reason above: CI installs `.[dev,cli]`, and a skip there is invisible.
+    "onnx>=1.16",
 ]
 
 [project.scripts]

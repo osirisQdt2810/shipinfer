@@ -13,7 +13,8 @@ The operator's target (V182): **≥ 3× the baseline, ~3 000 img/s**, for the wh
 | | img/s on four A5000s | vs baseline |
 |---|---|---|
 | baseline `sim_pipeline_v2` (fp16, saturated) | 938.6 | 1.0× |
-| **full chain, 28 Sep** (tracked, ABBA n=2) | **[1 061, 1 120]** | **1.13–1.19×** |
+| full chain, 28 Sep, static plans (tracked, ABBA n=2) | [1 061, 1 120] | 1.13–1.19× |
+| **full chain, dynamic plans** (tracked, ABBA n=3) | **[1 213.8, 1 299.3]** | **1.29–1.38×** |
 | detect only, 28 Sep (offer-bound) | [1 909, 1 922] | ≥ 2.0× |
 | **target** | **≥ 2 816** | **3.0×** |
 
@@ -29,6 +30,10 @@ The 28 Sep stage ablation found three things:
 **Step 1 is done: ingest is not the wall.** Detect-only reads and accepts about 3 810/s of
 4 000 offered, and the RTSP generator is ruled out, since 2 or 4 servers give the same
 numbers. The 3× gap is entirely in the chain after the detector.
+
+**Step 3 is done: dynamic-batch plans.** The full chain tracks [1 213.8, 1 299.3] against
+static's [1 067.5, 1 116.9], a gain of +14.8 %. GPU SM use fell from 88–91 % to 62–66 %,
+so the GPU is no longer the limit. What binds now is how long each frame holds its worker.
 
 The plan, approved 28 Sep:
 
