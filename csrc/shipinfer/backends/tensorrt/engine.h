@@ -21,6 +21,7 @@
 
 #include <NvInfer.h>
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -166,6 +167,25 @@ namespace shipinfer {
         // graph's next decision is made on the host, so they come back.
         void execute(int rows);
 
+        // Replay one CUDA graph per batch size in `sizes`: one launch where the network issues
+        // ~200. Call once, before `start`; `prepare_graphs` captures them. A size outside
+        // [1, max_batch] is refused, and an empty list captures nothing.
+        void capture_graphs(const std::vector<int>& sizes);
+        // Capture every graph `capture_graphs` asked for, on the instance's own thread and
+        // BEFORE traffic: another thread's `gpuFree` during a capture invalidates it.
+        void prepare_graphs();
+        //: Host time spent issuing the network -- enqueue, capture or replay -- summed.
+        uint64_t launch_ns() const { return launch_ns_.load(std::memory_order_relaxed); }
+        uint64_t graph_replays() const {
+            return graph_replays_.load(std::memory_order_relaxed);
+        }
+        uint64_t graph_captures() const {
+            return graph_captures_.load(std::memory_order_relaxed);
+        }
+        uint64_t graph_failures() const {
+            return graph_failures_.load(std::memory_order_relaxed);
+        }
+
         // The instance's own stream. Exposed so preprocessing can be launched **on it**: a
         // kernel and the inference that consumes its output on the same stream are ordered by
         // the stream itself, and no synchronisation is needed at all. The first version
@@ -198,6 +218,11 @@ namespace shipinfer {
         // constructor threw never gets a destructor, so without this the context outlives the
         // engine its `shared_ptr` member releases on the way out.
         void teardown() noexcept;
+        void set_input_shapes(int rows);
+        // Launch the graph captured for `rows`, if there is one.
+        bool replay(int rows);
+        // Record `rows`' enqueue into a graph, after an enqueue at that shape has run.
+        bool capture(int rows);
 
         std::shared_ptr<TrtEngine> engine_;
         int device_ = 0;
@@ -217,6 +242,14 @@ namespace shipinfer {
         PinnedBuffer fold_host_;
         uint64_t executed_ = 0;
         uint64_t rows_ = 0;
+        //: Indexed by batch size. `graphs_[n]` stays null until size `n` is captured.
+        std::vector<gpuGraphExec_t> graphs_;
+        std::vector<uint8_t> graph_wanted_;
+        //: Atomic because the bench reads them from another thread at the end of a run.
+        std::atomic<uint64_t> launch_ns_{0};
+        std::atomic<uint64_t> graph_replays_{0};
+        std::atomic<uint64_t> graph_captures_{0};
+        std::atomic<uint64_t> graph_failures_{0};
     };
 
     // Process-wide, for the reason in the header comment. Exposed so a test can assert it

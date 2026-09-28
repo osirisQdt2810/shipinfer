@@ -989,3 +989,35 @@ at twelve cameras, 4% at fifty — which is all the two merged levers (#214, #23
 touch. With decode off the host the DEVICES are the wall (detector 164–174% occupied), which is
 why `EXECUTE-BLOCKS-THE-INSTANCE-THREAD` closed unbuilt: a thread blocked on a saturated device
 has nothing better to do. A machine without NVDEC still runs, on the host route, slower.
+
+---
+
+## ADR-024 — The C++ plane captures its TensorRT graphs at start-up, and does so by default
+
+**Status:** Accepted · 2026-09-28 · scopes ADR-013 to the Python plane
+
+**Context.** ADR-013 turned graphs off because the Python plane's capture cost 84 s of start-up
+and never paid it back. The C++ plane never had graphs at all. A 28 Sep profile at 3 200
+offered found its instance threads launch-bound: ~194 kernel launches per detector batch, a
+detector instance busy 6.8 ms a batch against ~1.8 ms of GPU work, and the GPU idle ~25 %.
+
+**Decision.** `TrtInstance` captures one graph per batch size the plan can run (every size up
+to `max_batch` for a dynamic plan, the plan's own batch for a static one) and replays it.
+Capture happens in `Engine::prepare`, on the instance thread, before the instance reports
+ready. It is never done under traffic: a pipeline thread's `gpuFree` invalidated 10 captures
+in 20 s when the prototype captured lazily. A size that fails three times runs uncaptured.
+`SHIPINFER_CUDA_GRAPHS=off` turns capture off on both planes, with one spelling.
+
+**Why, measured.** One sitting, ABBA n=3, 50 cameras × 64 fps, four A5000s:
+- tracked [1 468, 1 531] went to [1 590, 1 644] img/s (+8.1 %, separated);
+- detect stage p50 went from 12.3–12.6 to 9.1 ms;
+- the switch alone on one binary: [1 474, 1 539] off, [1 626, 1 641] on;
+- host launch per detector batch went from 5.97–6.18 ms to 22–31 µs;
+- start-up grew 0.6–1.2 s (2.16–2.49 s off, 3.02–3.68 s on).
+
+A replay matches the plain enqueue to the bit (`test_trt_graphs`).
+
+**Consequences.** The planes now default differently, and on purpose. The Python plane's
+default waits on its own measurement, and `TRT-GRAPHS-PYTHON-TWIN` tracks it. Each captured
+size holds a graph exec per instance: 80 a device for this repository, measured at
++100–125 MiB of VRAM a device (3 055–3 077 → 3 153–3 198 MiB mid-run).

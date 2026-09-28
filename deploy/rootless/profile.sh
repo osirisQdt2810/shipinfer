@@ -129,11 +129,14 @@ if [ -d "$LIBS" ]; then
   path_libs=":/baseline-libs"
 fi
 
+# `SHIPINFER_CUDA_GRAPHS` is passed through, never defaulted: unset, each plane keeps its own
+# default -- off on the Python plane (ADR-013), on on the C++ one (ADR-024) -- so a profile
+# measures what an ordinary run does.
 exec docker run --rm --pid=host "${GPU_DEVICES[@]}" \
   -e LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/tensorrt/lib:/usr/local/cuda-12.6/lib64${path_libs}" \
   -e PYTHONPATH=/work/src:/work \
   -e SHIPINFER_IN_CONTAINER=1 \
-  -e SHIPINFER_CUDA_GRAPHS="${SHIPINFER_CUDA_GRAPHS:-off}" \
+  -e SHIPINFER_CUDA_GRAPHS \
   -e SHIPINFER_CPP_BINARY -e SHIPINFER_CUDA_BLOCKING_SYNC -e SHIPINFER_DEVICE_FOLD \
   -e SHIPINFER_RTSP_PERSON_DATA -e SHIPINFER_RTSP_SHIP_DATA -e SHIPINFER_RTSP_PORT \
   -e SHIPINFER_RTSP_SERVERS \

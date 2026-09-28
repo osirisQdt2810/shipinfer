@@ -426,6 +426,9 @@ int main(int argc, char** argv) {
         // command that takes it out of the picture.
         const bool device_fold_wanted = std::getenv("SHIPINFER_DEVICE_FOLD") == nullptr ||
                                         env_flag("SHIPINFER_DEVICE_FOLD");
+        // `SHIPINFER_CUDA_GRAPHS`, spelled as the Python plane spells it (`envs.py`): `off`
+        // captures no graph, and unset or empty keeps this plane's default, which is on.
+        const bool graphs_wanted = env_on_off("SHIPINFER_CUDA_GRAPHS", true);
         std::map<std::string, MaskAreaSpec> folds;
         for (const PlanNode& node : plan.nodes) {
             if (!device_fold_wanted) break;
@@ -485,11 +488,24 @@ int main(int argc, char** argv) {
                         " instances a device; rebuild it with `scripts/build_engines.py "
                         "--dynamic`, which gives one profile per instance");
                 }
+                // EVERY SIZE THIS PLAN CAN RUN gets a graph, captured before traffic: a static
+                // plan runs only its own batch, padded; a dynamic one, whatever the window
+                // assembled. ADR-024 has the measurement behind the default.
+                std::vector<int> graph_sizes;
+                for (int n = engine->is_static() ? engine->max_batch() : 1;
+                     graphs_wanted && n <= engine->max_batch(); ++n)
+                    graph_sizes.push_back(n);
+                if (device == options.devices.front()) {
+                    std::printf("engine %s: %zu CUDA graph(s) an instance%s\n",
+                                spec.name.c_str(), graph_sizes.size(),
+                                graphs_wanted ? "" : " (SHIPINFER_CUDA_GRAPHS=off)");
+                }
                 for (int i = 0; i < spec.per_device; ++i) {
-                    auto adapter = std::make_unique<TrtEngineAdapter>(
-                        std::make_unique<TrtInstance>(engine, device,
-                                                      engine->is_static() ? 0 : i),
-                        device_fold);
+                    auto instance = std::make_unique<TrtInstance>(engine, device,
+                                                                  engine->is_static() ? 0 : i);
+                    instance->capture_graphs(graph_sizes);
+                    auto adapter =
+                        std::make_unique<TrtEngineAdapter>(std::move(instance), device_fold);
                     const BatchWindow window(static_cast<size_t>(engine->max_batch()),
                                              spec.queue_delay_us);
                     instances.push_back(std::make_unique<ModelInstance>(
@@ -1306,6 +1322,21 @@ int main(int argc, char** argv) {
                 std::cout << " " << label_of(options, device) << ":" << cell.str();
             }
             std::cout << "\n";
+            // The backend's own counters (`Engine::counters`), summed per device.
+            std::map<std::string, std::map<int, double>> counters;
+            for (const auto& instance : model->instances()) {
+                for (const auto& [key, value] : instance->engine_counters())
+                    counters[key][instance->device().index] += value;
+            }
+            for (const auto& [key, per_device] : counters) {
+                std::cout << "per_device_" << key << " " << name;
+                for (const auto& [device, value] : per_device) {
+                    std::ostringstream cell;
+                    cell << std::fixed << std::setprecision(0) << value;
+                    std::cout << " " << label_of(options, device) << ":" << cell.str();
+                }
+                std::cout << "\n";
+            }
         }
         std::cout << "\n";
         return 0;

@@ -146,4 +146,11 @@ namespace shipinfer {
         return instance_->output(visible_.at(index));
     }
 
+    std::vector<std::pair<std::string, double>> TrtEngineAdapter::counters() const {
+        return {{"launch_us", static_cast<double>(instance_->launch_ns()) / 1e3},
+                {"graph_replays", static_cast<double>(instance_->graph_replays())},
+                {"graph_captures", static_cast<double>(instance_->graph_captures())},
+                {"graph_failures", static_cast<double>(instance_->graph_failures())}};
+    }
+
 }  // namespace shipinfer

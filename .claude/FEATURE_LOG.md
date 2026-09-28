@@ -5,6 +5,20 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-28 — one CUDA graph per batch size, captured at start-up (C++ TensorRT seam)
+
+A profile at 3 200 offered found the instance threads launch-bound: ~194 launches per detector
+batch, 6.8 ms of instance time against ~1.8 ms of GPU work. `TrtInstance` now captures a graph
+for every size the plan can run and replays it. The capture runs in the new `Engine::prepare`,
+on the instance thread, before it reports ready, because a pipeline thread's `gpuFree`
+invalidated captures taken under traffic. Its stream is non-blocking, and the engine contract
+gains `counters()`, so the bench prints launch time and graph counts per device.
+`SHIPINFER_CUDA_GRAPHS=off` turns capture off on both planes (ADR-024). ABBA n=3 at 3 200
+offered: tracked [1 468.4, 1 531.3] -> [1 590.0, 1 643.8], and detect p50 12.5 -> 9.1 ms. A
+replay matches the plain enqueue to the bit. The Python default is a ledger item.
+
+---
+
 ## 2026-09-28 — a frame's object models are in flight together (C++ perception graph)
 
 `Dag::execute` walked every stage in turn, and each `ObjectStage` blocked on its model: a frame

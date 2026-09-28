@@ -100,6 +100,7 @@ namespace shipinfer {
     void ModelInstance::run() {
         try {
             if (bind_thread_) bind_thread_(engine_->device());
+            engine_->prepare();
         } catch (...) {
             start_error_ = std::current_exception();
             queue_.close();
