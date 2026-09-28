@@ -5358,6 +5358,15 @@ C1's half of the old line is answered by V182: the metric is FRAMES and the mult
       ~3 810/s. So the "ingest reads ~2 200 / detect clears ~1 850" above is WITHDRAWN for
       the current binary, and the 3x lives wholly in the chain after the detector and in
       how a worker waits. `benchmarks/RESULTS.md` "28 Sep" carries the tables.
+      28 SEP, PLAN STEP (3) DONE -- DYNAMIC-BATCH PLANS, +14.8 % AND THE GPU IS NO LONGER THE
+      WALL. Same binary, ABBA n=3, 2 000 offered: tracked [1 067.5, 1 116.9] static against
+      [1 213.8, 1 299.3] dynamic, separated; SM 88-91 % -> 62-66 %, holding 76 -> 65 ms.
+      Parity first: rows independent of batch exactly; same detections as static; the fp32
+      re-export within 2e-4. So what binds now is how long a frame holds its worker.
+      STEP (2) MEASURED, NOT YET BUILT: mtmc groups of 4 over the real fleet tracked
+      [1 165, 1 171] against the broken roster's 1 116 (n=1, overlapping), but cut `late`
+      frames 11 277 -> ~1 800 and raised global ids 43 -> 145-167 -- an identity fix more
+      than a throughput one; the barrier's cost is the WAIT itself, which is step (4).
 - [-] **V165-WHOLE-PIPELINE-4500 · DROPPED BY THE OPERATOR: 4 500 was lowered to 3 000 by V167
       and restated as >= 3x the baseline by V182.** Its scope -- decode -> ... -> mtmc track --
       carries over to `THREE-X-BASELINE-ON-FOUR-GPUS`, and so does everything measured below.

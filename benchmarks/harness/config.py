@@ -595,6 +595,17 @@ class BenchConfig:
                 )
             if _digest(flat) == _digest(plan):
                 continue
+            # THE DYNAMIC TWIN (`build_engines.py --dynamic`): the same weights and precision,
+            # batch 1..max, which our side may load while the baseline keeps its static plan.
+            # Accepted and said, never reinstalled over: the pair then compares serving choices.
+            twin = flat.with_name(flat.name.replace(".engine", "_dyn.engine"))
+            if system != "baseline" and twin.is_file() and _digest(twin) == _digest(plan):
+                print(
+                    f"{model}: the server loads {twin.name}, {flat.name}'s dynamic-batch "
+                    f"twin",
+                    file=sys.stderr,
+                )
+                continue
             if self.precision is not None and system != "baseline":
                 # doc: long why this collects, why it installs at all, and who is excluded
                 # COLLECTED, NOT COPIED: three of this loop's raises sit after models that

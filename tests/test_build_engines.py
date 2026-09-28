@@ -45,19 +45,23 @@ def build_engines() -> ModuleType:
     return module
 
 
-def _repository(root: Path, name: str, engine_file: str | None) -> Path:
+def _repository(
+    root: Path, name: str, engine_file: str | None, *, max_batch: int = 4, counts=()
+) -> Path:
     """A minimal one-model repository, with or without an ``engine_file`` parameter."""
     version = root / name / "1"
     version.mkdir(parents=True)
     config: dict[str, object] = {
         "name": name,
         "platform": "tensorrt",
-        "max_batch_size": 4,
+        "max_batch_size": max_batch,
         "inputs": [{"name": "images", "data_type": "FP32", "dims": [3, 640, 640]}],
         "outputs": [{"name": "output0", "data_type": "FP32", "dims": [300, 6]}],
     }
     if engine_file is not None:
         config["parameters"] = {"engine_file": engine_file}
+    if counts:
+        config["instance_groups"] = [{"kind": "KIND_AUTO", "count": c} for c in counts]
     (root / name / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
     return version
 
@@ -249,6 +253,53 @@ class TestPrecisionNamesThePlan:
         assert "ambiguous" in done.stderr
 
 
+class TestADynamicBuild:
+    """`--dynamic` builds beside the static plans and never over them: the baseline loads those."""
+
+    def test_the_dynamic_plan_and_its_onnx_are_named_apart(
+        self, build_engines: ModuleType
+    ) -> None:
+        target = build_engines.TARGETS[0]
+
+        assert (
+            build_engines._engine_path(target, "fp16", True).name == "yolo26n_fp16_dyn.engine"
+        )
+        assert build_engines._engine_path(target, "fp16").name == "yolo26n_fp16.engine"
+        assert build_engines._onnx_path(target, True).name == "yolo26n_dyn.onnx"
+        assert build_engines._onnx_path(target, False) == target.onnx
+
+    def test_one_profile_per_instance_a_device_runs(
+        self, build_engines: ModuleType, tmp_path: Path
+    ) -> None:
+        """TensorRT needs a profile per concurrent context, and a device's instances share one
+        engine -- so a plan feeding a 2-instance and a 1-instance model needs two."""
+        wide = _repository(tmp_path, "person_embedder", None, max_batch=16, counts=[2])
+        narrow = _repository(tmp_path, "ship_embedder", None, max_batch=16, counts=[1])
+        target = build_engines.Target(
+            "reid", tmp_path / "r.onnx", tmp_path / "r_fp32.engine", (wide, narrow), (256, 128)
+        )
+
+        assert build_engines._profile_plan(target) == (16, 2)
+
+    def test_the_real_repository_asks_for_what_the_bench_runs(
+        self, build_engines: ModuleType
+    ) -> None:
+        plans = {t.name: build_engines._profile_plan(t) for t in build_engines.TARGETS}
+
+        assert plans == {"ship_detector": (8, 2), "ship_segmenter": (8, 2), "reid": (16, 2)}
+
+    def test_dynamic_int8_is_refused_rather_than_built_without_a_profile(self) -> None:
+        done = subprocess.run(
+            [sys.executable, str(SCRIPT), "--dynamic", "--int8", "--check"],
+            capture_output=True,
+            text=True,
+            env=checkout_env(),
+        )
+
+        assert done.returncode == 2, done.stdout
+        assert "not supported" in done.stderr
+
+
 class TestTheCalibrationSetIsBOTHSubjects:
     """A scale chosen with no ship in it is the preprocessing trap by a different door."""
 
@@ -307,11 +358,13 @@ class TestABuildIsGatedAndInspectionIsNot:
         def gate(what: str) -> None:
             seen.append(f"gate:{what}")
 
-        def report(precision: str) -> int:
+        def report(precision: str, dynamic: bool = False) -> int:
             seen.append("report")
             return 0
 
-        def build(targets: tuple[object, ...], *, precision: str, force: bool) -> int:
+        def build(
+            targets: tuple[object, ...], *, precision: str, force: bool, dynamic: bool = False
+        ) -> int:
             seen.append("build")
             return 0
 

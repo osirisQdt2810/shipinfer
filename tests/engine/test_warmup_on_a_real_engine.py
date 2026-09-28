@@ -7,16 +7,13 @@ first execution of a declared sample against a real engine would happen in produ
 #10 said exactly that, and it is the house rule anyway: a claim about the data plane is checked on
 the data plane.
 
-The engine is `ship_detector`'s `model.plan` — yolo26n, built per machine and gitignored. It is
-**static**: probed with TensorRT directly, the input is `(8, 3, 640, 640)`, not dynamic, one
-optimisation profile. A declared sample at batch 4 nonetheless executes, because the backend
-copies `batch_size` rows into a binding sized for the plan and runs the plan as built — so
-"the engine refuses other batch sizes" is not a negative case this backend can show, and the
-first draft of this file asserted it would be. The second draft then *guessed* the opposite
-("the plan reports dynamic shapes") from the fact that batch 4 ran; that was also written from
-inference rather than measurement, and the probe corrected it. The negative case that is true
-for a real engine: a declared sample whose data file is the wrong size for the shape it claims.
-That is refused at the engine boundary, names the sample, and must arrive in seconds.
+The engine is `ship_detector`'s `model.plan` — yolo26n, built per machine and gitignored:
+static at `(8, 3, 640, 640)`, or dynamic with a profile max of 8 since `build_engines.py
+--dynamic`. A declared sample at batch 4 executes either way — a static plan runs its batch over
+the rows copied in, a dynamic one is set to the sample's own — so "the engine refuses other batch
+sizes" is not a negative case this backend can show. The negative case that is true for a real
+engine: a declared sample whose data file is the wrong size for the shape it claims. That is
+refused at the engine boundary, names the sample, and must arrive in seconds.
 """
 
 from __future__ import annotations

@@ -314,3 +314,34 @@ class TestExecuteContract:
         backend._stream = None
         with pytest.raises(InferenceError, match="not initialised"):
             backend.execute({}, 1)
+
+
+class TestADynamicBatchIsHeldToItsProfile:
+    """A dynamic axis used to pass unchecked; its capacity is the optimisation profile's max."""
+
+    @staticmethod
+    def _checked(profile_max: int) -> None:
+        from pathlib import Path
+
+        from shipinfer.backends.tensorrt.engine import EngineIO, LoadedEngine
+
+        backend = object.__new__(TensorRTBackend)
+        backend._context = _Context(graphs=None)  # config.max_batch_size is 8
+        backend._loaded = LoadedEngine(
+            engine=None,
+            io=(
+                EngineIO("images", DataType.FP32, (-1, 3, 8, 8), True, profile_max),
+                EngineIO("boxes", DataType.FP32, (-1, 4), False),
+            ),
+            path=Path("plan"),
+        )
+        backend._validate_batch_capacity()
+
+    def test_a_profile_below_the_config_s_batch_is_refused(self) -> None:
+        from shipinfer.core.errors import ConfigurationError
+
+        with pytest.raises(ConfigurationError, match="batch axis of 4"):
+            self._checked(4)
+
+    def test_a_profile_that_holds_the_batch_is_accepted(self) -> None:
+        self._checked(8)

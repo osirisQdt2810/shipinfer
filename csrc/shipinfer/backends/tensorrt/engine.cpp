@@ -2,6 +2,7 @@
 
 #include <NvInferPlugin.h>
 
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <numeric>
@@ -142,10 +143,18 @@ namespace shipinfer {
 
             int batch = shape.nbDims > 0 ? static_cast<int>(shape.d[0]) : 1;
             if (is_input && batch < 0) static_batch_ = false;
-            if (batch < 0) {
-                const auto profile_max =
-                    engine_->getProfileShape(name, 0, nvinfer1::OptProfileSelector::kMAX);
-                batch = profile_max.nbDims > 0 ? static_cast<int>(profile_max.d[0]) : 1;
+            // An input's batch is the SMALLEST profile max: each instance runs on its own
+            // profile, so the batch every one of them can take is the bound. Outputs follow
+            // their inputs and have no profile of their own to read.
+            if (batch < 0 && is_input) {
+                batch = 0;
+                for (int p = 0; p < engine_->getNbOptimizationProfiles(); ++p) {
+                    const auto profile_max =
+                        engine_->getProfileShape(name, p, nvinfer1::OptProfileSelector::kMAX);
+                    const int most =
+                        profile_max.nbDims > 0 ? static_cast<int>(profile_max.d[0]) : 1;
+                    batch = p == 0 ? most : std::min(batch, most);
+                }
             }
             if (is_input) {
                 // The engine's own batch, not the config's. A config that disagrees is a config
@@ -165,7 +174,7 @@ namespace shipinfer {
         if (runtime_ != nullptr) delete runtime_;
     }
 
-    TrtInstance::TrtInstance(std::shared_ptr<TrtEngine> engine, int device)
+    TrtInstance::TrtInstance(std::shared_ptr<TrtEngine> engine, int device, int profile)
         : engine_(std::move(engine)), device_(device) {
         GPU_CHECK(gpuSetDevice(device_));
         context_ = engine_->raw()->createExecutionContext();
@@ -178,6 +187,20 @@ namespace shipinfer {
         // job fills the card, and "device N is full" must stay an error a caller can read.
         try {
             GPU_CHECK(gpuStreamCreate(&stream_));
+            if (!engine_->is_static()) {
+                if (profile < 0 || profile >= engine_->profiles()) {
+                    throw BackendError(engine_->path() + " has " +
+                                       std::to_string(engine_->profiles()) +
+                                       " optimisation profile(s); instance asked for " +
+                                       std::to_string(profile));
+                }
+                if (!context_->setOptimizationProfileAsync(profile, stream_)) {
+                    throw BackendError("setOptimizationProfileAsync(" +
+                                       std::to_string(profile) + ") failed for " +
+                                       engine_->path());
+                }
+                GPU_CHECK(gpuStreamSynchronize(stream_));
+            }
 
             const int batch = engine_->max_batch();
             for (const auto& spec : engine_->inputs()) {
